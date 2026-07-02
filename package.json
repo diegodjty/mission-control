@@ -1,0 +1,40 @@
+{
+  "name": "mission-control",
+  "version": "0.1.0",
+  "description": "Local Electron desktop app for the grill → prd → issues → afk pipeline: a backlog Map plus embedded interactive Claude Code Panes.",
+  "private": true,
+  "main": "./out/main/index.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "rebuild": "electron-rebuild -f -w node-pty",
+    "postinstall": "electron-rebuild -f -w node-pty",
+    "type-check:node": "tsc --noEmit -p tsconfig.node.json --composite false",
+    "type-check:web": "tsc --noEmit -p tsconfig.web.json --composite false",
+    "type-check": "npm run type-check:node && npm run type-check:web",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "node-pty": "^1.0.0"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^3.7.1",
+    "@types/node": "^22.10.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
+    "electron": "^33.2.1",
+    "electron-vite": "^2.3.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11",
+    "vitest": "^2.1.8"
+  }
+}
