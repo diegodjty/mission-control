@@ -49,7 +49,12 @@ export function Pane({ run, onStatusChange, onExit, stopSignal }: PaneProps): JS
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(host);
-    fit.fit();
+    // Fitting a zero-sized host (e.g. a tile currently hidden behind a
+    // maximized sibling) throws; only reflow once the host actually has area.
+    const safeFit = (): void => {
+      if (host.clientWidth > 0 && host.clientHeight > 0) fit.fit();
+    };
+    safeFit();
 
     let sessionId: string | null = null;
     let disposed = false;
@@ -90,12 +95,19 @@ export function Pane({ run, onStatusChange, onExit, stopSignal }: PaneProps): JS
         onStatusChange?.('failed');
       });
 
-    const onWindowResize = (): void => fit.fit();
+    const onWindowResize = (): void => safeFit();
     window.addEventListener('resize', onWindowResize);
+
+    // Reflow when this Pane's own box changes size — the terminal now lives in
+    // an adaptive tiled grid (issue 12), so its tile grows/shrinks as Runs come
+    // and go and when it's maximized/restored, with no window-level resize.
+    const resizeObserver = new ResizeObserver(() => safeFit());
+    resizeObserver.observe(host);
 
     return () => {
       disposed = true;
       window.removeEventListener('resize', onWindowResize);
+      resizeObserver.disconnect();
       offData();
       offExit();
       inputDisposable.dispose();

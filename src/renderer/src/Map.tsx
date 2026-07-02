@@ -249,6 +249,17 @@ export function Map({
         </div>
       )}
 
+      {/* Empty state (issue 14): a Window driven by the Project Registry with no
+          active Project opens NOTHING — it does not silently claim the backend
+          cwd. Prompt the user to open or choose a Project via the ProjectBar. */}
+      {controlled && controlledPath == null && (
+        <div className="map__no-project">
+          No Project open. Enter a repo path in the bar above and click{' '}
+          <strong>Open here</strong>, choose one from the Project switcher, or
+          open a repo in a new Window.
+        </div>
+      )}
+
       {error && <div className="map__error">Could not read backlog: {error}</div>}
 
       {/* Live "what can I Run right now" guidance (issue 11): derived every

@@ -1,13 +1,19 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Pane } from './Pane';
 import { Map } from './Map';
 import { ProjectBar } from './ProjectBar';
 import type { Backlog, IssueStatus } from '../../shared/backlog-model';
 import type { ProjectView, RunTarget } from '../../shared/ipc-contract';
-import { deriveRunStatus, type RunStatus } from '../../shared/run-state';
+import {
+  deriveRunStatus,
+  observedIssueStatus,
+  type RunStatus,
+} from '../../shared/run-state';
 import { planDrain, type ActiveRun } from '../../shared/run-coordinator';
 import type { IsolationRun } from '../../shared/isolation-policy';
 import { mergeReadiness, type MergeRun } from '../../shared/merge-plan';
+import { gridShape } from '../../shared/pane-grid';
+import { decideWindowBootstrap } from '../../shared/window-bootstrap';
 
 /** The `NN-slug` for a Run, from its issue file name (`NN-slug.md`). */
 function slugOf(fileName: string): string {
@@ -61,24 +67,35 @@ export function App(): JSX.Element {
   const [newRepoPath, setNewRepoPath] = useState('');
   const [projectError, setProjectError] = useState<string | null>(null);
 
-  // Bootstrap this Window: pick up any repo the opener queued, else re-attach to
-  // whatever this Window already owns, else open this repo (the backend cwd).
+  // Bootstrap this Window exactly once: pick up any repo the opener queued, else
+  // re-attach to whatever this Window already owns, else open NO Project (empty
+  // state). The pure `decideWindowBootstrap` makes that choice — and never
+  // resolves to the backend cwd, so a plain new Window can't phantom-claim the
+  // app's own repo (issue 14).
+  //
+  // The ref guard makes this a true one-shot: React StrictMode double-invokes
+  // effects in dev (setup → cleanup → setup), which previously let a duplicate
+  // `listProjects` read consume the queued target and drop into the cwd
+  // fallback. The queued target is now peeked (not consumed) on the main side,
+  // and this guard ensures we act on it exactly once regardless.
+  const bootstrapped = useRef(false);
   useEffect(() => {
-    let cancelled = false;
+    if (bootstrapped.current) return;
+    bootstrapped.current = true;
     void window.mc.listProjects().then((list) => {
-      if (cancelled) return;
       setProjects(list.projects);
-      if (list.pendingOpen !== null) {
-        void openProjectHere(list.pendingOpen);
-      } else if (list.activeRepoPath !== null) {
-        setActiveRepoPath(list.activeRepoPath);
-      } else {
-        void openProjectHere('');
+      const decision = decideWindowBootstrap({
+        pendingOpen: list.pendingOpen,
+        activeRepoPath: list.activeRepoPath,
+      });
+      if (decision.kind === 'open') {
+        void openProjectHere(decision.repoPath);
+      } else if (decision.kind === 'reattach') {
+        setActiveRepoPath(decision.repoPath);
       }
+      // 'empty' → leave activeRepoPath null; the empty "open a Project" state
+      // renders. We never open the backend cwd here.
     });
-    return () => {
-      cancelled = true;
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -95,6 +112,9 @@ export function App(): JSX.Element {
   }, []);
 
   const openProjectHere = useCallback(async (repoPath: string): Promise<void> => {
+    // Only open on an explicit path; an empty path is a no-op, never a claim on
+    // the backend cwd (issue 14).
+    if (!repoPath.trim()) return;
     const res = await window.mc.openProject({ repoPath });
     setProjects(res.projects);
     setProjectError(res.error);
@@ -121,6 +141,8 @@ export function App(): JSX.Element {
   // --- Run state -----------------------------------------------------------
   const [runs, setRuns] = useState<TrackedRun[]>([]);
   const [focusedId, setFocusedId] = useState<number | null>(null);
+  // Which tile (if any) is maximized to fill the Pane area; null = tiled grid.
+  const [maximizedId, setMaximizedId] = useState<number | null>(null);
 
   // --- Drain state ---------------------------------------------------------
   const [draining, setDraining] = useState(false);
@@ -130,6 +152,24 @@ export function App(): JSX.Element {
   // --- Merge state (issue 08) ----------------------------------------------
   const [merging, setMerging] = useState(false);
   const [mergeMessage, setMergeMessage] = useState('');
+
+  // --- Isolated-Run completion (issue 13) ----------------------------------
+  // An isolated Run works in its own worktree on an `afk/NN-slug` branch and
+  // flips its issue to `done` there — a change the main-checkout backlog
+  // watcher never sees. We observe each isolated Run's issue status from its
+  // worktree/branch and key it by issue id; the pure `observedIssueStatus`
+  // selector then chooses this source for isolated Runs and the main backlog
+  // for solo Runs. Null = not observed yet (treated as not-done).
+  const [worktreeStatuses, setWorktreeStatuses] = useState<
+    Record<number, IssueStatus | null>
+  >({});
+
+  /** True when a Run works in a worktree on an `afk/` branch (not `main`). */
+  const isIsolated = useCallback(
+    (run: TrackedRun): boolean =>
+      projectPath !== null && run.target.projectPath !== projectPath,
+    [projectPath],
+  );
 
   /** The issue's current status on disk, or null if not observed yet. */
   const issueStatusOf = useCallback(
@@ -143,10 +183,51 @@ export function App(): JSX.Element {
       deriveRunStatus({
         sessionAlive: run.sessionAlive,
         stoppedByUser: run.stoppedByUser,
-        issueStatus: issueStatusOf(run.target.issueId),
+        issueStatus: observedIssueStatus({
+          isolated: isIsolated(run),
+          mainStatus: issueStatusOf(run.target.issueId),
+          worktreeStatus: worktreeStatuses[run.target.issueId] ?? null,
+        }),
       }),
-    [issueStatusOf],
+    [issueStatusOf, isIsolated, worktreeStatuses],
   );
+
+  // Poll each isolated Run's worktree/branch for its issue status. The
+  // main-checkout backlog watcher drives the Map's bird's-eye view and every
+  // solo Run's status, but it can't see a `done` flip that lands on an `afk/`
+  // branch — so isolated Runs get their completion from here (issue 13). Solo
+  // runs are skipped entirely; the interval clears once no isolated Run remains.
+  useEffect(() => {
+    if (projectPath === null) return;
+    const isolatedRuns = runs
+      .filter((r) => r.target.projectPath !== projectPath)
+      .map((r) => ({ issueId: r.target.issueId, slug: slugOf(r.target.issueFileName) }));
+    if (isolatedRuns.length === 0) return;
+
+    let cancelled = false;
+    const observe = (): void => {
+      for (const { issueId, slug } of isolatedRuns) {
+        void window.mc
+          .observeIssueStatus({ projectPath, slug })
+          .then((res) => {
+            if (cancelled) return;
+            setWorktreeStatuses((prev) =>
+              prev[issueId] === res.status ? prev : { ...prev, [issueId]: res.status },
+            );
+          })
+          .catch(() => {
+            // A transient read/git error just means "not observed this tick";
+            // the next poll retries. Never crash the drain over it.
+          });
+      }
+    };
+    observe();
+    const timer = setInterval(observe, 1500);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [runs, projectPath]);
 
   const activeRunIssueIds = runs.map((r) => r.target.issueId);
 
@@ -169,6 +250,21 @@ export function App(): JSX.Element {
           : r,
       ),
     );
+  }, []);
+
+  // Maximize a tile to fill the Pane area (click its header again to restore
+  // the grid). All Panes stay mounted either way, so sessions never drop.
+  const toggleMaximize = useCallback((issueId: number): void => {
+    setMaximizedId((cur) => (cur === issueId ? null : issueId));
+    setFocusedId(issueId);
+  }, []);
+
+  // Drop a terminated Run from the grid once you've read what happened. Only
+  // offered for finished/blocked/stopped Runs (a running Run is stopped first).
+  const dismissRun = useCallback((issueId: number): void => {
+    setRuns((prev) => prev.filter((r) => r.target.issueId !== issueId));
+    setMaximizedId((cur) => (cur === issueId ? null : cur));
+    setFocusedId((cur) => (cur === issueId ? null : cur));
   }, []);
 
   const handleRunExit = useCallback((issueId: number): void => {
@@ -299,7 +395,7 @@ export function App(): JSX.Element {
     issueId: r.target.issueId,
     slug: slugOf(r.target.issueFileName),
     status: runStatusOf(r),
-    isolated: projectPath !== null && r.target.projectPath !== projectPath,
+    isolated: isIsolated(r),
   }));
   const mergePlan = mergeReadiness(mergeRunsInput);
 
@@ -328,7 +424,10 @@ export function App(): JSX.Element {
       .finally(() => setMerging(false));
   }, [projectPath, merging, mergePlan]);
 
-  const focusedRun = runs.find((r) => r.target.issueId === focusedId) ?? null;
+  // Adaptive tiled grid: the pure layout function decides the shape from the
+  // live Run count (issue 12). A maximized tile overrides it with a single cell.
+  const shape = gridShape(runs.length);
+  const maximizedRun = runs.find((r) => r.target.issueId === maximizedId) ?? null;
 
   return (
     <div className="app">
@@ -360,35 +459,21 @@ export function App(): JSX.Element {
         </nav>
 
         {view === 'pane' && runs.length > 0 && (
-          <span className="app__runtabs">
-            {runs.map((r) => {
-              const status = runStatusOf(r);
-              return (
-                <button
-                  key={r.target.issueId}
-                  className={`app__runtab${
-                    r.target.issueId === focusedId ? ' app__runtab--active' : ''
-                  }`}
-                  onClick={() => setFocusedId(r.target.issueId)}
-                  title={r.target.issueTitle}
-                >
-                  <span className={`run-status run-status--${status}`}>{status}</span>
-                  <span className="app__runtab-id">
-                    {String(r.target.issueId).padStart(2, '0')}
-                  </span>
+          <span className="app__paneinfo">
+            {maximizedRun ? (
+              <>
+                <span className="app__run-title">
+                  {String(maximizedRun.target.issueId).padStart(2, '0')} ·{' '}
+                  {maximizedRun.target.issueTitle}
+                </span>
+                <button className="run-restore" onClick={() => setMaximizedId(null)}>
+                  Restore grid
                 </button>
-              );
-            })}
-          </span>
-        )}
-
-        {view === 'pane' && focusedRun && (
-          <span className="app__run">
-            <span className="app__run-title">{focusedRun.target.issueTitle}</span>
-            {runStatusOf(focusedRun) === 'running' && (
-              <button className="run-stop" onClick={() => stopRun(focusedRun.target.issueId)}>
-                Stop
-              </button>
+              </>
+            ) : (
+              <span className="app__status">
+                {runs.length} Run{runs.length === 1 ? '' : 's'} tiled
+              </span>
             )}
           </span>
         )}
@@ -421,25 +506,81 @@ export function App(): JSX.Element {
           />
         </div>
 
-        {/* One Pane per tracked Run, all mounted so their sessions persist;
-            only the focused one is shown. A plain shell Pane (issue 01) shows
-            when no Run is tracked and the Pane view is selected. */}
-        {runs.map((r) => (
+        {/* Every tracked Run's Pane stays mounted so its session persists; the
+            adaptive grid (issue 12) tiles them so all live Runs are visible at
+            once instead of hidden behind tabs. Maximizing a tile collapses the
+            grid to one cell and hides (but keeps mounted) the others. A plain
+            shell Pane (issue 01) shows when no Run is tracked. */}
+        {runs.length > 0 && (
           <div
-            key={r.target.issueId}
-            className="app__slot"
+            className={`app__grid${shape.scroll ? ' app__grid--scroll' : ''}`}
             style={{
-              display: view === 'pane' && r.target.issueId === focusedId ? 'flex' : 'none',
+              display: view === 'pane' ? 'grid' : 'none',
+              gridTemplateColumns: maximizedRun
+                ? '1fr'
+                : `repeat(${shape.cols}, minmax(0, 1fr))`,
+              gridTemplateRows:
+                maximizedRun || shape.scroll
+                  ? undefined
+                  : `repeat(${shape.rows}, minmax(0, 1fr))`,
             }}
           >
-            <Pane
-              run={r.target}
-              stopSignal={r.stopSignal}
-              onStatusChange={r.target.issueId === focusedId ? setPaneStatus : undefined}
-              onExit={() => handleRunExit(r.target.issueId)}
-            />
+            {runs.map((r) => {
+              const status = runStatusOf(r);
+              const isMax = maximizedRun?.target.issueId === r.target.issueId;
+              const hidden = maximizedRun !== null && !isMax;
+              return (
+                <div
+                  key={r.target.issueId}
+                  className={`app__tile${isMax ? ' app__tile--max' : ''}`}
+                  style={{ display: hidden ? 'none' : 'flex' }}
+                >
+                  <div
+                    className="app__tile-head"
+                    onClick={() => toggleMaximize(r.target.issueId)}
+                    title={isMax ? 'Click to restore the grid' : 'Click to maximize'}
+                  >
+                    <span className={`run-status run-status--${status}`}>{status}</span>
+                    <span className="app__tile-id">
+                      {String(r.target.issueId).padStart(2, '0')}
+                    </span>
+                    <span className="app__tile-title">{r.target.issueTitle}</span>
+                    <span className="app__tile-controls">
+                      {status === 'running' ? (
+                        <button
+                          className="run-stop run-stop--tile"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            stopRun(r.target.issueId);
+                          }}
+                        >
+                          Stop
+                        </button>
+                      ) : (
+                        <button
+                          className="app__tile-dismiss"
+                          title="Dismiss this finished Run"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            dismissRun(r.target.issueId);
+                          }}
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </span>
+                  </div>
+                  <Pane
+                    run={r.target}
+                    stopSignal={r.stopSignal}
+                    onStatusChange={r.target.issueId === focusedId ? setPaneStatus : undefined}
+                    onExit={() => handleRunExit(r.target.issueId)}
+                  />
+                </div>
+              );
+            })}
           </div>
-        ))}
+        )}
         {runs.length === 0 && view === 'pane' && (
           <div className="app__slot" style={{ display: 'flex' }}>
             <Pane onStatusChange={setPaneStatus} onExit={() => setPaneStatus('exited')} />

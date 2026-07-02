@@ -388,37 +388,116 @@ body {
   white-space: pre-wrap;
 }
 
-/* ---- Run tabs (issue 06) ---- */
+/* ---- Tiled Run grid (issue 12) ---- */
 
-.app__runtabs {
+/* Header summary for the Pane view: tile count, or the maximized Run + a
+   restore control. */
+.app__paneinfo {
+  margin-left: auto;
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-left: 14px;
-  overflow-x: auto;
+  gap: 10px;
   min-width: 0;
 }
 
-.app__runtab {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  background: #0e141b;
-  border: 1px solid #1c2530;
+.run-restore {
+  background: #16202b;
+  color: #8fb8e6;
+  border: 1px solid #2c4a7a;
   border-radius: 6px;
-  padding: 2px 8px;
+  padding: 3px 12px;
+  font-size: 12px;
   cursor: pointer;
 }
 
-.app__runtab--active {
-  border-color: #2b6cb0;
-  background: #16202b;
+/* The grid fills the Pane area; its columns/rows come from the pure layout
+   function (inline styles). display is toggled grid/none by the view switch. */
+.app__grid {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  gap: 8px;
+  padding: 8px;
 }
 
-.app__runtab-id {
-  font-size: 11px;
+/* Past 4 Runs the grid scrolls (fixed-ish row height) instead of shrinking
+   tiles until nothing is readable. */
+.app__grid--scroll {
+  overflow-y: auto;
+  grid-auto-rows: minmax(220px, 1fr);
+}
+
+.app__tile {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid #1c2530;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #0b0f14;
+}
+
+.app__tile--max {
+  border-color: #2b6cb0;
+}
+
+.app__tile-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 9px;
+  font-size: 12px;
+  background: #0e141b;
+  border-bottom: 1px solid #1c2530;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.app__tile-head:hover {
+  background: #121a23;
+}
+
+.app__tile-id {
   color: #e6edf3;
   font-variant-numeric: tabular-nums;
+}
+
+.app__tile-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: #9aa7b4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app__tile-controls {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.run-stop--tile {
+  padding: 1px 8px;
+  font-size: 11px;
+}
+
+.app__tile-dismiss {
+  background: transparent;
+  color: #6b7a89;
+  border: 1px solid #33404d;
+  border-radius: 6px;
+  padding: 1px 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.app__tile-dismiss:hover {
+  color: #f0a0a0;
+  border-color: #7a3a3a;
 }
 
 .map__error {
@@ -493,6 +572,21 @@ body {
   color: #6b7a89;
   font-size: 13px;
   padding: 12px;
+}
+
+.map__no-project {
+  margin: 24px 16px;
+  padding: 20px 22px;
+  color: #9fb0c0;
+  font-size: 14px;
+  line-height: 1.5;
+  background: #10161d;
+  border: 1px dashed #2a3846;
+  border-radius: 8px;
+}
+
+.map__no-project strong {
+  color: #cfe0ef;
 }
 
 .issue {

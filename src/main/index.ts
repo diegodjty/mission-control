@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { PtySessionManager } from './pty-session-manager';
 import { readBacklog } from './backlog-reader';
 import { BacklogWatcher } from './backlog-watcher';
-import { applyIsolation } from './git-worktree-adapter';
+import { applyIsolation, readIsolatedIssueStatus } from './git-worktree-adapter';
 import { mergeRuns } from './run-merge';
 import {
   IpcChannel,
@@ -18,6 +18,8 @@ import {
   type BacklogLoadResult,
   type BacklogWatchRequest,
   type IsolationApplyRequest,
+  type IssueStatusObserveRequest,
+  type IssueStatusObserveResult,
   type MergeRunsRequest,
   type ProjectActionResult,
   type ProjectListResult,
@@ -59,8 +61,12 @@ function loadRenderer(win: BrowserWindow): void {
 // ONE registry value for the whole app; each Window is identified by its
 // webContents id. Ownership here is what stops two Windows double-managing a
 // repo. A repo the opener queued for a freshly-created Window to auto-open is
-// held in `pendingOpen`, keyed by the new Window's webContents id, until that
-// Window's first ProjectList consumes it.
+// held in `pendingOpen`, keyed by the new Window's webContents id. It is
+// PEEKED (not consumed) by ProjectList so a racing/duplicate list read — a
+// React StrictMode double-mount or the registry-changed listener — can't
+// silently drink the target before the bootstrap acts on it (issue 14). The
+// entry is cleared only once the Window actually opens a Project (ProjectOpen)
+// or the Window closes.
 let registry: ProjectRegistry = emptyRegistry();
 const pendingOpen = new Map<number, string>();
 
@@ -179,6 +185,17 @@ function registerIpc(): void {
     sender.once('destroyed', () => backlogWatcher.unwatch(key));
   });
 
+  // Observe an isolated Run's completion from its own worktree/branch (issue
+  // 13): a parallel Run flips its issue to `done` inside its worktree, which
+  // the main-checkout backlog watcher never sees. The renderer feeds this
+  // worktree-observed status into the pure run-state selector for isolated Runs.
+  ipcMain.handle(
+    IpcChannel.IssueStatusObserve,
+    async (_event, req: IssueStatusObserveRequest): Promise<IssueStatusObserveResult> => ({
+      status: await readIsolatedIssueStatus(req.projectPath, req.slug),
+    }),
+  );
+
   // Isolation lifecycle (ADR-0002): the Git/Worktree Adapter reconciles the
   // active Run set to solo-on-main or a worktree-per-Run, and hands back each
   // Run's cwd for the PTY spawn below.
@@ -219,9 +236,16 @@ function registerIpc(): void {
     IpcChannel.ProjectOpen,
     (event, req: ProjectOpenRequest): ProjectActionResult => {
       const windowId = String(event.sender.id);
-      // An empty path means "this repo" — resolve to the backend's own cwd, the
-      // same default BacklogLoad uses, so the first Window opens a real Project.
-      const key = normalizeRepoPath(req.repoPath) || process.cwd();
+      // The Window is now driving its own Project choice, so any queued auto-open
+      // target for it has served its purpose — drop it so a later list read
+      // can't re-trigger it (issue 14).
+      pendingOpen.delete(event.sender.id);
+      // A Project must be opened by an explicit path. We do NOT fall back to the
+      // backend cwd here (issue 14): silently claiming the app's own repo is
+      // exactly the phantom-claim bug. An empty path fails registration below
+      // with a clear message; opening mission-control's own repo requires the
+      // user to type that path.
+      const key = normalizeRepoPath(req.repoPath);
       // Register the repo the first time we see it; then claim it for this
       // Window. Claiming is what rejects a second Window on the same repo.
       if (!findProject(registry, key)) {
@@ -253,12 +277,16 @@ function registerIpc(): void {
 
   ipcMain.handle(IpcChannel.ProjectList, (event): ProjectListResult => {
     const windowId = String(event.sender.id);
-    const pending = pendingOpen.get(event.sender.id) ?? null;
-    if (pending !== null) pendingOpen.delete(event.sender.id);
+    // Peek the queued target — do NOT delete it here. Multiple list reads race
+    // on a Window's bootstrap (StrictMode double-mount + the registry-changed
+    // listener); deleting on read let a duplicate read drink the pending path
+    // and the bootstrap then fell back to the app's own cwd (issue 14). The
+    // pending entry is cleared when the Window actually opens a Project, or when
+    // it closes — so every racing read sees the same target until it's acted on.
     return {
       projects: projectViewsFor(windowId),
       activeRepoPath: activeRepoFor(windowId),
-      pendingOpen: pending,
+      pendingOpen: pendingOpen.get(event.sender.id) ?? null,
     };
   });
 

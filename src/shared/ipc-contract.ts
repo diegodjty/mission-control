@@ -6,7 +6,7 @@
  * Shared by main, preload, and renderer, so it must stay free of node/electron
  * runtime imports (types only).
  */
-import type { Backlog } from './backlog-model';
+import type { Backlog, IssueStatus } from './backlog-model';
 import type { IsolationRun } from './isolation-policy';
 import type { PipelineStage } from './project-registry';
 
@@ -18,6 +18,13 @@ export const IpcChannel = {
   BacklogWatch: 'backlog:watch',
   /** main → renderer (send): the watched backlog changed on disk (re-read). */
   BacklogChanged: 'backlog:changed',
+  /**
+   * renderer → main (invoke): observe an isolated Run's issue status from its
+   * OWN worktree/branch (issue 13) — where a parallel Run's `done` flip lands,
+   * invisible to the main-checkout watcher. Resolves to an
+   * IssueStatusObserveResult.
+   */
+  IssueStatusObserve: 'issue:status-observe',
   /** renderer → main (invoke): spawn a PTY, resolves to a SpawnResult. */
   PtySpawn: 'pty:spawn',
   /** renderer → main (send): write user keystrokes into a PTY. */
@@ -174,6 +181,18 @@ export interface BacklogWatchRequest {
  */
 export type BacklogChangedMessage = BacklogLoadResult;
 
+export interface IssueStatusObserveRequest {
+  /** The Project repo path (`main` checkout — the worktree base derives from it). */
+  projectPath: string;
+  /** The `NN-slug` of the isolated Run whose `afk/NN-slug` branch to observe. */
+  slug: string;
+}
+
+export interface IssueStatusObserveResult {
+  /** The issue's status as observed in the Run's worktree/branch, or null. */
+  status: IssueStatus | null;
+}
+
 export interface IsolationApplyRequest {
   /** The Project repo path (`main` checkout). */
   projectPath: string;
@@ -294,6 +313,13 @@ export interface MissionControlApi {
   watchBacklog(req: BacklogWatchRequest): void;
   /** Subscribe to live backlog changes; returns an unsubscribe function. */
   onBacklogChanged(listener: (msg: BacklogChangedMessage) => void): () => void;
+  /**
+   * Observe an isolated Run's issue status from its own worktree/branch (issue
+   * 13), so a `done` flip that landed off the main checkout is still detected.
+   */
+  observeIssueStatus(
+    req: IssueStatusObserveRequest,
+  ): Promise<IssueStatusObserveResult>;
   /**
    * Reconcile isolation for the current active Run set and get each Run's
    * resolved cwd (worktree in parallel mode, `main` when solo).

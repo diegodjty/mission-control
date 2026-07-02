@@ -14,6 +14,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import {
+  branchFor,
   decideIsolation,
   reconcile,
   worktreeSlugFrom,
@@ -21,10 +22,12 @@ import {
   type IsolationRun,
   type IsolationState,
 } from '../shared/isolation-policy';
+import { buildBacklog, type IssueStatus } from '../shared/backlog-model';
 import type {
   IsolationApplyResult,
   ResolvedPlacement,
 } from '../shared/ipc-contract';
+import { readFile } from 'node:fs/promises';
 
 const exec = promisify(execFile);
 
@@ -199,4 +202,45 @@ export async function applyIsolation(
 /** The `NN-slug` for a Run, from its issue file name (`NN-slug.md`). */
 export function slugFromFileName(fileName: string): string {
   return basename(fileName, '.md');
+}
+
+/** Parse a single issue file's `status` via the pure Backlog Model. */
+function statusOf(slug: string, content: string): IssueStatus | null {
+  const backlog = buildBacklog([{ name: `${slug}.md`, content }], null);
+  return backlog.issues[0]?.status ?? null;
+}
+
+/**
+ * Observe an ISOLATED Run's issue status from its OWN worktree/branch, not the
+ * main checkout (issue 13). A parallel Run works in a worktree on `afk/<slug>`
+ * and its agent flips `issues/<slug>.md` to `done` there — a change the
+ * main-checkout backlog watcher never sees, so completion has to be read from
+ * where the flip actually lands.
+ *
+ * Reads the worktree's working-tree copy of `issues/<slug>.md` first (it
+ * reflects the flip whether or not the agent has committed it yet); if the
+ * worktree dir is gone (e.g. already removed) it falls back to the committed
+ * copy on the branch via `git show afk/<slug>:issues/<slug>.md`. Returns null
+ * when neither is readable (nothing observed yet) — `deriveRunStatus` treats
+ * that as not-done, exactly as for an unobserved main-backlog status.
+ */
+export async function readIsolatedIssueStatus(
+  projectPath: string,
+  slug: string,
+): Promise<IssueStatus | null> {
+  const issueFile = join(worktreePathFor(projectPath, slug), 'issues', `${slug}.md`);
+  try {
+    return statusOf(slug, await readFile(issueFile, 'utf8'));
+  } catch {
+    // Worktree gone or file unreadable — fall back to the committed branch copy.
+  }
+  try {
+    const content = await git(projectPath, [
+      'show',
+      `${branchFor(slug)}:issues/${slug}.md`,
+    ]);
+    return statusOf(slug, content);
+  } catch {
+    return null;
+  }
 }

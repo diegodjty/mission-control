@@ -12,6 +12,8 @@ import {
   type BacklogWatchRequest,
   type IsolationApplyRequest,
   type IsolationApplyResult,
+  type IssueStatusObserveRequest,
+  type IssueStatusObserveResult,
   type MergeRunsRequest,
   type MergeRunsResult,
   type MissionControlApi,
@@ -44,6 +46,11 @@ const api: MissionControlApi = {
     ipcRenderer.on(IpcChannel.BacklogChanged, handler);
     return () => ipcRenderer.removeListener(IpcChannel.BacklogChanged, handler);
   },
+
+  observeIssueStatus: (
+    req: IssueStatusObserveRequest,
+  ): Promise<IssueStatusObserveResult> =>
+    ipcRenderer.invoke(IpcChannel.IssueStatusObserve, req),
 
   applyIsolation: (req: IsolationApplyRequest): Promise<IsolationApplyResult> =>
     ipcRenderer.invoke(IpcChannel.IsolationApply, req),
