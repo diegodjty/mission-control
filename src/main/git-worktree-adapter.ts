@@ -15,6 +15,7 @@ import { existsSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import {
   branchFor,
+  commitMessageForRun,
   decideIsolation,
   reconcile,
   worktreeSlugFrom,
@@ -23,6 +24,8 @@ import {
   type IsolationState,
 } from '../shared/isolation-policy';
 import { buildBacklog, type IssueStatus } from '../shared/backlog-model';
+import { shouldCommitWorktree } from '../shared/run-state';
+import { issueIdFromSlug, type AfkBranchFacts } from '../shared/worktree-scan';
 import type {
   IsolationApplyResult,
   ResolvedPlacement,
@@ -94,6 +97,63 @@ export async function listWorktreeSlugs(projectPath: string): Promise<string[]> 
     if (slug !== null) slugs.push(slug);
   }
   return slugs;
+}
+
+/**
+ * Every local `afk/NN-slug` branch, as `NN-slug` stems — INCLUDING ones whose
+ * worktree has been removed (the branch survives so unmerged work can still be
+ * merged, issue 08). This is the on-disk source of "which Runs exist" that
+ * outlives closing all Panes (issue 16), where `listWorktreeSlugs` (worktrees
+ * only) does not.
+ */
+export async function listAfkBranchSlugs(projectPath: string): Promise<string[]> {
+  let out: string;
+  try {
+    out = await git(projectPath, ['for-each-ref', '--format=%(refname:short)', 'refs/heads']);
+  } catch {
+    return [];
+  }
+  const slugs: string[] = [];
+  for (const line of out.split('\n')) {
+    const slug = worktreeSlugFrom(line.trim());
+    if (slug !== null) slugs.push(slug);
+  }
+  return slugs;
+}
+
+/** Is the `afk/<slug>` branch tip already an ancestor of `main` (i.e. merged)? */
+async function isMergedIntoMain(projectPath: string, slug: string): Promise<boolean> {
+  try {
+    // `--is-ancestor` exits 0 when merged, non-zero otherwise (rejects here).
+    await git(projectPath, ['merge-base', '--is-ancestor', branchFor(slug), 'main']);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Scan the Project's on-disk `afk/` state (issue 16): for every `afk/NN-slug`
+ * branch, whether it still has a worktree (Run in flight), the status committed
+ * on its tip (`done` ⇒ finished/mergeable, per issue 15), and whether it is
+ * already merged into `main`. The pure `worktree-scan` module turns these facts
+ * into the Map's `running`/`finished (unmerged)` indicators and the on-disk
+ * Merge affordance — a source of truth that survives closing every Pane, unlike
+ * the renderer's in-memory tracked Runs. Sorted ascending by issue id.
+ */
+export async function scanAfkBranches(projectPath: string): Promise<AfkBranchFacts[]> {
+  const slugs = await listAfkBranchSlugs(projectPath);
+  const worktreeSlugs = new Set(await listWorktreeSlugs(projectPath));
+  const facts = await Promise.all(
+    slugs.map(async (slug) => ({
+      issueId: issueIdFromSlug(slug),
+      slug,
+      hasWorktree: worktreeSlugs.has(slug),
+      committedStatus: await readCommittedIssueStatus(projectPath, slug),
+      mergedIntoMain: await isMergedIntoMain(projectPath, slug),
+    })),
+  );
+  return facts.sort((a, b) => a.issueId - b.issueId);
 }
 
 /** Read the full on-disk isolation state for the policy to reconcile against. */
@@ -210,21 +270,8 @@ function statusOf(slug: string, content: string): IssueStatus | null {
   return backlog.issues[0]?.status ?? null;
 }
 
-/**
- * Observe an ISOLATED Run's issue status from its OWN worktree/branch, not the
- * main checkout (issue 13). A parallel Run works in a worktree on `afk/<slug>`
- * and its agent flips `issues/<slug>.md` to `done` there — a change the
- * main-checkout backlog watcher never sees, so completion has to be read from
- * where the flip actually lands.
- *
- * Reads the worktree's working-tree copy of `issues/<slug>.md` first (it
- * reflects the flip whether or not the agent has committed it yet); if the
- * worktree dir is gone (e.g. already removed) it falls back to the committed
- * copy on the branch via `git show afk/<slug>:issues/<slug>.md`. Returns null
- * when neither is readable (nothing observed yet) — `deriveRunStatus` treats
- * that as not-done, exactly as for an unobserved main-backlog status.
- */
-export async function readIsolatedIssueStatus(
+/** Read an isolated Run's issue status from its worktree working tree, or null. */
+async function readWorktreeIssueStatus(
   projectPath: string,
   slug: string,
 ): Promise<IssueStatus | null> {
@@ -232,8 +279,21 @@ export async function readIsolatedIssueStatus(
   try {
     return statusOf(slug, await readFile(issueFile, 'utf8'));
   } catch {
-    // Worktree gone or file unreadable — fall back to the committed branch copy.
+    return null;
   }
+}
+
+/**
+ * Read an isolated Run's issue status from its COMMITTED `afk/<slug>` branch via
+ * `git show afk/<slug>:issues/<slug>.md`, or null when the branch/file isn't
+ * readable. This is the authoritative "finished" source (issue 15): a Run is
+ * finished only once its work is committed on the branch, so detection and Merge
+ * — which integrates committed branches — agree on what `done` means.
+ */
+export async function readCommittedIssueStatus(
+  projectPath: string,
+  slug: string,
+): Promise<IssueStatus | null> {
   try {
     const content = await git(projectPath, [
       'show',
@@ -243,4 +303,65 @@ export async function readIsolatedIssueStatus(
   } catch {
     return null;
   }
+}
+
+/**
+ * Auto-commit a finished isolated Run's worktree onto its `afk/<slug>` branch
+ * (issue 15, Option A). The agent is spawned in single-issue mode and never
+ * commits, so when it finishes — flipping `issues/<slug>.md` to `done` in the
+ * worktree working tree — the created/edited files and the `done` flip sit
+ * uncommitted and the `afk/` branch stays empty, leaving Merge nothing to
+ * integrate. Mission Control owns the worktree lifecycle (ADR-0002), so it makes
+ * the commit itself.
+ *
+ * Only commits on the finished (done) transition — the pure `shouldCommitWorktree`
+ * decides that from the worktree's working-tree status; a still-`wip`, blocked,
+ * or stopped Run is left uncommitted (nothing to merge). Idempotent: a clean
+ * worktree (nothing staged/untracked vs. its branch tip — e.g. a Run already
+ * committed) is skipped, so re-observing never double-commits. Returns whether a
+ * new commit was made. Best-effort: git failures are swallowed (the committed
+ * state simply stays behind, so the Run is not yet reported finished).
+ */
+export async function commitFinishedWorktree(
+  projectPath: string,
+  slug: string,
+): Promise<boolean> {
+  const worktreePath = worktreePathFor(projectPath, slug);
+  if (!existsSync(worktreePath)) return false;
+
+  const worktreeStatus = await readWorktreeIssueStatus(projectPath, slug);
+  if (!shouldCommitWorktree({ isolated: true, worktreeStatus })) return false;
+
+  try {
+    // Idempotency guard: with nothing changed vs. the branch tip there is
+    // nothing to commit (a Run already committed, by MC or by hand).
+    const porcelain = await git(worktreePath, ['status', '--porcelain']);
+    if (porcelain.trim().length === 0) return false;
+    await git(worktreePath, ['add', '-A']);
+    await git(worktreePath, ['commit', '-m', commitMessageForRun(slug)]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Observe an ISOLATED Run's completion from its OWN worktree/branch, not the
+ * main checkout (issue 13) — a parallel Run flips its issue to `done` in a
+ * worktree on `afk/<slug>`, invisible to the main-checkout backlog watcher.
+ *
+ * Issue 15 aligns "finished" with the COMMITTED branch state so detection and
+ * Merge agree: first auto-commit the worktree if the agent has finished it
+ * (idempotent — see `commitFinishedWorktree`), then read the status from the
+ * committed `afk/<slug>` branch. A Run therefore only shows finished once its
+ * work is actually committed and thus mergeable. Returns null when the branch
+ * isn't readable (nothing observed yet) — `deriveRunStatus` treats that as
+ * not-done, exactly as for an unobserved main-backlog status.
+ */
+export async function readIsolatedIssueStatus(
+  projectPath: string,
+  slug: string,
+): Promise<IssueStatus | null> {
+  await commitFinishedWorktree(projectPath, slug);
+  return readCommittedIssueStatus(projectPath, slug);
 }

@@ -64,6 +64,19 @@ export function worktreeSlugFrom(branch: string): string | null {
 }
 
 /**
+ * The commit message Mission Control uses when it auto-commits a finished
+ * isolated Run's worktree onto its `afk/NN-slug` branch (issue 15). Identifies
+ * the issue by its number and descriptive slug, e.g. a `04-tracer-bullet` slug
+ * yields `afk: complete issue 04 — tracer-bullet`. Falls back gracefully for a
+ * slug without the conventional `NN-` prefix.
+ */
+export function commitMessageForRun(slug: string): string {
+  const match = /^(\d+)-(.*)$/.exec(slug);
+  if (match) return `afk: complete issue ${match[1]} — ${match[2]}`;
+  return `afk: complete issue — ${slug}`;
+}
+
+/**
  * Decide the desired isolation state for a set of Runs.
  *
  * `<= 1` Run ⇒ solo: parallel disabled, the lone Run (if any) works on `main`.

@@ -10,10 +10,12 @@ import { join } from 'node:path';
 import { PtySessionManager } from './pty-session-manager';
 import { readBacklog } from './backlog-reader';
 import { BacklogWatcher } from './backlog-watcher';
-import { applyIsolation, readIsolatedIssueStatus } from './git-worktree-adapter';
+import { applyIsolation, readIsolatedIssueStatus, scanAfkBranches } from './git-worktree-adapter';
 import { mergeRuns } from './run-merge';
 import {
   IpcChannel,
+  type AfkScanRequest,
+  type AfkScanResult,
   type BacklogLoadRequest,
   type BacklogLoadResult,
   type BacklogWatchRequest,
@@ -193,6 +195,17 @@ function registerIpc(): void {
     IpcChannel.IssueStatusObserve,
     async (_event, req: IssueStatusObserveRequest): Promise<IssueStatusObserveResult> => ({
       status: await readIsolatedIssueStatus(req.projectPath, req.slug),
+    }),
+  );
+
+  // On-disk `afk/` scan (issue 16): the ground truth for which issues have an
+  // in-flight or finished-but-unmerged isolated Run. Driven independently of the
+  // renderer's in-memory tracked Runs, so the Map's progress indicators and the
+  // Merge affordance survive closing every Pane.
+  ipcMain.handle(
+    IpcChannel.AfkScan,
+    async (_event, req: AfkScanRequest): Promise<AfkScanResult> => ({
+      branches: await scanAfkBranches(req.projectPath),
     }),
   );
 

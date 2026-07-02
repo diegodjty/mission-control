@@ -31,6 +31,18 @@ interface MapProps {
   onBacklogLoaded?: (backlog: Backlog | null, projectPath: string) => void;
   /** The issue ids currently being Run (highlighted, Run action suppressed). */
   activeRunIssueIds?: number[];
+  /**
+   * Issue ids with a LIVE isolated Run in its worktree (issue 16, from the
+   * on-disk `afk/` scan) — shown as `running` (in-worktree) even though the main
+   * checkout still reads `open`.
+   */
+  worktreeRunningIds?: number[];
+  /**
+   * Issue ids whose isolated Run is committed on its `afk/` branch but not yet
+   * merged (issue 16) — shown as `finished (unmerged)`, distinct from plain
+   * `open` and merged-`done`. Derived from disk, so it survives closing Panes.
+   */
+  finishedUnmergedIds?: number[];
   /** Start draining the backlog with the given max-concurrent cap (issue 06). */
   onDrain?: (cap: number) => void;
   /** Stop an in-progress drain (start no further Runs). */
@@ -68,6 +80,8 @@ export function Map({
   reloadKey,
   onBacklogLoaded,
   activeRunIssueIds,
+  worktreeRunningIds,
+  finishedUnmergedIds,
   onDrain,
   onStopDrain,
   draining,
@@ -81,6 +95,8 @@ export function Map({
   mergeMessage,
 }: MapProps = {}): JSX.Element {
   const activeRunSet = new Set(activeRunIssueIds ?? []);
+  const worktreeRunningSet = new Set(worktreeRunningIds ?? []);
+  const finishedUnmergedSet = new Set(finishedUnmergedIds ?? []);
   const [path, setPath] = useState('');
   const [lastRequest, setLastRequest] = useState('');
   const [resolvedPath, setResolvedPath] = useState<string | null>(null);
@@ -279,6 +295,13 @@ export function Map({
               issue={issue}
               selected={issue.id === selectedId}
               running={activeRunSet.has(issue.id)}
+              worktreeRun={
+                finishedUnmergedSet.has(issue.id)
+                  ? 'finished-unmerged'
+                  : worktreeRunningSet.has(issue.id)
+                    ? 'running'
+                    : null
+              }
               state={deriveIssueState(issue, backlog!.issues)}
               onSelect={() => setSelectedId(issue.id)}
               onRun={
@@ -386,6 +409,7 @@ function IssueRow({
   issue,
   selected,
   running,
+  worktreeRun,
   state,
   onSelect,
   onRun,
@@ -393,10 +417,22 @@ function IssueRow({
   issue: BacklogIssue;
   selected: boolean;
   running: boolean;
+  /**
+   * The issue's isolated-Run state derived from the on-disk `afk/` scan (issue
+   * 16): `running` (live in its worktree) or `finished-unmerged` (committed but
+   * not merged). Null when it has no active/finished worktree Run. Takes
+   * precedence over the main-checkout status/eligibility for the row indicator,
+   * so a Run in flight or awaiting merge never looks like plain `open`.
+   */
+  worktreeRun: 'running' | 'finished-unmerged' | null;
   state: IssueMapState;
   onSelect: () => void;
   onRun?: () => void;
 }): JSX.Element {
+  // A worktree Run (in flight or finished-unmerged) is being worked/awaiting
+  // merge — so it is neither "eligible" to start nor offered a Run button, even
+  // though the main checkout still reads `open`.
+  const worked = worktreeRun !== null || running;
   return (
     <li className={`issue${selected ? ' issue--selected' : ''}`} onClick={onSelect}>
       <StatusBadge status={issue.status} />
@@ -413,11 +449,27 @@ function IssueRow({
             blocked
           </span>
         )}
-        {state.kind === 'eligible' && !running && (
+        {state.kind === 'eligible' && !worked && (
           <span className="badge badge--eligible">eligible</span>
         )}
-        {running ? (
-          <span className="run-badge run-badge--active">running</span>
+        {worktreeRun === 'finished-unmerged' ? (
+          <span
+            className="run-badge run-badge--finished-unmerged"
+            title="This Run's work is committed on its afk/ branch but not yet merged into main"
+          >
+            finished (unmerged)
+          </span>
+        ) : worktreeRun === 'running' || running ? (
+          <span
+            className="run-badge run-badge--active"
+            title={
+              worktreeRun === 'running'
+                ? 'A Run is live in this issue’s worktree'
+                : 'A Run is in progress'
+            }
+          >
+            running{worktreeRun === 'running' ? ' (in-worktree)' : ''}
+          </span>
         ) : (
           state.kind === 'eligible' &&
           onRun && (

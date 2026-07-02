@@ -233,6 +233,12 @@ body {
   background: #23200f;
 }
 
+.run-badge--finished-unmerged {
+  color: #c9a0f0;
+  border-color: #5a3a7a;
+  background: #1c1528;
+}
+
 .pane {
   flex: 1 1 auto;
   min-height: 0;

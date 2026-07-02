@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { deriveRunStatus, isTerminal, observedIssueStatus } from './run-state';
+import {
+  deriveRunStatus,
+  isTerminal,
+  observedIssueStatus,
+  shouldCommitWorktree,
+} from './run-state';
 
 describe('deriveRunStatus', () => {
   it('is running while the session is alive and the issue is not done', () => {
@@ -82,6 +87,24 @@ describe('observedIssueStatus (issue 13 — which source to trust)', () => {
       }),
     };
     expect(deriveRunStatus(isolatedFacts)).toBe('finished');
+  });
+});
+
+describe('shouldCommitWorktree (issue 15 — when to auto-commit)', () => {
+  it('commits an isolated Run once its worktree reaches done', () => {
+    expect(shouldCommitWorktree({ isolated: true, worktreeStatus: 'done' })).toBe(true);
+  });
+
+  it('does not commit an isolated Run still wip (not finished yet)', () => {
+    expect(shouldCommitWorktree({ isolated: true, worktreeStatus: 'wip' })).toBe(false);
+  });
+
+  it('does not commit an isolated Run whose worktree is not yet observed', () => {
+    expect(shouldCommitWorktree({ isolated: true, worktreeStatus: null })).toBe(false);
+  });
+
+  it('never auto-commits a solo Run — it works on main and is left for review', () => {
+    expect(shouldCommitWorktree({ isolated: false, worktreeStatus: 'done' })).toBe(false);
   });
 });
 

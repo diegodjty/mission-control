@@ -11,7 +11,11 @@ import {
 } from '../../shared/run-state';
 import { planDrain, type ActiveRun } from '../../shared/run-coordinator';
 import type { IsolationRun } from '../../shared/isolation-policy';
-import { mergeReadiness, type MergeRun } from '../../shared/merge-plan';
+import {
+  deriveWorktreeRunStates,
+  mergeReadinessOnDisk,
+  type AfkBranchFacts,
+} from '../../shared/worktree-scan';
 import { gridShape } from '../../shared/pane-grid';
 import { decideWindowBootstrap } from '../../shared/window-bootstrap';
 
@@ -164,6 +168,15 @@ export function App(): JSX.Element {
     Record<number, IssueStatus | null>
   >({});
 
+  // --- On-disk afk/ scan (issue 16) ----------------------------------------
+  // The ground truth for which issues have an in-flight or finished-but-unmerged
+  // isolated Run lives in the Project's `afk/NN-slug` worktrees + committed
+  // branches, NOT in `runs` above — so the Map's progress indicators and the
+  // Merge affordance keep working after every Pane is closed (which drops the
+  // in-memory Runs). Polled from disk whenever a Project is open; the pure
+  // `worktree-scan` selectors turn these facts into what the UI shows.
+  const [afkScan, setAfkScan] = useState<AfkBranchFacts[]>([]);
+
   /** True when a Run works in a worktree on an `afk/` branch (not `main`). */
   const isIsolated = useCallback(
     (run: TrackedRun): boolean =>
@@ -228,6 +241,43 @@ export function App(): JSX.Element {
       clearInterval(timer);
     };
   }, [runs, projectPath]);
+
+  // Poll the Project's on-disk `afk/` state on an interval, independent of the
+  // tracked Runs (issue 16). This is what lets the Map still show a finished-
+  // unmerged Run — and still offer its Merge — after its Pane has been closed
+  // and its in-memory Run dropped. Runs whenever a Project is open; clears when
+  // none is. A transient git error just skips that tick.
+  useEffect(() => {
+    if (projectPath === null) return;
+    let cancelled = false;
+    const scan = (): void => {
+      void window.mc
+        .scanAfkRuns({ projectPath })
+        .then((res) => {
+          if (!cancelled) setAfkScan(res.branches);
+        })
+        .catch(() => {
+          // Transient read/git error: keep the last scan; the next tick retries.
+        });
+    };
+    scan();
+    const timer = setInterval(scan, 1500);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [projectPath]);
+
+  // Pure derivations from the on-disk scan: which issues show `running` /
+  // `finished (unmerged)` on the Map, and whether the Merge is offered (from
+  // disk, so it survives closing Panes).
+  const worktreeRunStates = deriveWorktreeRunStates(afkScan);
+  const worktreeRunningIds = worktreeRunStates
+    .filter((s) => s.kind === 'running')
+    .map((s) => s.issueId);
+  const finishedUnmergedIds = worktreeRunStates
+    .filter((s) => s.kind === 'finished-unmerged')
+    .map((s) => s.issueId);
 
   const activeRunIssueIds = runs.map((r) => r.target.issueId);
 
@@ -385,19 +435,13 @@ export function App(): JSX.Element {
     };
   }, [draining, backlog, runs, cap, projectPath, runStatusOf]);
 
-  // --- Merge readiness (issue 08, ADR-0002) -------------------------------
-  // A Run is "isolated" (worked on an afk/ branch in its own worktree) when its
-  // Pane spawned somewhere other than the main checkout. The pure Merge Plan
-  // then decides whether a human-triggered Merge should be offered and which
-  // branches it would integrate — it appears once the parallel Runs have
-  // finished, and never triggers on its own.
-  const mergeRunsInput: MergeRun[] = runs.map((r) => ({
-    issueId: r.target.issueId,
-    slug: slugOf(r.target.issueFileName),
-    status: runStatusOf(r),
-    isolated: isIsolated(r),
-  }));
-  const mergePlan = mergeReadiness(mergeRunsInput);
+  // --- Merge readiness (issue 08, ADR-0002; issue 16) ---------------------
+  // Whether a human-triggered Merge is offered — and which branches it targets —
+  // is derived from the ON-DISK `afk/` state, not the in-memory tracked Runs, so
+  // the affordance survives closing every Pane (issue 16). It appears once every
+  // isolated Run's branch is committed-done (issue 15) and none is still in
+  // flight, and never triggers on its own (ADR-0002).
+  const mergePlan = mergeReadinessOnDisk(afkScan);
 
   const runMerge = useCallback((): void => {
     if (projectPath === null || merging) return;
@@ -492,6 +536,8 @@ export function App(): JSX.Element {
             onRun={startRun}
             onBacklogLoaded={handleBacklogLoaded}
             activeRunIssueIds={activeRunIssueIds}
+            worktreeRunningIds={worktreeRunningIds}
+            finishedUnmergedIds={finishedUnmergedIds}
             onDrain={startDrain}
             onStopDrain={stopDrain}
             draining={draining}
@@ -527,6 +573,27 @@ export function App(): JSX.Element {
           >
             {runs.map((r) => {
               const status = runStatusOf(r);
+              // A finished isolated Run whose branch is committed but not yet
+              // merged (issue 15/16): dismissing it hides mergeable work, so warn
+              // first. Cross-check the on-disk scan as well as the in-memory
+              // status so a Run committed off-screen still triggers the warning.
+              const unmergedWork =
+                (status === 'finished' && isIsolated(r)) ||
+                finishedUnmergedIds.includes(r.target.issueId);
+              const requestDismiss = (): void => {
+                if (
+                  unmergedWork &&
+                  !window.confirm(
+                    `Issue ${String(r.target.issueId).padStart(2, '0')} has finished work on ` +
+                      `branch afk/${slugOf(r.target.issueFileName)} that hasn't been merged into ` +
+                      `main yet.\n\nDismiss it anyway? The branch stays on disk and you can still ` +
+                      `Merge it from the Map.`,
+                  )
+                ) {
+                  return;
+                }
+                dismissRun(r.target.issueId);
+              };
               const isMax = maximizedRun?.target.issueId === r.target.issueId;
               const hidden = maximizedRun !== null && !isMax;
               return (
@@ -559,10 +626,14 @@ export function App(): JSX.Element {
                       ) : (
                         <button
                           className="app__tile-dismiss"
-                          title="Dismiss this finished Run"
+                          title={
+                            unmergedWork
+                              ? 'Dismiss this Run (its branch has unmerged work)'
+                              : 'Dismiss this finished Run'
+                          }
                           onClick={(e) => {
                             e.stopPropagation();
-                            dismissRun(r.target.issueId);
+                            requestDismiss();
                           }}
                         >
                           ✕

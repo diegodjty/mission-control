@@ -71,3 +71,29 @@ export interface IssueStatusSources {
 export function observedIssueStatus(sources: IssueStatusSources): IssueStatus | null {
   return sources.isolated ? sources.worktreeStatus : sources.mainStatus;
 }
+
+/** The facts that decide whether a Run's worktree should be auto-committed. */
+export interface WorktreeCommitFacts {
+  /** True when this Run works in a worktree on an `afk/` branch (not `main`). */
+  isolated: boolean;
+  /**
+   * The issue's status as seen in the Run's OWN worktree working tree (where the
+   * agent's `done` flip lands before anything is committed), or null if unknown.
+   */
+  worktreeStatus: IssueStatus | null;
+}
+
+/**
+ * Whether Mission Control should auto-commit a Run's worktree onto its
+ * `afk/NN-slug` branch (issue 15). Commit ONLY on the finished (done) transition
+ * of an ISOLATED Run: the agent spawned in single-issue mode never commits, so
+ * the finished worktree work (created files + the `done` flip) would otherwise
+ * stay uncommitted and the `afk/` branch empty — leaving Merge nothing to
+ * integrate. A solo Run (works directly on `main`) is never auto-committed, and
+ * a still-`wip`/blocked/stopped isolated Run is left uncommitted (nothing to
+ * merge yet). Pure so the "when to commit" decision is unit-testable; the git
+ * side effect and idempotency guard live in the Git/Worktree Adapter.
+ */
+export function shouldCommitWorktree(facts: WorktreeCommitFacts): boolean {
+  return facts.isolated && facts.worktreeStatus === 'done';
+}

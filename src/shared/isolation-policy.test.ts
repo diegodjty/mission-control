@@ -3,6 +3,7 @@ import {
   decideIsolation,
   reconcile,
   branchFor,
+  commitMessageForRun,
   type IsolationRun,
   type IsolationState,
 } from './isolation-policy';
@@ -139,5 +140,23 @@ describe('reconcile — transitions', () => {
     expect(reconcile(current, desired)).toEqual([
       { type: 'create-worktree', issueId: 2, slug: 'b', branch: 'afk/b' },
     ]);
+  });
+});
+
+describe('commitMessageForRun (issue 15 — auto-commit message)', () => {
+  it('names the issue number and descriptive slug from an NN-slug stem', () => {
+    expect(commitMessageForRun('04-tracer-bullet')).toBe(
+      'afk: complete issue 04 — tracer-bullet',
+    );
+  });
+
+  it('preserves a multi-hyphen descriptive slug', () => {
+    expect(commitMessageForRun('15-commit-finished-worktree-runs')).toBe(
+      'afk: complete issue 15 — commit-finished-worktree-runs',
+    );
+  });
+
+  it('falls back gracefully when the slug has no NN- prefix', () => {
+    expect(commitMessageForRun('adhoc-fix')).toBe('afk: complete issue — adhoc-fix');
   });
 });

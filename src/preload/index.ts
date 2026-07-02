@@ -10,6 +10,8 @@ import {
   type BacklogLoadRequest,
   type BacklogLoadResult,
   type BacklogWatchRequest,
+  type AfkScanRequest,
+  type AfkScanResult,
   type IsolationApplyRequest,
   type IsolationApplyResult,
   type IssueStatusObserveRequest,
@@ -51,6 +53,9 @@ const api: MissionControlApi = {
     req: IssueStatusObserveRequest,
   ): Promise<IssueStatusObserveResult> =>
     ipcRenderer.invoke(IpcChannel.IssueStatusObserve, req),
+
+  scanAfkRuns: (req: AfkScanRequest): Promise<AfkScanResult> =>
+    ipcRenderer.invoke(IpcChannel.AfkScan, req),
 
   applyIsolation: (req: IsolationApplyRequest): Promise<IsolationApplyResult> =>
     ipcRenderer.invoke(IpcChannel.IsolationApply, req),

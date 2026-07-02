@@ -9,6 +9,7 @@
 import type { Backlog, IssueStatus } from './backlog-model';
 import type { IsolationRun } from './isolation-policy';
 import type { PipelineStage } from './project-registry';
+import type { AfkBranchFacts } from './worktree-scan';
 
 /** Channel names. Grouped by direction for clarity. */
 export const IpcChannel = {
@@ -25,6 +26,13 @@ export const IpcChannel = {
    * IssueStatusObserveResult.
    */
   IssueStatusObserve: 'issue:status-observe',
+  /**
+   * renderer → main (invoke): scan the Project's on-disk `afk/` branches +
+   * worktrees (issue 16) so the Map can show in-flight/finished-unmerged Runs
+   * and the Merge affordance can be derived from disk — surviving closing every
+   * Pane. Resolves to an AfkScanResult.
+   */
+  AfkScan: 'afk:scan',
   /** renderer → main (invoke): spawn a PTY, resolves to a SpawnResult. */
   PtySpawn: 'pty:spawn',
   /** renderer → main (send): write user keystrokes into a PTY. */
@@ -193,6 +201,16 @@ export interface IssueStatusObserveResult {
   status: IssueStatus | null;
 }
 
+export interface AfkScanRequest {
+  /** The Project repo path (`main` checkout); the scan reads its `afk/` branches. */
+  projectPath: string;
+}
+
+export interface AfkScanResult {
+  /** On-disk facts per `afk/NN-slug` branch, ascending by issue id (issue 16). */
+  branches: AfkBranchFacts[];
+}
+
 export interface IsolationApplyRequest {
   /** The Project repo path (`main` checkout). */
   projectPath: string;
@@ -320,6 +338,12 @@ export interface MissionControlApi {
   observeIssueStatus(
     req: IssueStatusObserveRequest,
   ): Promise<IssueStatusObserveResult>;
+  /**
+   * Scan the Project's on-disk `afk/` branches/worktrees (issue 16) so the Map
+   * reflects in-flight/finished-unmerged Runs and the Merge affordance survives
+   * closing every Pane.
+   */
+  scanAfkRuns(req: AfkScanRequest): Promise<AfkScanResult>;
   /**
    * Reconcile isolation for the current active Run set and get each Run's
    * resolved cwd (worktree in parallel mode, `main` when solo).
