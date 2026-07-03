@@ -4,6 +4,7 @@ import {
   decideIsolationWith,
   isolationRunSetWith,
   reconcile,
+  canFallBackToMain,
   branchFor,
   commitMessageForRun,
   type IsolationRun,
@@ -141,26 +142,25 @@ describe('reconcile — transitions', () => {
     ]);
   });
 
-  it('parallel → solo: the lone survivor moves back to main, so BOTH worktrees go', () => {
+  it('down to a single owned Run: only that Run’s worktree is removed; a leftover stays', () => {
     const current: IsolationState = { parallel: true, worktreeSlugs: ['a', 'b'] };
-    // Down to a single active Run — solo means it works on main, no worktree,
-    // so even the surviving Run's worktree is torn down.
+    // The decision owns only Run `a` (solo, back to main). `b` is not in this
+    // set — a leftover from a previous batch (issue 28), so its worktree AND its
+    // branch are left intact for a pending Merge, and its presence keeps
+    // parallel mode on rather than disabling it out from under that Merge.
     const desired = decideIsolation([run(1, 'a')]);
     expect(reconcile(current, desired)).toEqual([
       { type: 'remove-worktree', slug: 'a', branch: 'afk/a' },
-      { type: 'remove-worktree', slug: 'b', branch: 'afk/b' },
-      { type: 'disable-parallel' },
     ]);
   });
 
-  it('parallel → zero runs: remove all worktrees and disable parallel', () => {
+  it('an empty decision touches nothing: leftover worktrees + parallel are preserved', () => {
+    // A fresh solo drain (no Runs yet in this batch) must never tear down
+    // worktrees it did not create or disable parallel mode (issue 28) — those
+    // worktrees belong to a previous batch’s pending Merges.
     const current: IsolationState = { parallel: true, worktreeSlugs: ['a', 'b'] };
     const desired = decideIsolation([]);
-    expect(reconcile(current, desired)).toEqual([
-      { type: 'remove-worktree', slug: 'a', branch: 'afk/a' },
-      { type: 'remove-worktree', slug: 'b', branch: 'afk/b' },
-      { type: 'disable-parallel' },
-    ]);
+    expect(reconcile(current, desired)).toEqual([]);
   });
 
   it('adds a worktree for a Run that joins an already-parallel set', () => {
@@ -171,15 +171,16 @@ describe('reconcile — transitions', () => {
     ]);
   });
 
-  it('removes only the departed worktree when still 2+ remain', () => {
+  it('leaves a worktree the decision does not own intact even while 2+ remain', () => {
+    // `b` is on disk but not in the decision {a, c}: a leftover, not this batch’s
+    // to remove (issue 28). Both owned Runs already have worktrees, so there is
+    // nothing to do — `b` survives for its pending Merge.
     const current: IsolationState = {
       parallel: true,
       worktreeSlugs: ['a', 'b', 'c'],
     };
     const desired = decideIsolation([run(1, 'a'), run(3, 'c')]);
-    expect(reconcile(current, desired)).toEqual([
-      { type: 'remove-worktree', slug: 'b', branch: 'afk/b' },
-    ]);
+    expect(reconcile(current, desired)).toEqual([]);
   });
 
   it('is a no-op when the disk already matches the desired parallel state', () => {
@@ -199,6 +200,52 @@ describe('reconcile — transitions', () => {
     expect(reconcile(current, desired)).toEqual([
       { type: 'create-worktree', issueId: 2, slug: 'b', branch: 'afk/b' },
     ]);
+  });
+});
+
+describe('reconcile — leftover worktrees survive an unrelated Run (issue 28)', () => {
+  it('a fresh solo Run beside leftover worktrees removes nothing and keeps parallel on', () => {
+    // A previous batch left finished-unmerged worktrees `x`, `y` on disk with
+    // `.afk-parallel` still set (pending Merge). Now a single new Run `n` starts
+    // solo. It must NOT remove `x`/`y` (they belong to the pending Merge) nor
+    // disable parallel mode as a side effect — the acceptance criterion here.
+    const current: IsolationState = { parallel: true, worktreeSlugs: ['x', 'y'] };
+    const desired = decideIsolation([run(9, 'n')]);
+    expect(desired.parallel).toBe(false); // the new Run itself is solo on main
+    expect(reconcile(current, desired)).toEqual([]);
+  });
+
+  it('an owned Run may still be created alongside preserved leftovers', () => {
+    // Two owned Runs go parallel; a leftover `z` from a prior batch is untouched.
+    const current: IsolationState = { parallel: true, worktreeSlugs: ['z'] };
+    const desired = decideIsolation([run(1, 'a'), run(2, 'b')]);
+    expect(reconcile(current, desired)).toEqual([
+      { type: 'create-worktree', issueId: 1, slug: 'a', branch: 'afk/a' },
+      { type: 'create-worktree', issueId: 2, slug: 'b', branch: 'afk/b' },
+    ]);
+  });
+
+  it('disables parallel only once the batch’s own worktrees are the only ones gone', () => {
+    // No leftovers: the batch’s single owned worktree is torn down and, with the
+    // disk now empty, parallel mode is correctly disabled.
+    const current: IsolationState = { parallel: true, worktreeSlugs: ['a'] };
+    const desired = decideIsolation([run(1, 'a')]);
+    expect(reconcile(current, desired)).toEqual([
+      { type: 'remove-worktree', slug: 'a', branch: 'afk/a' },
+      { type: 'disable-parallel' },
+    ]);
+  });
+});
+
+describe('canFallBackToMain — isolation-failure safety (issue 28)', () => {
+  it('allows a lone Run to fall back to main', () => {
+    expect(canFallBackToMain(0)).toBe(true);
+    expect(canFallBackToMain(1)).toBe(true);
+  });
+
+  it('refuses the fallback for 2+ concurrent Runs (the concurrent-main collision)', () => {
+    expect(canFallBackToMain(2)).toBe(false);
+    expect(canFallBackToMain(5)).toBe(false);
   });
 });
 

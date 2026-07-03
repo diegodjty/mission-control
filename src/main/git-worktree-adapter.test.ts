@@ -189,19 +189,40 @@ describe('applyIsolation — the full solo↔parallel lifecycle (real git)', () 
     expect((await listWorktreeSlugs(repo)).sort()).toEqual(['03-a', '04-b']);
   });
 
-  it('dropping back to a single Run removes worktrees and returns to solo', async () => {
+  it('the surviving Run returns to main, but a dropped Run’s worktree is preserved (issue 28)', async () => {
     await applyIsolation(repo, [run(3, '03-a'), run(4, '04-b')]);
     expect((await listWorktreeSlugs(repo)).length).toBe(2);
 
-    // Run 04 is gone; only 03 remains active → solo on main again.
+    // Only 03 remains in the set → 03 goes solo on main and its worktree is torn
+    // down. 04-b is NOT in this batch’s set: reconcile must leave its worktree
+    // AND keep parallel mode on, because an unmerged branch still awaits a Merge
+    // — tearing it down here is the concurrent-main-cascade bug issue 28 fixes.
     const result = await applyIsolation(repo, [run(3, '03-a')]);
-    expect(result.parallel).toBe(false);
+    expect(result.parallel).toBe(false); // the batch’s own Run is solo
     expect(result.placements).toEqual([
       { issueId: 3, slug: '03-a', cwd: repo, branch: null },
     ]);
-    expect(isParallel(repo)).toBe(false); // flag removed
-    expect(await listWorktreeSlugs(repo)).toEqual([]); // both worktrees gone
-    expect(existsSync(worktreePathFor(repo, '04-b'))).toBe(false);
+    expect(isParallel(repo)).toBe(true); // flag kept — 04-b awaits Merge
+    expect(await listWorktreeSlugs(repo)).toEqual(['04-b']); // 03 gone, 04 kept
+    expect(existsSync(worktreePathFor(repo, '03-a'))).toBe(false);
+    expect(existsSync(worktreePathFor(repo, '04-b'))).toBe(true);
+  });
+
+  it('a fresh solo Run leaves a previous batch’s leftover worktree + parallel intact (issue 28)', async () => {
+    // Simulate a leftover from a previous batch: a worktree on disk that this
+    // batch never surfaced, with parallel mode still set (a pending Merge).
+    await applyIsolation(repo, [run(4, '04-b'), run(5, '05-c')]);
+    expect((await listWorktreeSlugs(repo)).sort()).toEqual(['04-b', '05-c']);
+
+    // A brand-new SOLO Run starts (only 09 in its set). It must not remove the
+    // leftover worktrees nor disable parallel mode out from under their Merge.
+    const result = await applyIsolation(repo, [run(9, '09-n')]);
+    expect(result.parallel).toBe(false); // the new Run itself is solo on main
+    expect(result.placements).toEqual([
+      { issueId: 9, slug: '09-n', cwd: repo, branch: null },
+    ]);
+    expect(isParallel(repo)).toBe(true); // leftovers keep parallel mode on
+    expect((await listWorktreeSlugs(repo)).sort()).toEqual(['04-b', '05-c']);
   });
 
   it('the MANUAL path: a lone Run runs on main, then a second isolates BOTH (issue 20)', async () => {

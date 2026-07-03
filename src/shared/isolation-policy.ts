@@ -134,6 +134,25 @@ export function decideIsolationWith(
   return decideIsolation(isolationRunSetWith(active, added));
 }
 
+/**
+ * When `applyIsolation` rejects — a git/worktree error, a disk error, a partial
+ * reconcile that threw mid-apply — may the caller fall back to running on the
+ * shared `main` checkout instead?
+ *
+ * Only for a LONE Run. The moment 2+ Runs would be live at once, `main` is the
+ * exact shared-checkout collision isolation exists to prevent (ADR-0002):
+ * silently draining every startable Run onto `main` runs multiple agents on top
+ * of each other in one working tree. So `<= 1` ⇒ true (a single Run may still
+ * proceed solo on `main`); `>= 2` ⇒ false — the caller must STOP and surface the
+ * error for the user to retry/resolve rather than degrade to concurrent `main`.
+ *
+ * `runCount` is the number of Runs that would end up live on `main` if the
+ * fallback proceeded, which the caller counts for its own entry point (issue 28).
+ */
+export function canFallBackToMain(runCount: number): boolean {
+  return runCount <= 1;
+}
+
 /** The isolation-relevant facts the adapter reads off disk before reconciling. */
 export interface IsolationState {
   /** Is `issues/.afk-parallel` present? */
@@ -162,6 +181,15 @@ export type IsolationCommand =
  *
  * Removing a worktree drops only the *worktree*, never its branch — unmerged
  * work stays on `afk/NN-slug` for the Merge step (issue 08) to integrate.
+ *
+ * Removals are scoped to the batch's OWN Runs (issue 28). A worktree on disk
+ * whose slug is not among this decision's Runs is a LEFTOVER — a finished,
+ * still-unmerged Run from a previous batch whose work a pending Merge needs. It
+ * is left intact (worktree AND branch), and its presence keeps `.afk-parallel`
+ * on: a fresh solo Run must never tear down another batch's worktrees or pull
+ * the parallel marker out from under branches still waiting to merge. So the
+ * only worktree reconcile removes is one whose Run is in THIS set but has
+ * dropped back to `main` (a 2→1 concurrency fall).
  */
 export function reconcile(
   current: IsolationState,
@@ -175,14 +203,20 @@ export function reconcile(
   );
   const desiredSlugs = new Set(desiredWorktrees.map((p) => p.slug));
   const currentSlugs = new Set(current.worktreeSlugs);
+  // The slugs THIS batch owns — every Run in the decision, whether it lands on
+  // `main` or in a worktree. Any on-disk worktree outside this set is a leftover
+  // and must be preserved (not this batch's to remove).
+  const ownedSlugs = new Set(desired.placements.map((p) => p.slug));
 
   if (desired.parallel && !current.parallel) {
     commands.push({ type: 'enable-parallel' });
   }
 
+  const removed = new Set<string>();
   for (const slug of [...current.worktreeSlugs].sort()) {
-    if (!desiredSlugs.has(slug)) {
+    if (ownedSlugs.has(slug) && !desiredSlugs.has(slug)) {
       commands.push({ type: 'remove-worktree', slug, branch: branchFor(slug) });
+      removed.add(slug);
     }
   }
 
@@ -197,7 +231,12 @@ export function reconcile(
     }
   }
 
-  if (!desired.parallel && current.parallel) {
+  // Disable parallel only once NO worktree remains on disk. Leftover worktrees
+  // (from a pending Merge) keep the marker on, so an unrelated solo Run never
+  // disables parallel mode out from under branches still awaiting merge.
+  const worktreesRemain =
+    desiredWorktrees.length > 0 || [...currentSlugs].some((s) => !removed.has(s));
+  if (!desired.parallel && current.parallel && !worktreesRemain) {
     commands.push({ type: 'disable-parallel' });
   }
 

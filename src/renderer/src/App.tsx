@@ -11,7 +11,11 @@ import {
 } from '../../shared/run-state';
 import { planDrain, type ActiveRun } from '../../shared/run-coordinator';
 import { hasInFlightRun } from '../../shared/run-eligibility';
-import { isolationRunSetWith, type IsolationRun } from '../../shared/isolation-policy';
+import {
+  canFallBackToMain,
+  isolationRunSetWith,
+  type IsolationRun,
+} from '../../shared/isolation-policy';
 import {
   deriveWorktreeRunStates,
   mergeReadinessOnDisk,
@@ -584,8 +588,22 @@ export function App(): JSX.Element {
           place((id) => cwdById[id] ?? projectPath);
         })
         .catch(() => {
-          // Isolation failed (e.g. a git worktree error): don't disturb the live
-          // Runs — just open the new Pane on `main` so it still starts.
+          // Isolation failed (a git worktree error, a partial reconcile). Falling
+          // back to `main` is safe only when this would be the LONE Run; if other
+          // Runs are already live (the set is 2+), opening this one on `main` is
+          // the concurrent-main collision isolation exists to prevent (issue 28).
+          // Surface the error and leave the live Runs untouched — don't spawn.
+          if (!canFallBackToMain(isolationRuns.length)) {
+            setFocusedId((cur) => (cur === target.issueId ? null : cur));
+            window.alert(
+              'Could not isolate this Run into its own worktree, and other Runs ' +
+                'are already live — refusing to start it on main (that would run ' +
+                'multiple agents on the shared checkout). Resolve the worktree/git ' +
+                'error and try again.',
+            );
+            return;
+          }
+          // A lone Run: safe to open the new Pane on `main` so it still starts.
           setRuns((prev) =>
             prev.some((r) => r.target.issueId === target.issueId)
               ? prev
@@ -812,15 +830,35 @@ export function App(): JSX.Element {
         addRuns((id) => cwdById[id] ?? projectPath);
       })
       .catch(() => {
-        // Isolation failed (e.g. git worktree error): don't stall the drain —
-        // fall back to running on main so the Pane still opens.
-        if (!cancelled) addRuns(() => projectPath);
+        if (cancelled) return;
+        // Isolation failed (a git worktree error, a disk error, a partial
+        // reconcile that threw mid-apply). Falling back to `main` is safe ONLY
+        // for a lone Run; spawning every startable Run on the shared checkout
+        // while others are live is the concurrent-main collision isolation
+        // exists to prevent (issue 28). Count the Runs that would end up live on
+        // `main`: the startable ones (all fall back to `main`) plus any Run
+        // already running solo on `main` (an isolated Run keeps its worktree, so
+        // it doesn't count). If that is 2+, STOP the drain and surface the error
+        // for the user to retry/resolve rather than run multiple agents unsafely.
+        const runningOnMain = runs.filter(
+          (r) => runStatusOf(r) === 'running' && !isIsolated(r),
+        ).length;
+        if (canFallBackToMain(runningOnMain + startableIssues.length)) {
+          addRuns(() => projectPath);
+        } else {
+          setDraining(false);
+          setDrainMessage(
+            'Isolation failed while starting parallel Runs — stopped to avoid ' +
+              'running multiple agents on main. Resolve the worktree/git error, ' +
+              'then start the drain again.',
+          );
+        }
       });
 
     return () => {
       cancelled = true;
     };
-  }, [draining, backlog, runs, cap, projectPath, midMerge, runStatusOf]);
+  }, [draining, backlog, runs, cap, projectPath, midMerge, runStatusOf, isIsolated]);
 
   // --- Merge readiness (issue 08, ADR-0002; issue 16) ---------------------
   // Whether a human-triggered Merge is offered — and which branches it targets —
