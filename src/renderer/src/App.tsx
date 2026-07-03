@@ -55,7 +55,9 @@ import {
   deriveRunStatus,
   observedIssueStatus,
   runningIssueIds,
+  decideSoloCommitStep,
   type RunStatus,
+  type SoloCommitPhase,
 } from '../../shared/run-state';
 import {
   auditMissingReceipts,
@@ -253,12 +255,21 @@ export function App(): JSX.Element {
 
   // --- Run state -----------------------------------------------------------
   const [runs, setRuns] = useState<TrackedRun[]>([]);
-  // Solo Runs whose finished work MC has already asked to commit onto `main`
-  // (issue 25), so a finished solo Run is auto-committed once — not on every
-  // re-render. Cleared for an id when a genuinely fresh Run of it starts, so a
-  // later Run of the same issue commits its own work. A rejected commit clears
-  // the id so a later observation retries; the adapter commit is idempotent.
-  const committedSoloIds = useRef<Set<number>>(new Set<number>());
+  // Each solo Run's Receipt-aware auto-commit lifecycle (issues 25 + 59), keyed
+  // by issue id. "Finished" for the solo commit means *done flip AND Receipt
+  // present*: the skill writes the Receipt LAST, so committing on the flip
+  // observation alone raced it and left the Receipt untracked on `main`,
+  // failing every later Merge preflight. The pure `decideSoloCommitStep` drives
+  // each observation: wait for the Receipt within a grace window (timers below),
+  // commit once with everything, and pick up a late straggler Receipt with an
+  // idempotent follow-up. Cleared for an id when a genuinely fresh Run of it
+  // starts; a rejected commit reverts the phase so a later observation retries.
+  // (Plain records, not Maps — the `Map` identifier here is the backlog-Map
+  // React component imported above.)
+  const soloCommitPhases = useRef<Record<number, SoloCommitPhase>>({});
+  // The per-issue Receipt grace timers, and which ids' windows have elapsed.
+  const soloGraceTimers = useRef<Record<number, ReturnType<typeof setTimeout>>>({});
+  const soloGraceElapsed = useRef<Set<number>>(new Set<number>());
   const [focusedId, setFocusedId] = useState<number | null>(null);
   // Which tile (if any) is maximized to fill the Pane area; null = tiled grid.
   const [maximizedId, setMaximizedId] = useState<number | null>(null);
@@ -456,7 +467,10 @@ export function App(): JSX.Element {
     autoMergeSig.current = null;
     setAfkScan(null);
     setWorktreeCommitErrors({});
-    committedSoloIds.current.clear();
+    soloCommitPhases.current = {};
+    for (const timer of Object.values(soloGraceTimers.current)) clearTimeout(timer);
+    soloGraceTimers.current = {};
+    soloGraceElapsed.current.clear();
     committedWorktreeIds.current.clear();
     // The Run-log feed is per-Project (issue 34): clear it and the Receipt
     // audit bookkeeping so the new Project starts blank and loads its own log.
@@ -565,30 +579,83 @@ export function App(): JSX.Element {
     [issueStatusOf, isIsolated, committedStatusById],
   );
 
-  // Auto-commit a finished SOLO Run's work on `main` (issue 25). A solo Run's
-  // agent flips its issue to `done` and leaves its files + the flip UNCOMMITTED
-  // on `main`; nothing else commits them, so `main` stays dirty and the next
-  // parallel Merge fails its clean-tree preflight. The moment a solo Run's
-  // derived status is `finished` (its `done` flip seen by the main-checkout
-  // watcher), MC commits it — once per Run, idempotently — so "finished"
-  // uniformly means "committed" and `main` stays mergeable. Isolated Runs commit
-  // on their own `afk/` branch (the worktree-commit effect below), so they are
-  // skipped here.
-  useEffect(() => {
-    if (projectPath === null) return;
-    for (const run of runs) {
-      if (isIsolated(run) || runStatusOf(run) !== 'finished') continue;
+  // Commit a solo Run's finished work on `main` via the adapter, moving its
+  // phase (issues 25 + 59). A rejected commit reverts the phase so a later
+  // observation retries; the adapter commit itself is idempotent on a clean tree.
+  const commitSoloRun = useCallback(
+    (run: TrackedRun, nextPhase: SoloCommitPhase): void => {
+      if (projectPath === null) return;
       const id = run.target.issueId;
-      if (committedSoloIds.current.has(id)) continue;
-      committedSoloIds.current.add(id);
+      const prior = soloCommitPhases.current[id] ?? 'unstarted';
+      soloCommitPhases.current[id] = nextPhase;
       void window.mc
         .commitFinishedMain({ projectPath, slug: slugOf(run.target.issueFileName) })
         .catch(() => {
           // Transient/failed commit: allow a later observation to retry.
-          committedSoloIds.current.delete(id);
+          soloCommitPhases.current[id] = prior;
         });
+    },
+    [projectPath],
+  );
+
+  // Auto-commit a finished SOLO Run's work on `main` (issue 25), Receipt-aware
+  // (issue 59). A solo Run's agent flips its issue to `done`, emits its block,
+  // and writes its Receipt (`issues/completions/NN-slug.md`) LAST — so a commit
+  // fired on the `done`-flip observation raced the Receipt, which then sat
+  // untracked on `main` and failed every later Merge's clean-tree preflight.
+  // "Finished" for this commit therefore means *done flip AND Receipt present*:
+  // the pure `decideSoloCommitStep` waits for the Receipt within the same grace
+  // window as the finished-without-receipt audit (no stall — after the window
+  // the work commits without it and the audit's note is the signal), and a late
+  // straggler Receipt is committed by a follow-up observation. Isolated Runs
+  // commit on their own `afk/` branch (the worktree-commit effect below), so
+  // they are skipped here. Re-runs on every Receipt ingest (`runLog`), so a
+  // Receipt landing mid-wait commits at once instead of at the window's end.
+  useEffect(() => {
+    if (projectPath === null) return;
+    for (const run of runs) {
+      if (isIsolated(run)) continue;
+      const id = run.target.issueId;
+      const step = decideSoloCommitStep({
+        runStatus: runStatusOf(run),
+        isolated: false,
+        phase: soloCommitPhases.current[id] ?? 'unstarted',
+        receiptPresent: hasReceiptFor(runLog, id),
+        graceElapsed: soloGraceElapsed.current.has(id),
+      });
+      if (step.act === 'commit') {
+        // A pending grace timer is superseded by this commit (e.g. the Receipt
+        // landed mid-wait) — cancel it so it can't fire a second decision.
+        const pending = soloGraceTimers.current[id];
+        if (pending !== undefined) {
+          clearTimeout(pending);
+          delete soloGraceTimers.current[id];
+        }
+        commitSoloRun(run, step.nextPhase);
+      } else if (step.act === 'schedule-grace') {
+        soloCommitPhases.current[id] = 'waiting';
+        const timer = setTimeout(() => {
+          delete soloGraceTimers.current[id];
+          soloGraceElapsed.current.add(id);
+          // The window passed: judge the CURRENT facts — a Receipt that landed
+          // meanwhile is included either way (`git add -A`), and a Project
+          // switch means this Run's commit is no longer ours to make.
+          if (projectPathRef.current !== projectPath) return;
+          const followUp = decideSoloCommitStep({
+            // It was `finished` when the wait began; a `done` flip does not
+            // regress (and the adapter re-checks the status before committing).
+            runStatus: 'finished',
+            isolated: false,
+            phase: soloCommitPhases.current[id] ?? 'unstarted',
+            receiptPresent: hasReceiptFor(runLogRef.current, id),
+            graceElapsed: true,
+          });
+          if (followUp.act === 'commit') commitSoloRun(run, followUp.nextPhase);
+        }, RECEIPT_AUDIT_GRACE_MS);
+        soloGraceTimers.current[id] = timer;
+      }
     }
-  }, [runs, projectPath, isIsolated, runStatusOf]);
+  }, [runs, runLog, projectPath, isIsolated, runStatusOf, commitSoloRun]);
 
   // Auto-commit a finished ISOLATED Run's worktree onto its `afk/` branch (issue
   // 15), now EVENT-driven off the on-disk scan (issue 30). The old status-read
@@ -790,9 +857,16 @@ export function App(): JSX.Element {
         return next;
       });
       // ...and let a fresh Run of this id auto-commit its OWN work — clear both the
-      // solo (issue 25) and isolated (issue 30) once-committed markers so it isn't
-      // treated as already-committed by a prior Run of the same id.
-      committedSoloIds.current.delete(target.issueId);
+      // solo (issues 25/59) and isolated (issue 30) commit bookkeeping so it isn't
+      // treated as already-committed (or already grace-elapsed) by a prior Run of
+      // the same id.
+      delete soloCommitPhases.current[target.issueId];
+      const staleTimer = soloGraceTimers.current[target.issueId];
+      if (staleTimer !== undefined) {
+        clearTimeout(staleTimer);
+        delete soloGraceTimers.current[target.issueId];
+      }
+      soloGraceElapsed.current.delete(target.issueId);
       committedWorktreeIds.current.delete(target.issueId);
 
       // No resolved Project path yet: can't reconcile isolation, so fall back to
@@ -1734,9 +1808,9 @@ export function App(): JSX.Element {
             // chat (ADR-0012, issue 48). `merge` is passive → channelForAction 'log'.
             logNote(`merge:${sig}`, 'merge', decision.note);
           } else if (decision.kind === 'gate') {
-            // A CONFLICT / preflight failure BLOCKS: record the pending proposal
-            // (the panel's approve/reject) and, because it is a blocking-approval
-            // prompt, ALSO surface the reason in the chat via the serialized queue.
+            // A REAL CONFLICT blocks: record the pending proposal (the panel's
+            // approve/reject) and, because it is a blocking-approval prompt,
+            // ALSO surface the reason in the chat via the serialized queue.
             setDispatcherActivities((prev) =>
               prev.some((a) => a.id === `merge-conflict:${sig}`)
                 ? prev
@@ -1745,6 +1819,14 @@ export function App(): JSX.Element {
             if (sessionId !== null && surfaceEvent(`merge-conflict:${sig}`, 'merge-conflict', decision.reason)) {
               pumpDispatcherQueue(sessionId);
             }
+          } else if (decision.kind === 'halt') {
+            // A PREFLIGHT/tool failure is NOT a conflict and NOT approvable
+            // (issue 59): an approval could only retry into the same dirty tree
+            // and fail identically. Surface its truthful reason (the offending
+            // paths) as its own passive note; once the tree is cleaned up (by
+            // the user, or by MC committing a straggler Receipt), a retry — the
+            // manual Merge button, or the next auto attempt — passes.
+            logNote(`merge-preflight:${sig}`, 'merge-preflight', decision.reason);
           }
         }
         if (result.ok) {

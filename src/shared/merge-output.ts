@@ -140,6 +140,57 @@ export function parseWrongBranch(output: string): WrongBranch | null {
   return m ? { current: m[1], expected: m[2] } : null;
 }
 
+/**
+ * The paths behind a dirty-tree preflight refusal, parsed from `git status
+ * --porcelain` output (issue 59). `afk-merge.sh`'s dirty-tree `die` line names
+ * only the repo path, so the adapter reads the porcelain itself and this turns
+ * it into the offending paths for the user-facing message. Handles the
+ * two-column status prefix, rename entries (`R  old -> new` — the new path is
+ * what is dirty), and git's quoting of paths with special characters.
+ */
+export function dirtyPathsFromPorcelain(porcelain: string): string[] {
+  const paths: string[] = [];
+  for (const line of porcelain.split('\n')) {
+    if (line.trim().length === 0) continue;
+    // Two status columns + a space, then the path.
+    let path = line.slice(3).trim();
+    const arrow = path.indexOf(' -> ');
+    if (arrow !== -1) path = path.slice(arrow + 4).trim();
+    if (path.startsWith('"') && path.endsWith('"') && path.length >= 2) {
+      path = path.slice(1, -1);
+    }
+    if (path.length > 0 && !paths.includes(path)) paths.push(path);
+  }
+  return paths;
+}
+
+/** How many offending paths the dirty-tree message names before summarising. */
+const DIRTY_PATHS_SHOWN = 6;
+
+/**
+ * The truthful dirty-tree preflight message (issue 59): a preflight failure is
+ * NOT a merge conflict, so it is surfaced as its own message naming the branch
+ * and the offending paths — "uncommitted changes on main:
+ * issues/completions/02-run-me.md" — instead of the old generic phrasing that
+ * the Dispatcher then dressed up as an approvable "conflict-ish" gate.
+ * Falls back to the generic phrasing when the paths could not be read. PURE.
+ */
+export function dirtyTreeMessage(defaultBranch: string, paths: string[]): string {
+  if (paths.length === 0) {
+    return (
+      'Merge preflight failed: the repository has uncommitted changes. ' +
+      'Commit or stash them, then Merge again.'
+    );
+  }
+  const shown = paths.slice(0, DIRTY_PATHS_SHOWN).join(', ');
+  const rest = paths.length - DIRTY_PATHS_SHOWN;
+  const list = rest > 0 ? `${shown} (+${rest} more)` : shown;
+  return (
+    `Merge preflight failed: uncommitted changes on ${defaultBranch}: ${list}. ` +
+    'Commit or stash them, then Merge again.'
+  );
+}
+
 /** The partial-merge facts recovered from a conflict-exit run (issue 24). */
 export interface PartialMergeState {
   /**

@@ -144,3 +144,89 @@ export interface MainCommitFacts {
 export function shouldCommitMain(facts: MainCommitFacts): boolean {
   return !facts.isolated && facts.mainStatus === 'done';
 }
+
+/**
+ * Where a solo Run's auto-commit stands in its Receipt-aware lifecycle (issue
+ * 59, ADR-0013). The skill's Receipt discipline is *write it last*: the Worker
+ * flips the issue `done`, emits its block, and only then writes
+ * `issues/completions/NN-slug.md`. Committing on the `done`-flip observation
+ * alone (the old issue-25 behavior) therefore races the Receipt: the commit
+ * lands without it, the Receipt stays untracked on `main`, and every later
+ * parallel Merge fails its clean-tree preflight.
+ *
+ *   - `unstarted`              — nothing decided for this Run yet.
+ *   - `waiting`                — the `done` flip was seen but no Receipt; the
+ *                                grace window is running.
+ *   - `committed-sans-receipt` — the grace window elapsed with no Receipt, so
+ *                                the work was committed without it (no stall —
+ *                                the finished-without-receipt note is the
+ *                                signal). A LATE Receipt still gets committed
+ *                                by a follow-up observation.
+ *   - `committed`              — the Run's work (and its Receipt, when one
+ *                                arrived) is committed; terminal.
+ */
+export type SoloCommitPhase =
+  | 'unstarted'
+  | 'waiting'
+  | 'committed-sans-receipt'
+  | 'committed';
+
+/** The facts one observation of a solo Run feeds the commit decision. */
+export interface SoloCommitFacts {
+  /** The Run's derived status (`deriveRunStatus`) at this observation. */
+  runStatus: RunStatus;
+  /** True when this Run works in a worktree on an `afk/` branch (not `main`). */
+  isolated: boolean;
+  /** Where this Run's auto-commit lifecycle currently stands. */
+  phase: SoloCommitPhase;
+  /** A Receipt for this Run's issue exists (ingested from `issues/completions/`). */
+  receiptPresent: boolean;
+  /** The Receipt grace window has elapsed since the finish was first observed. */
+  graceElapsed: boolean;
+}
+
+/**
+ * What one observation of a solo Run should do next:
+ *   - `commit`         — call the adapter's `commitFinishedMain` now; move to
+ *                        `nextPhase` (`committed`, or `committed-sans-receipt`
+ *                        when committing at grace expiry without a Receipt).
+ *   - `schedule-grace` — start the grace-window timer and move to `waiting`.
+ *   - `none`           — nothing to do at this observation.
+ */
+export type SoloCommitStep =
+  | { act: 'commit'; nextPhase: 'committed' | 'committed-sans-receipt' }
+  | { act: 'schedule-grace' }
+  | { act: 'none' };
+
+/**
+ * Decide a solo Run's next auto-commit step (issue 59). "Finished" for the solo
+ * commit means *done flip AND Receipt present* — so the ONE commit captures the
+ * deliverable, the issue flip, and the Receipt, and `main` ends clean. The
+ * grace window keeps that honest rather than eternal: if the Receipt never
+ * arrives, the work commits anyway once the window elapses (the
+ * finished-without-receipt audit's note remains the only signal), and a late
+ * Receipt is picked up by a follow-up `commit` on the next observation — which
+ * is safe because the adapter commit is idempotent on a clean tree.
+ * PURE — the timer, the Receipt lookup, and the git side effect live with the
+ * caller.
+ */
+export function decideSoloCommitStep(facts: SoloCommitFacts): SoloCommitStep {
+  if (facts.isolated || facts.runStatus !== 'finished') return { act: 'none' };
+  switch (facts.phase) {
+    case 'committed':
+      return { act: 'none' };
+    case 'committed-sans-receipt':
+      // The work is committed; only a late Receipt still needs a follow-up
+      // commit (the straggler that would otherwise leave `main` dirty).
+      return facts.receiptPresent
+        ? { act: 'commit', nextPhase: 'committed' }
+        : { act: 'none' };
+    case 'unstarted':
+    case 'waiting':
+      if (facts.receiptPresent) return { act: 'commit', nextPhase: 'committed' };
+      if (facts.graceElapsed) {
+        return { act: 'commit', nextPhase: 'committed-sans-receipt' };
+      }
+      return facts.phase === 'unstarted' ? { act: 'schedule-grace' } : { act: 'none' };
+  }
+}

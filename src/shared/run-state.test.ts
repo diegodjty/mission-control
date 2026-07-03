@@ -6,7 +6,9 @@ import {
   runningIssueIds,
   shouldCommitWorktree,
   shouldCommitMain,
+  decideSoloCommitStep,
   type RunStatus,
+  type SoloCommitFacts,
 } from './run-state';
 
 describe('deriveRunStatus', () => {
@@ -126,6 +128,90 @@ describe('shouldCommitMain (issue 25 — when to commit a solo Run on main)', ()
 
   it('never commits an isolated Run here — it commits on its own afk branch', () => {
     expect(shouldCommitMain({ isolated: true, mainStatus: 'done' })).toBe(false);
+  });
+});
+
+describe('decideSoloCommitStep (issue 59 — the solo finished-commit waits for the Receipt)', () => {
+  const facts = (
+    overrides: Partial<SoloCommitFacts> = {},
+  ): SoloCommitFacts => ({
+    runStatus: 'finished',
+    isolated: false,
+    phase: 'unstarted',
+    receiptPresent: false,
+    graceElapsed: false,
+    ...overrides,
+  });
+
+  it('does nothing while the Run is not finished', () => {
+    for (const runStatus of ['running', 'stopped', 'blocked'] as const) {
+      expect(decideSoloCommitStep(facts({ runStatus }))).toEqual({ act: 'none' });
+    }
+  });
+
+  it('never handles an isolated Run — it commits on its own afk branch', () => {
+    expect(decideSoloCommitStep(facts({ isolated: true, receiptPresent: true }))).toEqual({
+      act: 'none',
+    });
+  });
+
+  it('commits at once when the Receipt is already present (ONE commit: work + flip + Receipt)', () => {
+    expect(decideSoloCommitStep(facts({ receiptPresent: true }))).toEqual({
+      act: 'commit',
+      nextPhase: 'committed',
+    });
+  });
+
+  it('waits (schedules the grace window) when the done flip is seen but no Receipt yet', () => {
+    expect(decideSoloCommitStep(facts())).toEqual({ act: 'schedule-grace' });
+  });
+
+  it('keeps waiting inside the grace window — no commit, no re-schedule', () => {
+    expect(decideSoloCommitStep(facts({ phase: 'waiting' }))).toEqual({ act: 'none' });
+  });
+
+  it('commits the moment the Receipt lands during the wait', () => {
+    expect(decideSoloCommitStep(facts({ phase: 'waiting', receiptPresent: true }))).toEqual({
+      act: 'commit',
+      nextPhase: 'committed',
+    });
+  });
+
+  it('commits WITHOUT the Receipt once the grace window elapses (no stall — the missing-receipt note is the signal)', () => {
+    expect(decideSoloCommitStep(facts({ phase: 'waiting', graceElapsed: true }))).toEqual({
+      act: 'commit',
+      nextPhase: 'committed-sans-receipt',
+    });
+  });
+
+  it('a Receipt present at grace expiry wins over the sans-receipt path', () => {
+    expect(
+      decideSoloCommitStep(
+        facts({ phase: 'waiting', graceElapsed: true, receiptPresent: true }),
+      ),
+    ).toEqual({ act: 'commit', nextPhase: 'committed' });
+  });
+
+  it('commits a LATE Receipt as a straggler on the next observation (idempotent follow-up)', () => {
+    expect(
+      decideSoloCommitStep(
+        facts({ phase: 'committed-sans-receipt', receiptPresent: true, graceElapsed: true }),
+      ),
+    ).toEqual({ act: 'commit', nextPhase: 'committed' });
+  });
+
+  it('stays quiet after a sans-receipt commit until a Receipt actually appears', () => {
+    expect(
+      decideSoloCommitStep(facts({ phase: 'committed-sans-receipt', graceElapsed: true })),
+    ).toEqual({ act: 'none' });
+  });
+
+  it('never double-commits — a fully committed Run is terminal', () => {
+    expect(
+      decideSoloCommitStep(
+        facts({ phase: 'committed', receiptPresent: true, graceElapsed: true }),
+      ),
+    ).toEqual({ act: 'none' });
   });
 });
 

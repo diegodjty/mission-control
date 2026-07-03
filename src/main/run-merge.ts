@@ -44,6 +44,8 @@ import {
   classifyMergeFailure,
   parsePartialMerge,
   parseWrongBranch,
+  dirtyPathsFromPorcelain,
+  dirtyTreeMessage,
 } from '../shared/merge-output';
 import type { MergeRunsResult, MergeAbortResult } from '../shared/ipc-contract';
 
@@ -68,6 +70,22 @@ function confPath(projectPath: string): string {
  * old, wrong hardcoded "not on main". Falls back to the detected default branch,
  * then to a generic phrasing, if the line can't be parsed.
  */
+/**
+ * The offending paths behind a dirty-tree preflight refusal (issue 59), read
+ * from `git status --porcelain` in the main checkout — the script's own `die`
+ * line names only the repo directory, not what is actually uncommitted. Best
+ * effort: an unreadable status yields [] and the message falls back to the
+ * generic phrasing.
+ */
+async function dirtyMainPaths(projectPath: string): Promise<string[]> {
+  try {
+    const { stdout } = await exec('git', ['status', '--porcelain'], { cwd: projectPath });
+    return dirtyPathsFromPorcelain(stdout);
+  } catch {
+    return [];
+  }
+}
+
 function wrongBranchMessage(output: string, defaultBranch: string): string {
   const wb = parseWrongBranch(output);
   if (wb) {
@@ -214,9 +232,12 @@ export async function mergeRuns(
       };
     }
 
+    // A dirty-tree refusal names the ACTUAL offending paths (issue 59) — the
+    // truthful "uncommitted changes on main: <paths>" a user (or the straggler-
+    // Receipt commit) can act on, clearly distinct from a conflict.
     const message =
       cause === 'dirty-tree'
-        ? 'Merge preflight failed: the repository has uncommitted changes. Commit or stash them, then Merge again.'
+        ? dirtyTreeMessage(defaultBranch, await dirtyMainPaths(projectPath))
         : cause === 'wrong-branch'
           ? wrongBranchMessage(output, defaultBranch)
           : 'Merge could not run — see details below.';

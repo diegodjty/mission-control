@@ -64,6 +64,15 @@ export type DispatcherAction =
   | 'amend-plan'
   /** Change course (re-order, re-scope, skip) — a passive note, not a gate. */
   | 'course-change'
+  /**
+   * A Merge that failed its PREFLIGHT (uncommitted changes on main, wrong
+   * branch, tool error) — as opposed to hitting a real conflict (issue 59).
+   * Approving it could only retry into the same failed preflight, so it is NOT
+   * an approval: it surfaces as its own passive note naming the real cause
+   * (the offending paths), and the retry happens after the user (or MC's
+   * straggler-Receipt commit) cleans the tree.
+   */
+  | 'merge-preflight'
   // --- Blocking approval — the ADR-0011 three-item list ---
   /**
    * A Merge that hit a conflict. The one merge case that still blocks (ADR-0011
@@ -108,6 +117,7 @@ const AUTHORITY: Record<DispatcherAction, Authority> = {
   'discard-and-continue': 'passive',
   'amend-plan': 'passive',
   'course-change': 'passive',
+  'merge-preflight': 'passive',
   // The three-item blocking list.
   'merge-conflict': 'blocking',
   'abort-drain': 'blocking',

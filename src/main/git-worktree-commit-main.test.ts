@@ -29,6 +29,7 @@ import {
 import { mergeRuns, defaultMergeScriptPath } from './run-merge';
 import { readBacklog } from './backlog-reader';
 import { branchFor } from '../shared/isolation-policy';
+import { decideSoloCommitStep, type SoloCommitPhase } from '../shared/run-state';
 
 const exec = promisify(execFile);
 const SCRIPT = defaultMergeScriptPath();
@@ -135,6 +136,104 @@ describe('commitFinishedMain — auto-commit a finished solo Run on main', () =>
     expect(await mainIsClean()).toBe(false);
     const backlog = await readBacklog(repo);
     expect(backlog.issues.find((i) => i.id === 25)?.status).toBe('wip');
+  });
+});
+
+describe('issue 59 — the solo finished-commit waits for (and captures) the Receipt', () => {
+  const RECEIPT_PATH = `issues/completions/${SOLO_SLUG}.md`;
+
+  /** The skill's last write: the Receipt file, landing a beat after the flip. */
+  async function writeReceipt(): Promise<void> {
+    await mkdir(join(repo, 'issues/completions'), { recursive: true });
+    await writeFile(
+      join(repo, RECEIPT_PATH),
+      `---\nissue: 25\nslug: ${SOLO_SLUG}\noutcome: completed\nfinished: 2026-07-03T00:00:00Z\n---\n## Completed issue 25 — solo\n`,
+    );
+  }
+
+  /**
+   * Drive one observation exactly as the renderer does: run the pure decision
+   * against the live facts, and execute a `commit` step via the real adapter.
+   * Returns the next phase (unchanged when the step was not a commit).
+   */
+  async function observe(
+    phase: SoloCommitPhase,
+    receiptPresent: boolean,
+    graceElapsed: boolean,
+  ): Promise<SoloCommitPhase> {
+    const step = decideSoloCommitStep({
+      runStatus: 'finished',
+      isolated: false,
+      phase,
+      receiptPresent,
+      graceElapsed,
+    });
+    if (step.act === 'commit') {
+      await commitFinishedMain(repo, SOLO_SLUG);
+      return step.nextPhase;
+    }
+    return step.act === 'schedule-grace' ? 'waiting' : phase;
+  }
+
+  it('skill write-order (flip done → beat → Receipt): ONE commit with deliverable + flip + Receipt, main clean', async () => {
+    const before = await commitCountMain();
+
+    // The Worker flips `done`; the Receipt has not landed yet — the decision
+    // WAITS instead of firing the auto-commit on the flip observation.
+    await simulateSoloAgent('done');
+    let phase = await observe('unstarted', false, false);
+    expect(phase).toBe('waiting');
+    expect(await commitCountMain()).toBe(before); // nothing committed yet
+
+    // A beat later the Receipt lands (the skill's last write) → NOW commit.
+    await writeReceipt();
+    phase = await observe(phase, true, false);
+    expect(phase).toBe('committed');
+
+    // Exactly ONE commit, containing the deliverable, the flip AND the Receipt.
+    expect(await commitCountMain()).toBe(before + 1);
+    expect(await mainIsClean()).toBe(true);
+    const inCommit = await git(repo, 'show', '--name-only', '--format=', 'main');
+    expect(inCommit).toContain(SOLO_FEATURE_PATH);
+    expect(inCommit).toContain(SOLO_ISSUE_PATH);
+    expect(inCommit).toContain(RECEIPT_PATH);
+
+    // Re-observation stays quiet — never a double commit.
+    phase = await observe(phase, true, true);
+    expect(phase).toBe('committed');
+    expect(await commitCountMain()).toBe(before + 1);
+  });
+
+  it('Receipt after the grace window: work commits without it (no stall), the late Receipt is committed by the next observation', async () => {
+    const before = await commitCountMain();
+
+    await simulateSoloAgent('done');
+    let phase = await observe('unstarted', false, false);
+    expect(phase).toBe('waiting');
+
+    // The grace window elapses with NO Receipt → commit the work anyway
+    // (honesty over stalling; the missing-receipt note is the only signal).
+    phase = await observe(phase, false, true);
+    expect(phase).toBe('committed-sans-receipt');
+    expect(await commitCountMain()).toBe(before + 1);
+    expect(await mainIsClean()).toBe(true);
+
+    // The Receipt straggles in later, leaving main dirty again…
+    await writeReceipt();
+    expect(await mainIsClean()).toBe(false);
+
+    // …and the NEXT observation commits it (idempotent follow-up).
+    phase = await observe(phase, true, true);
+    expect(phase).toBe('committed');
+    expect(await commitCountMain()).toBe(before + 2);
+    expect(await mainIsClean()).toBe(true);
+    const straggler = await git(repo, 'show', '--name-only', '--format=', 'main');
+    expect(straggler.trim()).toBe(RECEIPT_PATH);
+
+    // Further observations are no-ops.
+    phase = await observe(phase, true, true);
+    expect(phase).toBe('committed');
+    expect(await commitCountMain()).toBe(before + 2);
   });
 });
 

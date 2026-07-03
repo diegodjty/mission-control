@@ -67,6 +67,7 @@ const LABELS: Record<DispatcherAction, string> = {
   'discard-and-continue': 'Discard the stranded worktree and continue the drain',
   'amend-plan': 'Amend the plan to reconcile a doc-drift finding',
   'course-change': 'Change course',
+  'merge-preflight': 'Merge preflight failed — clean up main, then Merge again',
   'merge-conflict': 'Resolve the merge conflict on main (or abort it)',
   'abort-drain': 'Abort the drain',
   'hitl-signoff': 'Sign off the HITL issue awaiting manual verification',

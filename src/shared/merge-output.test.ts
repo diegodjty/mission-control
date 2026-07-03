@@ -4,6 +4,8 @@ import {
   classifyMergeFailure,
   parsePartialMerge,
   parseWrongBranch,
+  dirtyPathsFromPorcelain,
+  dirtyTreeMessage,
 } from './merge-output';
 
 /**
@@ -216,5 +218,63 @@ describe('parsePartialMerge — the partial truth on a conflict exit (issue 24)'
       '    - src/lib/api.ts',
     ].join('\n');
     expect(parsePartialMerge(out).mergedBeforeConflict).toEqual(['03-a']);
+  });
+});
+
+describe('dirtyPathsFromPorcelain — the offending paths behind a dirty-tree refusal (issue 59)', () => {
+  it('lists modified, staged and untracked paths', () => {
+    const porcelain = [
+      ' M src/app.ts',
+      'A  src/new.ts',
+      '?? issues/completions/02-run-me.md',
+    ].join('\n');
+    expect(dirtyPathsFromPorcelain(porcelain)).toEqual([
+      'src/app.ts',
+      'src/new.ts',
+      'issues/completions/02-run-me.md',
+    ]);
+  });
+
+  it('keeps the rename target for a rename entry', () => {
+    expect(dirtyPathsFromPorcelain('R  old-name.ts -> new-name.ts')).toEqual(['new-name.ts']);
+  });
+
+  it('unquotes a git-quoted path (spaces/specials)', () => {
+    expect(dirtyPathsFromPorcelain('?? "a file.md"')).toEqual(['a file.md']);
+  });
+
+  it('returns [] for a clean tree (empty porcelain)', () => {
+    expect(dirtyPathsFromPorcelain('')).toEqual([]);
+    expect(dirtyPathsFromPorcelain('\n')).toEqual([]);
+  });
+});
+
+describe('dirtyTreeMessage — the truthful preflight message naming the paths (issue 59)', () => {
+  it('names the branch and the offending paths — distinct from a conflict message', () => {
+    const msg = dirtyTreeMessage('main', ['issues/completions/02-run-me.md']);
+    expect(msg).toBe(
+      'Merge preflight failed: uncommitted changes on main: ' +
+        'issues/completions/02-run-me.md. Commit or stash them, then Merge again.',
+    );
+    expect(msg).not.toMatch(/conflict/i);
+  });
+
+  it('names the DETECTED default branch, not a hardcoded main', () => {
+    expect(dirtyTreeMessage('master', ['a.txt'])).toContain('uncommitted changes on master: a.txt');
+  });
+
+  it('caps a long path list and counts the rest', () => {
+    const paths = ['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8'];
+    const msg = dirtyTreeMessage('main', paths);
+    expect(msg).toContain('p6');
+    expect(msg).not.toContain('p7');
+    expect(msg).toContain('(+2 more)');
+  });
+
+  it('falls back to the generic phrasing when no paths could be read', () => {
+    expect(dirtyTreeMessage('main', [])).toBe(
+      'Merge preflight failed: the repository has uncommitted changes. ' +
+        'Commit or stash them, then Merge again.',
+    );
   });
 });

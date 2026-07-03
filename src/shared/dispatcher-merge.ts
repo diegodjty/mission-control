@@ -76,34 +76,47 @@ export function shouldAutoMerge(ctx: AutoMergeContext): boolean {
  * The post-run classification of a completed auto-merge:
  *   - `auto`  — the merge landed cleanly; the Dispatcher proceeded on its own and
  *     records a passive `merge` note (`action`) with a plain-language `note`.
- *   - `gate`  — the merge conflicted or failed preflight; the Dispatcher must
- *     BLOCK for a one-click approval, recording a `merge-conflict` proposal
- *     (`action`) and surfacing the `reason`. Never auto-resolved.
+ *   - `gate`  — the merge hit a REAL conflict; the Dispatcher must BLOCK for a
+ *     one-click approval, recording a `merge-conflict` proposal (`action`) and
+ *     surfacing the `reason`. Never auto-resolved.
+ *   - `halt`  — the merge failed BEFORE merging anything (a preflight refusal —
+ *     uncommitted changes / wrong branch — or a tool error, issue 59). This is
+ *     NOT a conflict and NOT approvable: an approval could only retry into the
+ *     same failed preflight and fail identically. It surfaces as its own passive
+ *     `merge-preflight` note carrying the truthful `reason` (the offending
+ *     paths); the retry comes after the tree is cleaned up.
  *   - `noop`  — the run succeeded but merged nothing (e.g. the branches vanished
  *     between the readiness scan and the run): no note, no gate.
  */
 export type DispatcherMergeDecision =
   | { kind: 'auto'; action: Extract<DispatcherAction, 'merge'>; note: string }
   | { kind: 'gate'; action: Extract<DispatcherAction, 'merge-conflict'>; reason: string }
+  | { kind: 'halt'; action: Extract<DispatcherAction, 'merge-preflight'>; reason: string }
   | { kind: 'noop' };
 
 /**
- * Map the adapter's completed `MergeRunsResult` onto the Dispatcher's auto-vs-gate
- * posture (ADR-0011):
+ * Map the adapter's completed `MergeRunsResult` onto the Dispatcher's posture
+ * (ADR-0011, refined by issue 59):
  *   - clean (`ok`) with ≥1 slug merged → `auto` (passive `merge` note).
  *   - clean but nothing merged           → `noop` (nothing actually landed).
- *   - not `ok` (a conflict OR a preflight failure) → `gate` (blocking
- *     `merge-conflict`, surfacing the adapter's reason). A conflict is never
- *     auto-resolved — the human resolves or aborts it.
+ *   - a real conflict (`conflicted`)     → `gate` (blocking `merge-conflict`,
+ *     surfacing the adapter's reason). Never auto-resolved — the human resolves
+ *     or aborts it. The ADR-0011 blocking list is unchanged.
+ *   - any other failure (preflight refusal / tool error) → `halt` (a passive
+ *     `merge-preflight` note, issue 59) — the old behavior gated these too, which
+ *     presented an approval that could never succeed: approving just re-ran the
+ *     merge into the same dirty tree.
  * The `message` the adapter builds already names the real cause (conflicting
- * files / mid-merge state, or the preflight refusal), so it is the `reason`. PURE.
+ * files / mid-merge state, or the preflight refusal with its offending paths),
+ * so it is the `reason`. PURE.
  */
 export function decideDispatcherMerge(result: MergeRunsResult): DispatcherMergeDecision {
   if (result.ok) {
     if (result.merged.length === 0) return { kind: 'noop' };
     return { kind: 'auto', action: 'merge', note: result.message };
   }
-  // Not ok ⇒ a conflict or a preflight failure. Both block for approval under
-  // ADR-0011's three-item list; neither is auto-resolved.
-  return { kind: 'gate', action: 'merge-conflict', reason: result.message };
+  if (result.conflicted) {
+    return { kind: 'gate', action: 'merge-conflict', reason: result.message };
+  }
+  return { kind: 'halt', action: 'merge-preflight', reason: result.message };
 }

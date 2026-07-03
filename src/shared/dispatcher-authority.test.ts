@@ -21,6 +21,7 @@ const LINE: Record<DispatcherAction, Authority> = {
   'discard-and-continue': 'passive',
   'amend-plan': 'passive',
   'course-change': 'passive',
+  'merge-preflight': 'passive',
   // The three-item blocking list.
   'merge-conflict': 'blocking',
   'abort-drain': 'blocking',
@@ -52,6 +53,11 @@ describe('dispatcher authority classifier (ADR-0011, silent-autonomy default)', 
   it('a clean merge is passive but a conflicting merge blocks (refines ADR-0002)', () => {
     expect(classifyAuthority('merge')).toBe('passive');
     expect(classifyAuthority('merge-conflict')).toBe('blocking');
+  });
+
+  it('a merge PREFLIGHT failure is passive — a message, never an approval that cannot succeed (issue 59)', () => {
+    expect(classifyAuthority('merge-preflight')).toBe('passive');
+    expect(isBlocking('merge-preflight')).toBe(false);
   });
 
   it('keeps pure scheduling/relay mechanics silent', () => {

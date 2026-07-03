@@ -278,6 +278,9 @@ describe('mergeRuns — the real afk-merge.sh against real parallel branches', (
     expect(result.merged).toEqual([]);
     expect(result.message).toMatch(/uncommitted changes/i);
     expect(result.message).not.toMatch(/conflict/i);
+    // The message names the branch AND the offending path(s) (issue 59), so the
+    // user can act on it instead of guessing what is dirty.
+    expect(result.message).toContain('uncommitted changes on main: README.md');
     // The branch and worktree are untouched — nothing was merged or cleaned up.
     expect(await branchExists('03-a')).toBe(true);
     expect(existsSync(worktreePathFor(repo, '03-a'))).toBe(true);

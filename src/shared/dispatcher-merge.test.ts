@@ -91,22 +91,31 @@ describe('decideDispatcherMerge (post-run classification)', () => {
     expect(classifyAuthority('merge-conflict')).toBe('blocking');
   });
 
-  it('a preflight failure (dirty tree / wrong branch) also blocks, not silently proceeds', () => {
+  it('a preflight failure (dirty tree / wrong branch) surfaces its reason WITHOUT an approval (issue 59)', () => {
+    // Approving a preflight failure just retries into the same dirty tree and
+    // fails identically — so it must NOT be presented as an approvable gate.
     const preflight = result({
       ok: false,
       conflicted: false,
       midMerge: false,
       merged: [],
       message:
-        'Merge preflight failed: the repository has uncommitted changes. ' +
-        'Commit or stash them, then Merge again.',
+        'Merge preflight failed: uncommitted changes on main: ' +
+        'issues/completions/02-run-me.md. Commit or stash them, then Merge again.',
     });
     const decision = decideDispatcherMerge(preflight);
-    expect(decision.kind).toBe('gate');
-    if (decision.kind === 'gate') {
-      expect(decision.action).toBe('merge-conflict');
-      expect(decision.reason).toBe(preflight.message);
-    }
+    expect(decision).toEqual({
+      kind: 'halt',
+      action: 'merge-preflight',
+      reason: preflight.message,
+    });
+    // The surfaced note is passive (its own message), never a blocking approval.
+    expect(classifyAuthority('merge-preflight')).toBe('passive');
+  });
+
+  it('a real conflict still gates exactly as before (ADR-0011 blocking list unchanged)', () => {
+    const conflict = result({ ok: false, conflicted: true, midMerge: true, merged: [] });
+    expect(decideDispatcherMerge(conflict).kind).toBe('gate');
   });
 
   it('a clean run that merged nothing is a no-op (no note, no gate)', () => {
