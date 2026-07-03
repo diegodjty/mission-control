@@ -111,3 +111,50 @@ describe('describeRunGuidance', () => {
     expect(describeRunGuidance(summarizeRunGuidance([]))).toBe('No issues in this backlog.');
   });
 });
+
+describe('summarizeRunGuidance with on-disk worktree scan (issue 21)', () => {
+  it('does not list an issue running in a worktree as runnable, though main reads open', () => {
+    const one = mk(1, 'done');
+    const two = mk(2, 'open', [1]); // eligible on main
+    const three = mk(3, 'open', [1]); // eligible on main
+    // Issue 2 has a live Run in its worktree — must drop out of the runnable set.
+    const guidance = summarizeRunGuidance([one, two, three], { worktreeRunningIds: [2] });
+    expect(guidance.kind).toBe('eligible');
+    if (guidance.kind === 'eligible') {
+      expect(guidance.runnable.map((r) => r.id)).toEqual([3]);
+    }
+  });
+
+  it('does not list a finished-but-unmerged issue as runnable', () => {
+    const one = mk(1, 'done');
+    const two = mk(2, 'open', [1]);
+    const guidance = summarizeRunGuidance([one, two], { finishedUnmergedIds: [2] });
+    // 2 is the only eligible-on-main issue but it's finished-unmerged → nothing
+    // runnable, and it must NOT be reported as blocked either (it's being worked).
+    expect(guidance).toEqual({ kind: 'settled', doneCount: 1, wipCount: 0 });
+  });
+
+  it('omits an in-flight open issue from the blocked listing (not runnable, not blocked)', () => {
+    const one = mk(1, 'done');
+    const two = mk(2, 'open', [1]); // running in a worktree
+    const three = mk(3, 'open', [99]); // genuinely blocked (missing dep)
+    const guidance = summarizeRunGuidance([one, two, three], { worktreeRunningIds: [2] });
+    expect(guidance).toEqual({
+      kind: 'blocked',
+      blocked: [
+        { id: 3, title: '3 — issue 3', unmet: [{ id: 99, status: 'missing', title: null }] },
+      ],
+    });
+  });
+
+  it('is unaffected by the scan when the in-flight ids are not eligible anyway', () => {
+    const one = mk(1, 'done');
+    const two = mk(2, 'open', [1]); // eligible
+    // A stale scan id for an already-done issue changes nothing.
+    const guidance = summarizeRunGuidance([one, two], { finishedUnmergedIds: [1] });
+    expect(guidance.kind).toBe('eligible');
+    if (guidance.kind === 'eligible') {
+      expect(guidance.runnable.map((r) => r.id)).toEqual([2]);
+    }
+  });
+});

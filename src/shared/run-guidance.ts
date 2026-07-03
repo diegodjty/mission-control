@@ -14,7 +14,7 @@
  * Decisions"); the Map just renders what these functions return.
  */
 import type { BacklogIssue } from './backlog-model';
-import { eligibleForRun } from './run-eligibility';
+import { runnableNow, type InFlightRuns } from './run-eligibility';
 import { deriveIssueState, type UnmetDependency } from './issue-graph';
 
 /** One issue a Run can be started on right now (open, all dependencies done). */
@@ -53,23 +53,40 @@ function byIdAsc(a: { id: number }, b: { id: number }): number {
 }
 
 /**
- * Summarize the current backlog into live Run guidance. Derives eligibility
- * from `eligibleForRun` and blocked reasons from `deriveIssueState`, so this
- * agrees with the Map's per-row badges by construction.
+ * Summarize the current backlog into live Run guidance. Derives runnability from
+ * `runnableNow` and blocked reasons from `deriveIssueState`, so this agrees with
+ * the Map's per-row badges by construction.
+ *
+ * `inFlight` carries the on-disk worktree scan (issue 16): an issue with a live
+ * or finished-unmerged isolated Run on its `afk/` branch is NOT listed as
+ * runnable even though the main checkout still reads it `open` — so the banner
+ * and the per-row Run buttons never disagree (issue 21). Optional so callers
+ * without a scan (tests, uncontrolled Map) get the plain dependency-only view.
  */
-export function summarizeRunGuidance(issues: BacklogIssue[]): RunGuidance {
+export function summarizeRunGuidance(
+  issues: BacklogIssue[],
+  inFlight: InFlightRuns = {},
+): RunGuidance {
   if (issues.length === 0) return { kind: 'empty' };
 
   const runnable = issues
-    .filter((issue) => eligibleForRun(issue, issues))
+    .filter((issue) => runnableNow(issue, issues, inFlight))
     .sort(byIdAsc)
     .map((issue) => ({ id: issue.id, title: issue.title, fileName: issue.fileName }));
   if (runnable.length > 0) return { kind: 'eligible', runnable };
 
   // Nothing eligible. Any open issues left are — by the eligibility rule —
   // blocked on unmet dependencies; name them so the user knows what to unblock.
+  // An open issue that's actually in flight / finished-unmerged in a worktree is
+  // neither runnable nor blocked (its real progress lives on its `afk/` branch),
+  // so it's omitted here too — the Map row already shows it running/finished
+  // (issue 21).
+  const inFlightIds = new Set<number>([
+    ...(inFlight.worktreeRunningIds ?? []),
+    ...(inFlight.finishedUnmergedIds ?? []),
+  ]);
   const blocked = issues
-    .filter((issue) => issue.status === 'open')
+    .filter((issue) => issue.status === 'open' && !inFlightIds.has(issue.id))
     .sort(byIdAsc)
     .map((issue) => {
       const state = deriveIssueState(issue, issues);

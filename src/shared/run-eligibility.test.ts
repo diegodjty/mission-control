@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { eligibleForRun, unmetDependencies } from './run-eligibility';
+import {
+  eligibleForRun,
+  unmetDependencies,
+  hasInFlightRun,
+  runnableNow,
+} from './run-eligibility';
 import type { BacklogIssue, IssueStatus } from './backlog-model';
 
 /** Minimal issue factory — only the fields the eligibility logic reads. */
@@ -73,5 +78,61 @@ describe('eligibleForRun', () => {
   it('is not runnable when the issue is already done', () => {
     const one = mk(1, 'done');
     expect(eligibleForRun(one, [one])).toBe(false);
+  });
+});
+
+describe('hasInFlightRun', () => {
+  it('is false with no scan / empty sets', () => {
+    expect(hasInFlightRun(1)).toBe(false);
+    expect(hasInFlightRun(1, {})).toBe(false);
+    expect(hasInFlightRun(1, { worktreeRunningIds: [], finishedUnmergedIds: [] })).toBe(false);
+  });
+
+  it('is true when the id is running in a worktree', () => {
+    expect(hasInFlightRun(4, { worktreeRunningIds: [4, 5] })).toBe(true);
+  });
+
+  it('is true when the id is finished-but-unmerged on its afk/ branch', () => {
+    expect(hasInFlightRun(7, { finishedUnmergedIds: [7] })).toBe(true);
+  });
+
+  it('is false for an id not in either on-disk set', () => {
+    expect(
+      hasInFlightRun(3, { worktreeRunningIds: [4], finishedUnmergedIds: [7] }),
+    ).toBe(false);
+  });
+});
+
+describe('runnableNow', () => {
+  it('is runnable when eligible and not in flight on disk', () => {
+    const one = mk(1, 'done');
+    const two = mk(2, 'open', [1]);
+    expect(runnableNow(two, [one, two])).toBe(true);
+    expect(runnableNow(two, [one, two], { worktreeRunningIds: [], finishedUnmergedIds: [] })).toBe(
+      true,
+    );
+  });
+
+  it('is NOT runnable when a Run is already live in its worktree, even though main reads open', () => {
+    // main-checkout status is still `open` (the work lives on the afk/ branch),
+    // so eligibleForRun alone would wrongly say yes — the on-disk scan overrides.
+    const one = mk(1, 'done');
+    const two = mk(2, 'open', [1]);
+    expect(eligibleForRun(two, [one, two])).toBe(true);
+    expect(runnableNow(two, [one, two], { worktreeRunningIds: [2] })).toBe(false);
+  });
+
+  it('is NOT runnable when finished-but-unmerged (its done flip is on the afk/ branch)', () => {
+    const one = mk(1, 'done');
+    const two = mk(2, 'open', [1]);
+    expect(runnableNow(two, [one, two], { finishedUnmergedIds: [2] })).toBe(false);
+  });
+
+  it('stays not-runnable when it was never eligible, regardless of the scan', () => {
+    const one = mk(1, 'wip');
+    const two = mk(2, 'open', [1]); // blocked on 1
+    expect(runnableNow(two, [one, two], { worktreeRunningIds: [], finishedUnmergedIds: [] })).toBe(
+      false,
+    );
   });
 });

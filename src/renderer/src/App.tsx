@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Pane } from './Pane';
 import { Map } from './Map';
 import { ProjectBar } from './ProjectBar';
@@ -10,6 +10,7 @@ import {
   type RunStatus,
 } from '../../shared/run-state';
 import { planDrain, type ActiveRun } from '../../shared/run-coordinator';
+import { hasInFlightRun } from '../../shared/run-eligibility';
 import { isolationRunSetWith, type IsolationRun } from '../../shared/isolation-policy';
 import {
   deriveWorktreeRunStates,
@@ -291,13 +292,18 @@ export function App(): JSX.Element {
   // Pure derivations from the on-disk scan: which issues show `running` /
   // `finished (unmerged)` on the Map, and whether the Merge is offered (from
   // disk, so it survives closing Panes).
-  const worktreeRunStates = deriveWorktreeRunStates(afkScan);
-  const worktreeRunningIds = worktreeRunStates
-    .filter((s) => s.kind === 'running')
-    .map((s) => s.issueId);
-  const finishedUnmergedIds = worktreeRunStates
-    .filter((s) => s.kind === 'finished-unmerged')
-    .map((s) => s.issueId);
+  // Memoized so their identity only changes when the on-disk scan does — this
+  // keeps `startRun` (which now consults them to refuse a duplicate) from being
+  // rebuilt on every unrelated render.
+  const worktreeRunStates = useMemo(() => deriveWorktreeRunStates(afkScan), [afkScan]);
+  const worktreeRunningIds = useMemo(
+    () => worktreeRunStates.filter((s) => s.kind === 'running').map((s) => s.issueId),
+    [worktreeRunStates],
+  );
+  const finishedUnmergedIds = useMemo(
+    () => worktreeRunStates.filter((s) => s.kind === 'finished-unmerged').map((s) => s.issueId),
+    [worktreeRunStates],
+  );
 
   const activeRunIssueIds = runs.map((r) => r.target.issueId);
 
@@ -321,11 +327,38 @@ export function App(): JSX.Element {
   // started the Run.
   const startRun = useCallback(
     (target: RunTarget): void => {
+      const tracked = runs.some((r) => r.target.issueId === target.issueId);
+
+      // On-disk truth wins over in-memory tracking (issue 21): an issue already
+      // live in a worktree, or finished-but-unmerged on its `afk/` branch, must
+      // not get a second Run — even after its Pane was closed and its in-memory
+      // Run dropped (which is why the in-memory `runs` check alone isn't enough).
+      // Re-attaching a worktree to the committed branch clobbers finished work
+      // and can push commits onto a branch a pending Merge is about to integrate.
+      // The Map already hides the Run affordance for these; this is the backstop
+      // for any other caller. (A still-tracked Run just gets surfaced below.)
+      if (
+        !tracked &&
+        hasInFlightRun(target.issueId, { worktreeRunningIds, finishedUnmergedIds })
+      ) {
+        return;
+      }
+
       setView('pane');
       setFocusedId(target.issueId);
 
       // Already tracked → just surface it, exactly as before (no re-spawn).
-      if (runs.some((r) => r.target.issueId === target.issueId)) return;
+      if (tracked) return;
+
+      // A genuinely fresh Run for this id: drop any stale worktree status left by
+      // a previous Run of the same id, so this Run isn't shown `finished` until
+      // its own work actually reaches `done` on disk (issue 21).
+      setWorktreeStatuses((prev) => {
+        if (!(target.issueId in prev)) return prev;
+        const next = { ...prev };
+        delete next[target.issueId];
+        return next;
+      });
 
       // No resolved Project path yet: can't reconcile isolation, so fall back to
       // spawning on the target's given path (a lone Run). Never blocks the Pane.
@@ -387,7 +420,7 @@ export function App(): JSX.Element {
           );
         });
     },
-    [runs, projectPath, needsIsolation],
+    [runs, projectPath, needsIsolation, worktreeRunningIds, finishedUnmergedIds],
   );
 
   const stopRun = useCallback((issueId: number): void => {
@@ -413,6 +446,14 @@ export function App(): JSX.Element {
     setRuns((prev) => prev.filter((r) => r.target.issueId !== issueId));
     setMaximizedId((cur) => (cur === issueId ? null : cur));
     setFocusedId((cur) => (cur === issueId ? null : cur));
+    // Drop this Run's observed worktree status so a later Run of the same id
+    // doesn't inherit a stale `finished` (issue 21).
+    setWorktreeStatuses((prev) => {
+      if (!(issueId in prev)) return prev;
+      const next = { ...prev };
+      delete next[issueId];
+      return next;
+    });
   }, []);
 
   const handleRunExit = useCallback((issueId: number): void => {
@@ -564,6 +605,15 @@ export function App(): JSX.Element {
           // The merged Runs' worktrees are gone; drop them from tracking so the
           // Merge action clears. Unmerged (blocked/stopped) Runs stay put.
           setRuns((prev) => prev.filter((r) => !mergedIds.has(r.target.issueId)));
+          // Clear the merged ids' observed worktree status too, so re-using any
+          // of those ids for a later Run doesn't inherit a stale `finished`
+          // (issue 21).
+          setWorktreeStatuses((prev) => {
+            if (![...mergedIds].some((id) => id in prev)) return prev;
+            const next = { ...prev };
+            for (const id of mergedIds) delete next[id];
+            return next;
+          });
         }
       })
       .catch((err: unknown) => {

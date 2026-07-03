@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Backlog, BacklogIssue } from '../../shared/backlog-model';
 import type { RunTarget } from '../../shared/ipc-contract';
-import { eligibleForRun } from '../../shared/run-eligibility';
+import { runnableNow, type InFlightRuns } from '../../shared/run-eligibility';
 import {
   deriveIssueState,
   dependents,
@@ -102,6 +102,12 @@ export function Map({
   const activeRunSet = new Set(activeRunIssueIds ?? []);
   const worktreeRunningSet = new Set(worktreeRunningIds ?? []);
   const finishedUnmergedSet = new Set(finishedUnmergedIds ?? []);
+  // The on-disk worktree scan (issue 16) that gates "can I Run this?" on truth
+  // the main checkout can't see (issue 21): an issue live in a worktree or
+  // finished-but-unmerged on its `afk/` branch is not runnable even while `main`
+  // still reads it `open`. Fed to the guidance banner and the detail Run button
+  // so both agree with the per-row indicators.
+  const inFlight: InFlightRuns = { worktreeRunningIds, finishedUnmergedIds };
   const [path, setPath] = useState('');
   const [lastRequest, setLastRequest] = useState('');
   const [resolvedPath, setResolvedPath] = useState<string | null>(null);
@@ -305,7 +311,11 @@ export function Map({
           nothing is eligible it states why (blocked-on / all done-wip) instead
           of implying a Run action that isn't there. */}
       {backlog && (
-        <RunGuidanceBanner issues={backlog.issues} onSelect={(id) => setSelectedId(id)} />
+        <RunGuidanceBanner
+          issues={backlog.issues}
+          inFlight={inFlight}
+          onSelect={(id) => setSelectedId(id)}
+        />
       )}
 
       <div className="map__split">
@@ -355,10 +365,16 @@ export function Map({
                 </span>
                 {activeRunSet.has(selected.id) ? (
                   <span className="run-badge run-badge--active">Run in progress</span>
+                ) : worktreeRunningSet.has(selected.id) ? (
+                  <span className="run-badge run-badge--active">Run in progress</span>
+                ) : finishedUnmergedSet.has(selected.id) ? (
+                  <span className="run-badge run-badge--finished-unmerged">
+                    finished (unmerged)
+                  </span>
                 ) : (
                   backlog &&
                   onRun &&
-                  eligibleForRun(selected, backlog.issues) && (
+                  runnableNow(selected, backlog.issues, inFlight) && (
                     <button
                       className="run-btn"
                       onClick={() =>
@@ -398,12 +414,14 @@ export function Map({
  */
 function RunGuidanceBanner({
   issues,
+  inFlight,
   onSelect,
 }: {
   issues: BacklogIssue[];
+  inFlight: InFlightRuns;
   onSelect: (id: number) => void;
 }): JSX.Element {
-  const guidance: RunGuidance = summarizeRunGuidance(issues);
+  const guidance: RunGuidance = summarizeRunGuidance(issues, inFlight);
   const eligible = guidance.kind === 'eligible';
   return (
     <div className={`map__guidance map__guidance--${eligible ? 'eligible' : 'none'}`}>
