@@ -1,6 +1,6 @@
 ---
 status: open
-depends_on: [45, 46, 47, 48, 49, 50]
+depends_on: [45, 46, 47, 48, 49, 50, 52, 53]
 hitl: true
 ---
 
