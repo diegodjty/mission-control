@@ -44,6 +44,10 @@ import { isRealCapture, isStrongOverlap } from '../../shared/dispatcher-noise-fl
 import {
   reconcileStatusModel,
   renderStatusModel,
+  debounceStatusModel,
+  initialStatusDebounceState,
+  type DispatcherStatusModel,
+  type StatusDebounceState,
 } from '../../shared/dispatcher-status-model';
 import {
   deriveRunStatus,
@@ -335,6 +339,15 @@ export function App(): JSX.Element {
   // to the Dispatcher, so it is re-fed only when the reconciled done/wip/open/
   // finished-unmerged picture actually changes — not on every render/poll.
   const statusRefreshSig = useRef<string | null>(null);
+  // Debounce backward status moves (issue 49, ADR-0012): the state carried
+  // between reconcile checkpoints so a transient mid-reconcile regression (the
+  // false "05/06/07 regressed to open — merge is failing" blip) is held until it
+  // persists across a further checkpoint before being surfaced. `seenReconciled`
+  // makes the advance idempotent under StrictMode's double-invoke: the debounce
+  // advances exactly once per DISTINCT reconciled model, never twice for one.
+  const statusDebounce = useRef<StatusDebounceState>(initialStatusDebounceState());
+  const seenReconciled = useRef<DispatcherStatusModel | null>(null);
+  const debouncedStatusModelRef = useRef<DispatcherStatusModel | null>(null);
 
   // --- Merge state (issue 08; issue 17) ------------------------------------
   // `mergeDisplay` is the pure selector's decision of what the Merge UI shows
@@ -428,6 +441,9 @@ export function App(): JSX.Element {
     discardTargets.current = {};
     overlapSurfaced.current.clear();
     statusRefreshSig.current = null;
+    statusDebounce.current = initialStatusDebounceState();
+    seenReconciled.current = null;
+    debouncedStatusModelRef.current = null;
     setMerging(false);
     setAborting(false);
     setMergeDisplay(null);
@@ -1237,6 +1253,25 @@ export function App(): JSX.Element {
     [backlog, worktreeRunStates, runLog],
   );
 
+  // Debounce backward status moves before surfacing (issue 49, ADR-0012). Each
+  // recompute of `dispatcherStatusModel` above is one reconcile CHECKPOINT: a
+  // BACKWARD move (finished/finished-unmerged → open, done → not-done) is held at
+  // its prior status until it persists across a further checkpoint, killing the
+  // transient mid-reconcile blip; FORWARD moves surface immediately. The advance
+  // is guarded so it runs once per distinct reconciled model even though
+  // StrictMode double-invokes the memo (advancing twice would falsely "confirm" a
+  // one-snapshot regression).
+  const debouncedStatusModel = useMemo(() => {
+    if (seenReconciled.current === dispatcherStatusModel && debouncedStatusModelRef.current) {
+      return debouncedStatusModelRef.current;
+    }
+    const { model, state } = debounceStatusModel(dispatcherStatusModel, statusDebounce.current);
+    statusDebounce.current = state;
+    seenReconciled.current = dispatcherStatusModel;
+    debouncedStatusModelRef.current = model;
+    return model;
+  }, [dispatcherStatusModel]);
+
   // Re-ground the status picture whenever it changes (a Run flipping done, a
   // branch becoming finished-unmerged, an unknown capture landing), guarded by the
   // rendered text so an unchanged model is never re-surfaced. The status refresh
@@ -1246,7 +1281,7 @@ export function App(): JSX.Element {
   // current "what's left" without accreting a status entry per transition.
   useEffect(() => {
     if ((dispatcher?.sessionId ?? null) === null) return;
-    const text = renderStatusModel(dispatcherStatusModel);
+    const text = renderStatusModel(debouncedStatusModel);
     if (text === statusRefreshSig.current) return;
     statusRefreshSig.current = text;
     // `relay` is silent → the ambient log (channelForAction === 'log').
@@ -1258,7 +1293,7 @@ export function App(): JSX.Element {
       next[idx] = note;
       return next;
     });
-  }, [dispatcherStatusModel, dispatcher]);
+  }, [debouncedStatusModel, dispatcher]);
 
   // --- React to lifecycle events mid-drain (issue 37, ADR-0007) -------------
   // Beyond the Completion-block stream above, the Dispatcher reacts to lightweight
@@ -1395,6 +1430,9 @@ export function App(): JSX.Element {
     discardTargets.current = {};
     overlapSurfaced.current.clear();
     statusRefreshSig.current = null;
+    statusDebounce.current = initialStatusDebounceState();
+    seenReconciled.current = null;
+    debouncedStatusModelRef.current = null;
     autoMergeSig.current = null;
   }, []);
 

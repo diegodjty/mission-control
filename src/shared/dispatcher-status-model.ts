@@ -173,6 +173,141 @@ export function reconcileStatusModel(input: StatusModelInput): DispatcherStatusM
   };
 }
 
+// --- Debounce backward status moves (issue 49, ADR-0012) --------------------
+//
+// A reconcile is a single snapshot of the live sources; mid-reconcile it can
+// briefly show a finished issue as `open` (its `done` flip not yet re-read, a
+// branch mid-merge). Surfacing that snapshot straight away produced the
+// dogfood's false "05/06/07 regressed to open — the merge is failing" alarm.
+// The fix: a BACKWARD status move (a regression — a drop to a lower point in the
+// open → wip → finished-unmerged → done/merged pipeline) is HELD until it has
+// persisted across ≥1 further reconcile checkpoint; only then is it surfaced.
+// FORWARD moves surface immediately, exactly as before. This is a pure fold over
+// the reconciled model plus the carried debounce state — no I/O, unit-testable.
+
+/**
+ * Progress rank of a grounded status: higher = further along the pipeline
+ * (open → wip → finished-unmerged → done/merged). A move to a LOWER rank is a
+ * BACKWARD transition (a regression, debounced); a move to a higher rank is
+ * FORWARD (surfaced immediately).
+ */
+const STATUS_RANK: Record<GroundedStatus, number> = {
+  open: 0,
+  wip: 1,
+  'finished-unmerged': 2,
+  done: 3,
+};
+
+/**
+ * Reconcile checkpoints a backward move must be OBSERVED on before it is
+ * surfaced — the checkpoint it first appears PLUS at least one more. `2` means a
+ * single transient mid-reconcile snapshot is suppressed, and a regression that
+ * survives to the next checkpoint passes through. (ADR-0012.)
+ */
+export const REGRESSION_CHECKPOINTS = 2;
+
+/** A backward move seen but not yet surfaced, awaiting confirmation. */
+export interface PendingRegression {
+  /** The lower (regressed) status most recently observed while held back. */
+  readonly observed: GroundedStatus;
+  /** Consecutive reconcile checkpoints the regression has been observed (≥1). */
+  readonly checkpoints: number;
+}
+
+/**
+ * The state carried between reconcile checkpoints so the debounce can tell a
+ * one-snapshot blip from a persistent regression. Thread the returned `state`
+ * from one `debounceStatusModel` call into the next.
+ */
+export interface StatusDebounceState {
+  /** Last SURFACED status per issue id — what the Dispatcher has actually been told. */
+  readonly effective: ReadonlyMap<number, GroundedStatus>;
+  /** Backward moves seen but not yet surfaced, per issue id. */
+  readonly pending: ReadonlyMap<number, PendingRegression>;
+}
+
+/** A fresh debounce state — nothing surfaced yet, nothing pending. */
+export function initialStatusDebounceState(): StatusDebounceState {
+  return { effective: new Map(), pending: new Map() };
+}
+
+/** Result of one debounce checkpoint: the model to surface + the state to carry. */
+export interface DebouncedStatusModel {
+  /** The model to surface — regressions held at their prior status until confirmed. */
+  model: DispatcherStatusModel;
+  /** The debounce state to feed into the next checkpoint. */
+  state: StatusDebounceState;
+}
+
+/** Recompute the id buckets from a (possibly held-back) set of surfaced statuses. */
+function rebuildBuckets(
+  reconciled: DispatcherStatusModel,
+  issues: IssueGroundStatus[],
+): DispatcherStatusModel {
+  const idsWhere = (status: GroundedStatus): number[] =>
+    issues.filter((i) => i.status === status).map((i) => i.issueId);
+  return {
+    issues,
+    doneIds: idsWhere('done'),
+    finishedUnmergedIds: idsWhere('finished-unmerged'),
+    wipIds: idsWhere('wip'),
+    openIds: idsWhere('open'),
+    // Needs-look is orthogonal to status transitions — passed through untouched.
+    needsLook: reconciled.needsLook,
+  };
+}
+
+/**
+ * Debounce backward status moves in a freshly-reconciled model against what was
+ * last surfaced. One call = one reconcile checkpoint.
+ *
+ * Per issue, comparing the reconciled status to the last surfaced status:
+ *   - FORWARD / unchanged / a brand-new issue → surface immediately, clear any
+ *     pending regression for it.
+ *   - BACKWARD → hold at the prior (higher) status and increment its pending
+ *     checkpoint count; once that count reaches `REGRESSION_CHECKPOINTS` the
+ *     regression has persisted long enough and is surfaced. A recovery to the
+ *     prior status (or forward) before then clears the pending — the blip is
+ *     never surfaced.
+ *
+ * Pure: depends only on its two arguments and returns the next state; it never
+ * mutates the inputs.
+ */
+export function debounceStatusModel(
+  reconciled: DispatcherStatusModel,
+  prior: StatusDebounceState,
+): DebouncedStatusModel {
+  const effective = new Map<number, GroundedStatus>();
+  const pending = new Map<number, PendingRegression>();
+
+  const surfaced: IssueGroundStatus[] = reconciled.issues.map((issue) => {
+    const raw = issue.status;
+    const prev = prior.effective.get(issue.issueId);
+
+    // First sighting, forward, or unchanged: surface as-is (a new issue is not a
+    // regression — there is no prior status to fall back to).
+    if (prev === undefined || STATUS_RANK[raw] >= STATUS_RANK[prev]) {
+      effective.set(issue.issueId, raw);
+      return issue;
+    }
+
+    // Backward relative to what we last surfaced — this is a regression.
+    const checkpoints = (prior.pending.get(issue.issueId)?.checkpoints ?? 0) + 1;
+    if (checkpoints >= REGRESSION_CHECKPOINTS) {
+      // Persisted across the debounce window → let it through.
+      effective.set(issue.issueId, raw);
+      return issue;
+    }
+
+    // Hold: keep surfacing the higher prior status, remember the pending move.
+    effective.set(issue.issueId, prev);
+    pending.set(issue.issueId, { observed: raw, checkpoints });
+    return { ...issue, status: prev };
+  });
+
+  return { model: rebuildBuckets(reconciled, surfaced), state: { effective, pending } };
+}
+
 /** `NN`, zero-padded to two digits to match the rest of the Dispatcher's output. */
 function idLabel(id: number): string {
   return String(id).padStart(2, '0');

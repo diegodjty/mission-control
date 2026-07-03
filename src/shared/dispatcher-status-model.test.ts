@@ -11,7 +11,13 @@ import { describe, it, expect } from 'vitest';
 import {
   reconcileStatusModel,
   renderStatusModel,
+  debounceStatusModel,
+  initialStatusDebounceState,
+  REGRESSION_CHECKPOINTS,
   type StatusModelInput,
+  type StatusDebounceState,
+  type DispatcherStatusModel,
+  type GroundedStatus,
 } from './dispatcher-status-model';
 import type { Backlog, BacklogIssue, IssueStatus } from './backlog-model';
 import type { WorktreeRunState } from './worktree-scan';
@@ -182,6 +188,105 @@ describe('reconcileStatusModel — unknown captures conveyed, not dropped', () =
     expect(model.needsLook).toEqual([
       { runId: 'sX', issueId: null, slug: null, title: null, detail: 'garbled' },
     ]);
+  });
+});
+
+describe('debounceStatusModel — backward moves held, forward moves immediate (issue 49)', () => {
+  // Build a reconciled model directly from grounded statuses — the debounce is a
+  // pure fold over the reconciled model, independent of how reconcile produced it
+  // (so this exercises `finished-unmerged`, which only ever comes from the afk
+  // scan, as cleanly as backlog statuses).
+  function model(entries: Array<[number, GroundedStatus]>): DispatcherStatusModel {
+    const issues = entries.map(([issueId, status]) => ({ issueId, slug: null, title: null, status }));
+    const ids = (s: GroundedStatus): number[] => issues.filter((i) => i.status === s).map((i) => i.issueId);
+    return {
+      issues,
+      doneIds: ids('done'),
+      finishedUnmergedIds: ids('finished-unmerged'),
+      wipIds: ids('wip'),
+      openIds: ids('open'),
+      needsLook: [],
+    };
+  }
+
+  // Thread a sequence of reconcile checkpoints (one grounded status for `id` per
+  // snapshot) through the debounce, returning the SURFACED status after each —
+  // mirroring the renderer feeding one reconcile checkpoint after another.
+  function surfaced(id: number, statuses: GroundedStatus[]): (GroundedStatus | undefined)[] {
+    let state: StatusDebounceState = initialStatusDebounceState();
+    const out: (GroundedStatus | undefined)[] = [];
+    for (const status of statuses) {
+      const result = debounceStatusModel(model([[id, status]]), state);
+      state = result.state;
+      out.push(result.model.issues.find((i) => i.issueId === id)?.status);
+    }
+    return out;
+  }
+
+  it('sanity-checks the debounce window is the one ADR-0012 specifies', () => {
+    expect(REGRESSION_CHECKPOINTS).toBe(2);
+  });
+
+  it('SUPPRESSES a one-snapshot backward move (the false "05 regressed to open" alarm)', () => {
+    // done, a single transient open snapshot, recovered.
+    expect(surfaced(5, ['done', 'open', 'done'])).toEqual(['done', 'done', 'done']);
+  });
+
+  it('debounces a finished-unmerged → open blip the same way (the dogfood case)', () => {
+    // Held at the higher prior status on the first backward snapshot.
+    expect(surfaced(6, ['finished-unmerged', 'open'])).toEqual([
+      'finished-unmerged',
+      'finished-unmerged',
+    ]);
+  });
+
+  it('SURFACES a regression once it persists past the debounce window', () => {
+    // CP1 done, CP2 open (held), CP3 open (persisted → surfaced).
+    expect(surfaced(5, ['done', 'open', 'open'])).toEqual(['done', 'done', 'open']);
+  });
+
+  it('does NOT delay forward transitions (open → wip → done)', () => {
+    expect(surfaced(5, ['open', 'wip', 'done'])).toEqual(['open', 'wip', 'done']);
+  });
+
+  it('does NOT delay a forward finished-unmerged → done (merged) transition', () => {
+    expect(surfaced(7, ['finished-unmerged', 'done'])).toEqual(['finished-unmerged', 'done']);
+  });
+
+  it('adopts a brand-new issue at its reconciled status without treating it as a regression', () => {
+    const { model: m } = debounceStatusModel(model([[9, 'open']]), initialStatusDebounceState());
+    expect(m.openIds).toEqual([9]);
+  });
+
+  it('keeps the held-back status in the buckets, not just the per-issue list', () => {
+    let state = initialStatusDebounceState();
+    ({ state } = debounceStatusModel(model([[5, 'done']]), state));
+    const { model: m } = debounceStatusModel(model([[5, 'open']]), state);
+    // Surfaced buckets reflect the HELD status: still done, not yet open.
+    expect(m.doneIds).toEqual([5]);
+    expect(m.openIds).toEqual([]);
+  });
+
+  it('clears the pending regression when the status recovers, so a later blip is debounced afresh', () => {
+    // done, blip (held), recovered (pending cleared), a NEW blip (held again).
+    expect(surfaced(5, ['done', 'open', 'done', 'open'])).toEqual(['done', 'done', 'done', 'done']);
+  });
+
+  it('passes needs-look through untouched while a regression is held (reconcile → debounce)', () => {
+    let state = initialStatusDebounceState();
+    ({ state } = debounceStatusModel(
+      reconcileStatusModel(input({ backlog: backlog([issue(5, 'done')]) })),
+      state,
+    ));
+    const reconciled = reconcileStatusModel(
+      input({
+        backlog: backlog([issue(5, 'open')]),
+        runLog: [record({ id: 's1', issueId: 8, outcome: 'unknown', detail: 'garbled' })],
+      }),
+    );
+    const { model: m } = debounceStatusModel(reconciled, state);
+    expect(m.needsLook).toHaveLength(1);
+    expect(m.doneIds).toEqual([5]); // still held
   });
 });
 
