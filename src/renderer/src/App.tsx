@@ -18,6 +18,7 @@ import {
 } from '../../shared/isolation-policy';
 import {
   deriveWorktreeRunStates,
+  dropMergedBranches,
   mergeReadinessOnDisk,
 } from '../../shared/worktree-scan';
 import {
@@ -888,6 +889,19 @@ export function App(): JSX.Element {
       .then((result) => {
         setMergeDisplay(mergeResultDisplay(result));
         if (result.ok) {
+          // Optimistically drop the merged slugs from the on-disk scan the
+          // instant the merge succeeds, so `mergePlan` recomputes to not-ready
+          // synchronously — before `merging` resets in `.finally` and re-enables
+          // the button. Without this the scan keeps listing the now-deleted
+          // branches until the next ~1.5s poll, so a rapid second click would
+          // fire a merge at branches that no longer exist and surface an error
+          // contradicting the success just shown (issue 29). The next real scan
+          // confirms the same truth, so this is a safe optimistic prefix of it.
+          setAfkScan((prev) =>
+            prev && prev.projectPath === projectPath
+              ? { ...prev, branches: dropMergedBranches(prev.branches, slugs) }
+              : prev,
+          );
           // The merged Runs' worktrees are gone; drop them from tracking so the
           // Merge action clears. Unmerged (blocked/stopped) Runs stay put.
           setRuns((prev) => prev.filter((r) => !mergedIds.has(r.target.issueId)));

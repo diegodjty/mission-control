@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   classifyBranch,
   deriveWorktreeRunStates,
+  dropMergedBranches,
   mergeReadinessOnDisk,
   issueIdFromSlug,
   type AfkBranchFacts,
@@ -206,5 +207,62 @@ describe('mergeReadinessOnDisk', () => {
     ]);
     expect(plan.ready).toBe(true);
     expect(plan.mergeable.map((m) => m.issueId)).toEqual([3]);
+  });
+});
+
+describe('dropMergedBranches — closes the double-merge race (issue 29)', () => {
+  it('removes exactly the merged slugs, leaving the rest untouched', () => {
+    const facts = [
+      branch(3, { hasWorktree: false, committedStatus: 'done' }),
+      branch(4, { hasWorktree: false, committedStatus: 'done' }),
+      branch(5, { hasWorktree: true, committedStatus: 'wip', worktreeStatus: 'wip' }),
+    ];
+    const next = dropMergedBranches(facts, ['03-x', '04-x']);
+    expect(next.map((f) => f.issueId)).toEqual([5]);
+  });
+
+  it('makes readiness recompute to not-ready synchronously with a full merge (not the poll)', () => {
+    // Two finished-unmerged branches: the Merge is offered.
+    const before = [
+      branch(3, { hasWorktree: false, committedStatus: 'done' }),
+      branch(4, { hasWorktree: false, committedStatus: 'done' }),
+    ];
+    const merged = mergeReadinessOnDisk(before);
+    expect(merged.ready).toBe(true);
+    expect(merged.mergeable.map((m) => m.slug)).toEqual(['03-x', '04-x']);
+
+    // The instant the merge succeeds we drop those slugs from the SAME scan the
+    // button reads — no waiting for the next ~1.5s poll. A rapid second click
+    // now sees an empty mergeable set, so it can never target the deleted
+    // branches.
+    const after = dropMergedBranches(before, merged.mergeable.map((m) => m.slug));
+    const replanned = mergeReadinessOnDisk(after);
+    expect(replanned.ready).toBe(false);
+    expect(replanned.mergeable).toEqual([]);
+  });
+
+  it('clears only the merged branch, keeping a stranded sibling that was NOT merged', () => {
+    const before = [
+      branch(3, { hasWorktree: false, committedStatus: 'done' }), // merged
+      branch(4, { hasWorktree: true, committedStatus: 'wip', worktreeStatus: 'wip' }), // stranded
+    ];
+    const after = dropMergedBranches(before, ['03-x']);
+    // The merged branch is gone; the stranded one remains for the user to resolve.
+    expect(deriveWorktreeRunStates(after)).toEqual([{ issueId: 4, slug: '04-x', kind: 'stranded' }]);
+    expect(mergeReadinessOnDisk(after).ready).toBe(false);
+  });
+
+  it('returns the input unchanged when no slugs were merged', () => {
+    const facts = [branch(3, { hasWorktree: false, committedStatus: 'done' })];
+    expect(dropMergedBranches(facts, [])).toBe(facts);
+  });
+
+  it('does not mutate the input array', () => {
+    const facts = [
+      branch(3, { hasWorktree: false, committedStatus: 'done' }),
+      branch(4, { hasWorktree: false, committedStatus: 'done' }),
+    ];
+    dropMergedBranches(facts, ['03-x']);
+    expect(facts.map((f) => f.issueId)).toEqual([3, 4]);
   });
 });

@@ -180,3 +180,27 @@ export function mergeReadinessOnDisk(
 
   return { ready, mergeable, pendingRunning };
 }
+
+/**
+ * Drop the just-merged `afk/` branches (by slug) from a scan's on-disk facts —
+ * an optimistic clear applied the instant a Merge succeeds (issue 29).
+ *
+ * The double-merge race: after a successful merge the branches/worktrees are
+ * gone from disk, but the LAST poll's facts still list them until the next
+ * ~1.5s scan tick. Meanwhile the Merge button re-enables (its `merging` guard
+ * resets on completion), so within that window `mergeReadinessOnDisk` still
+ * reports `ready` with a stale `mergeable` set — a second click would call the
+ * merge on branches that no longer exist and surface an error contradicting the
+ * success just shown. Removing the merged slugs from the scan synchronously with
+ * the success makes readiness recompute to not-ready immediately, without
+ * waiting for the poll. The next real scan then confirms the same truth, so this
+ * is a safe optimistic prefix of it. Pure; input untouched.
+ */
+export function dropMergedBranches(
+  facts: AfkBranchFacts[],
+  mergedSlugs: readonly string[],
+): AfkBranchFacts[] {
+  if (mergedSlugs.length === 0) return facts;
+  const merged = new Set(mergedSlugs);
+  return facts.filter((f) => !merged.has(f.slug));
+}
