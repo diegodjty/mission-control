@@ -31,6 +31,7 @@ import {
   detectCrossRunOverlap,
   extractDocDrift,
 } from '../../shared/dispatcher-synthesis';
+import { isRealCapture, isStrongOverlap } from '../../shared/dispatcher-noise-floor';
 import {
   reconcileStatusModel,
   renderStatusModel,
@@ -949,7 +950,11 @@ export function App(): JSX.Element {
               .then((res) => {
                 // Skip the feed upsert if the Project changed while we captured —
                 // the record still belongs to (and was persisted for) capturePath.
-                if (res.record && projectPathRef.current === capturePath) {
+                // Noise floor (issue 47, ADR-0012): only a REAL capture becomes a
+                // Run in the log. An empty / boot-screen / unclassifiable capture
+                // (an `unknown` with no parsed substance) is dropped silently — it
+                // never becomes a card, a note, or a needs-a-look item.
+                if (res.record && isRealCapture(res.record) && projectPathRef.current === capturePath) {
                   upsertRunLog(res.record);
                 }
                 // A still-streaming block parses as `unknown`; retry so the final
@@ -984,7 +989,10 @@ export function App(): JSX.Element {
     void window.mc
       .loadRunLog({ projectPath })
       .then((res) => {
-        if (!cancelled) setRunLog(res.records);
+        // Apply the same noise floor on reload (issue 47): a boot-screen/empty
+        // `unknown` persisted on disk must not resurface as a Run when the Project
+        // reopens.
+        if (!cancelled) setRunLog(res.records.filter(isRealCapture));
       })
       .catch(() => {
         // A transient read error just leaves the feed as-is; a later capture or
@@ -1041,12 +1049,15 @@ export function App(): JSX.Element {
     if (sessionId === null) return;
     for (const rec of runLog) {
       // An `unknown` capture has no reliable qualitative content to synthesize,
-      // so it does NOT enter the block feed here — but it is no longer SILENTLY
-      // dropped (issue 43): the ground-truth status refresh below conveys it as a
-      // "needs a look" item, carrying its `detail` (issue 42), so nothing a Run
-      // emitted is lost. A still-streaming capture stays unknown only until it
-      // resolves, at which point it feeds here normally (the guard below is keyed
-      // by id and unknowns are never marked fed).
+      // so it does NOT enter the block feed here. Under the ADR-0012 noise floor
+      // (issue 47) the empty/boot-screen unknowns never reach `runLog` at all —
+      // `isRealCapture` drops them at capture/load. A `runLog` unknown is therefore
+      // a REAL unknown with substance; it is still conveyed (with its `detail`) by
+      // the ground-truth status refresh below as a "needs a look" item (issue 43,
+      // narrowed by issue 47), so nothing substantive a Run emitted is lost. A
+      // still-streaming capture stays unknown only until it resolves, at which
+      // point it feeds here normally (the guard below is keyed by id and unknowns
+      // are never marked fed).
       if (rec.outcome === 'unknown') continue;
       if (dispatcherFed.current.has(rec.id)) continue;
       dispatcherFed.current.add(rec.id);
@@ -1076,9 +1087,13 @@ export function App(): JSX.Element {
     // Cross-Run patterns (issue 38, acceptance b/c): once ≥2 Runs touch the same
     // seam (a file, a named "… seam", a shared identifier), consolidate them into
     // ONE surfaced line instead of leaving the user to spot it across cards. The
-    // detection is the pure `detectCrossRunOverlap` over the captured records;
-    // `overlapSurfaced` guards each seam so a re-poll doesn't re-narrate it.
-    for (const group of detectCrossRunOverlap(runLog)) {
+    // detection is the pure `detectCrossRunOverlap` over the captured records.
+    // Noise floor (issue 47, ADR-0012): consolidation is demoted to a RARE note —
+    // `isStrongOverlap` gates it to a strong concrete overlap (a real shared
+    // file/seam, not the PRD/config/skill boilerplate or a junk token), and
+    // `overlapSurfaced` guards each seam so it is surfaced at most once, never the
+    // per-tick "consolidate?" firehose. A weak/false overlap surfaces nothing.
+    for (const group of detectCrossRunOverlap(runLog).filter(isStrongOverlap)) {
       if (overlapSurfaced.current.has(group.seam)) continue;
       overlapSurfaced.current.add(group.seam);
       const runs = group.runs
