@@ -32,6 +32,10 @@ import {
   proposeDocDriftAmendment,
 } from '../../shared/dispatcher-synthesis';
 import {
+  reconcileStatusModel,
+  renderStatusModel,
+} from '../../shared/dispatcher-status-model';
+import {
   deriveRunStatus,
   isTerminal,
   observedIssueStatus,
@@ -253,6 +257,10 @@ export function App(): JSX.Element {
   // surfaced as a cross-Run pattern, so a re-scan doesn't re-narrate the same
   // "these Runs all hit X" line each poll.
   const overlapSurfaced = useRef<Set<string>>(new Set<string>());
+  // Ground-truth status re-grounding (issue 43): the last status-model text fed
+  // to the Dispatcher, so it is re-fed only when the reconciled done/wip/open/
+  // finished-unmerged picture actually changes — not on every render/poll.
+  const statusRefreshSig = useRef<string | null>(null);
 
   // --- Merge state (issue 08; issue 17) ------------------------------------
   // `mergeDisplay` is the pure selector's decision of what the Merge UI shows
@@ -339,6 +347,7 @@ export function App(): JSX.Element {
     lifecycleReacted.current.clear();
     discardTargets.current = {};
     overlapSurfaced.current.clear();
+    statusRefreshSig.current = null;
     setMerging(false);
     setAborting(false);
     setMergeDisplay(null);
@@ -1004,6 +1013,13 @@ export function App(): JSX.Element {
     const sessionId = dispatcher?.sessionId ?? null;
     if (sessionId === null) return;
     for (const rec of runLog) {
+      // An `unknown` capture has no reliable qualitative content to synthesize,
+      // so it does NOT enter the block feed here — but it is no longer SILENTLY
+      // dropped (issue 43): the ground-truth status refresh below conveys it as a
+      // "needs a look" item, carrying its `detail` (issue 42), so nothing a Run
+      // emitted is lost. A still-streaming capture stays unknown only until it
+      // resolves, at which point it feeds here normally (the guard below is keyed
+      // by id and unknowns are never marked fed).
       if (rec.outcome === 'unknown') continue;
       if (dispatcherFed.current.has(rec.id)) continue;
       dispatcherFed.current.add(rec.id);
@@ -1049,6 +1065,37 @@ export function App(): JSX.Element {
     }
     pumpDispatcherQueue(sessionId);
   }, [runLog, dispatcher, pumpDispatcherQueue]);
+
+  // --- Ground the Dispatcher's status picture in truth (issue 43) -----------
+  // The Dispatcher's AUTHORITATIVE model of which issues are open/wip/done/
+  // finished-unmerged is reconciled from the SAME live sources the Map uses — the
+  // backlog (main-checkout truth), the on-disk `afk/` scan (incl. finished-
+  // unmerged, which the backlog can't see because that `done` flip lives on the
+  // `afk/` branch), and the Run log (for its unknown captures). It is NOT inferred
+  // from the fed Completion-block stream, which could miss/misparse/drop a block
+  // and drift the picture (the issue-35 bug: 03/04 reported "still to run" when
+  // done). The blocks above remain the QUALITATIVE synthesis; status comes from
+  // here. Recomputed as the backlog / scan / Run log change.
+  const dispatcherStatusModel = useMemo(
+    () => reconcileStatusModel({ backlog, worktreeStates: worktreeRunStates, runLog }),
+    [backlog, worktreeRunStates, runLog],
+  );
+
+  // Re-ground the live Dispatcher with the current status model whenever it
+  // changes (a Run flipping done, a branch becoming finished-unmerged, an unknown
+  // capture landing). Fed through the same serialized submit queue as the blocks,
+  // and guarded by the rendered text so an unchanged model is never re-fed — so
+  // "what's left" always reconciles to reality, and unknown captures are conveyed
+  // (with their detail) rather than skipped.
+  useEffect(() => {
+    const sessionId = dispatcher?.sessionId ?? null;
+    if (sessionId === null) return;
+    const text = renderStatusModel(dispatcherStatusModel);
+    if (text === statusRefreshSig.current) return;
+    statusRefreshSig.current = text;
+    dispatcherQueue.current.push(text);
+    pumpDispatcherQueue(sessionId);
+  }, [dispatcherStatusModel, dispatcher, pumpDispatcherQueue]);
 
   // --- React to lifecycle events mid-drain (issue 37, ADR-0007) -------------
   // Beyond the Completion-block stream above, the Dispatcher reacts to lightweight
@@ -1190,6 +1237,7 @@ export function App(): JSX.Element {
     lifecycleReacted.current.clear();
     discardTargets.current = {};
     overlapSurfaced.current.clear();
+    statusRefreshSig.current = null;
   }, []);
 
   // Keep the App's backlog copy fresh from every Map load/live-change so the
