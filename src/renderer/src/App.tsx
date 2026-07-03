@@ -25,6 +25,7 @@ import {
   reactToLifecycleEvent,
   type LifecycleEvent,
 } from '../../shared/dispatcher-lifecycle';
+import { shouldAutoMerge, decideDispatcherMerge } from '../../shared/dispatcher-merge';
 import {
   describeDocDrift,
   detectCrossRunOverlap,
@@ -288,6 +289,12 @@ export function App(): JSX.Element {
   // adapter's `output` here is what gives "see details below" an actual below.
   const [merging, setMerging] = useState(false);
   const [mergeDisplay, setMergeDisplay] = useState<MergeDisplay | null>(null);
+  // The mergeable-set signature the Dispatcher has already AUTO-attempted this
+  // drain (issue 46). A clean auto-merge drops the branches and a conflict sets
+  // `midMerge` — both self-guard against a re-fire — but a preflight failure
+  // leaves the branch set unchanged, so this stops the auto-merge effect from
+  // looping on it. Reset on Project switch / dispatcher dismissal.
+  const autoMergeSig = useRef<string | null>(null);
 
   // --- Mid-merge state (issue 24) ------------------------------------------
   // `main` is left mid-merge when a partial `afk-merge.sh` run committed some
@@ -370,6 +377,7 @@ export function App(): JSX.Element {
     setMerging(false);
     setAborting(false);
     setMergeDisplay(null);
+    autoMergeSig.current = null;
     setAfkScan(null);
     setWorktreeCommitErrors({});
     committedSoloIds.current.clear();
@@ -1246,6 +1254,7 @@ export function App(): JSX.Element {
     discardTargets.current = {};
     overlapSurfaced.current.clear();
     statusRefreshSig.current = null;
+    autoMergeSig.current = null;
   }, []);
 
   // Drag the divider between the Map and the Dispatcher rail to resize it (issue
@@ -1421,7 +1430,15 @@ export function App(): JSX.Element {
   // flight, and never triggers on its own (ADR-0002).
   const mergePlan = mergeReadinessOnDisk(activeScan.branches, liveRunIssueIds);
 
-  const runMerge = useCallback((): void => {
+  // The single merge invocation, shared by the manual Map button (`auto=false`)
+  // and the Dispatcher's auto-proceed path (`auto=true`, issue 46). The git work,
+  // the merge-status display, and the on-disk/tracking cleanup are IDENTICAL in
+  // both modes — so the manual button behaves exactly as before. The only thing
+  // `auto` adds is the Dispatcher posture on the RESULT: a clean merge records a
+  // passive `merge` note and relays its summary; a conflict / preflight failure
+  // records a blocking `merge-conflict` proposal and surfaces the reason (never
+  // auto-resolved). The pure `decideDispatcherMerge` makes that auto-vs-gate call.
+  const runMergeCore = useCallback((auto: boolean): void => {
     if (projectPath === null || merging) return;
     const candidates = mergePlan.mergeable;
     if (candidates.length === 0) {
@@ -1433,6 +1450,8 @@ export function App(): JSX.Element {
     }
     const slugs = candidates.map((c) => c.slug);
     const mergedIds = new Set(candidates.map((c) => c.issueId));
+    // Stable per-mergeable-set id so a re-render can't duplicate the note/gate.
+    const sig = [...slugs].sort().join(',');
 
     setMerging(true);
     setMergeDisplay(pendingMergeDisplay(slugs.length));
@@ -1440,6 +1459,33 @@ export function App(): JSX.Element {
       .mergeRuns({ projectPath, slugs })
       .then((result) => {
         setMergeDisplay(mergeResultDisplay(result));
+        if (auto) {
+          // Dispatcher path only (ADR-0011): classify the completed merge into an
+          // auto-proceed passive note vs a conflict/failure blocking gate.
+          const decision = decideDispatcherMerge(result);
+          const sessionId = dispatcher?.sessionId ?? null;
+          if (decision.kind === 'auto') {
+            setDispatcherActivities((prev) =>
+              prev.some((a) => a.id === `merge:${sig}`)
+                ? prev
+                : [...prev, recordActivity(`merge:${sig}`, 'merge')],
+            );
+            if (sessionId !== null) {
+              dispatcherQueue.current.push(decision.note);
+              pumpDispatcherQueue(sessionId);
+            }
+          } else if (decision.kind === 'gate') {
+            setDispatcherActivities((prev) =>
+              prev.some((a) => a.id === `merge-conflict:${sig}`)
+                ? prev
+                : [...prev, recordActivity(`merge-conflict:${sig}`, 'merge-conflict')],
+            );
+            if (sessionId !== null) {
+              dispatcherQueue.current.push(decision.reason);
+              pumpDispatcherQueue(sessionId);
+            }
+          }
+        }
         if (result.ok) {
           // Optimistically drop the merged slugs from the on-disk scan the
           // instant the merge succeeds, so `mergePlan` recomputes to not-ready
@@ -1474,16 +1520,37 @@ export function App(): JSX.Element {
         );
       })
       .finally(() => setMerging(false));
-  }, [projectPath, merging, mergePlan]);
+  }, [projectPath, merging, mergePlan, dispatcher, pumpDispatcherQueue]);
 
-  // --- Dispatcher merge posture (issue 45, ADR-0011) ----------------------
-  // A CLEAN merge no longer raises a blocking approve/reject gate: ADR-0011's
-  // three-item blocking list is merge-conflict, abort-drain and HITL sign-off
-  // only, and a conflict-free merge of finished work auto-proceeds (refines
-  // ADR-0002). So the Dispatcher no longer surfaces a `merge` proposal when
-  // branches are mergeable — the human still triggers a clean merge from the
-  // Map's Merge control, and a conflicting merge surfaces via the mid-merge
-  // conflict panel below (the one merge case that still blocks).
+  // The manual Map Merge button — the unchanged, human-triggered path (ADR-0002).
+  const runMerge = useCallback((): void => runMergeCore(false), [runMergeCore]);
+
+  // --- Dispatcher auto-merge (issue 46, ADR-0011 refining ADR-0002) --------
+  // Under a Dispatcher-driven drain a CLEAN merge of finished parallel work
+  // AUTO-PROCEEDS — the Dispatcher invokes it on its own and leaves a passive
+  // note ("merged 05 clean") — while a CONFLICT or preflight failure BLOCKS for a
+  // one-click approval (the `merge-conflict` item on issue 45's blocking list) and
+  // surfaces the reason (issues 17/23/24), never auto-resolving. The pure
+  // `shouldAutoMerge` decides WHEN to fire (a live Dispatcher session, mergeable
+  // `afk/` branches on disk, `main` not mid-merge, no merge already in flight, and
+  // this mergeable set not already auto-attempted); `decideDispatcherMerge` (in
+  // the shared core's result handler) makes the auto-note-vs-conflict-gate call.
+  // `autoMergeSig` records the attempted set so a persistent preflight failure —
+  // which leaves the branch set unchanged — can't loop the effect (a clean merge
+  // drops the branches and a conflict sets `midMerge`, so those self-guard).
+  useEffect(() => {
+    const sig = mergePlan.mergeable.map((c) => c.slug).sort().join(',');
+    const go = shouldAutoMerge({
+      dispatcherActive: (dispatcher?.sessionId ?? null) !== null,
+      mergeableCount: mergePlan.mergeable.length,
+      midMerge,
+      merging,
+      alreadyAttempted: autoMergeSig.current === sig,
+    });
+    if (!go) return;
+    autoMergeSig.current = sig;
+    runMergeCore(true);
+  }, [mergePlan, dispatcher, midMerge, merging, runMergeCore]);
 
   // Approve a pending proposal: mark it approved, then EXECUTE the action (the
   // gate's whole point — nothing ran until this click). Execution is dispatched

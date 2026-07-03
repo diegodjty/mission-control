@@ -1,5 +1,5 @@
 ---
-status: open
+status: done
 depends_on: [45]
 ---
 
@@ -15,11 +15,11 @@ Under Dispatcher-driven drains, a **clean, conflict-free Merge auto-proceeds** �
 
 ## Acceptance criteria
 
-- [ ] During a Dispatcher drain, a clean merge of finished parallel work proceeds automatically (no click), logged as a passive note.
-- [ ] A merge that conflicts (or fails preflight) blocks for approval and surfaces the reason (issues 17/23/24), never auto-resolving.
-- [ ] The manual Map Merge button behaves exactly as before (unchanged).
-- [ ] The auto-vs-gate decision (clean → auto, conflict/failure → block) is pure and unit-tested.
-- [ ] type-check + build pass.
+- [x] During a Dispatcher drain, a clean merge of finished parallel work proceeds automatically (no click), logged as a passive note.
+- [x] A merge that conflicts (or fails preflight) blocks for approval and surfaces the reason (issues 17/23/24), never auto-resolving.
+- [x] The manual Map Merge button behaves exactly as before (unchanged).
+- [x] The auto-vs-gate decision (clean → auto, conflict/failure → block) is pure and unit-tested.
+- [x] type-check + build pass.
 
 ## Blocked by
 
