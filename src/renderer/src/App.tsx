@@ -14,6 +14,7 @@ import {
   renderCompletionEvent,
   toCompletionEvent,
 } from '../../shared/dispatcher-input-contract';
+import { buildSubmitSequence } from '../../shared/dispatcher-feed';
 import {
   deriveRunStatus,
   isTerminal,
@@ -208,6 +209,13 @@ export function App(): JSX.Element {
     sessionId: string | null;
   } | null>(null);
   const dispatcherFed = useRef<Set<string>>(new Set<string>());
+  // Serialized submit queue for the Dispatcher feed (issue 41). Each Completion
+  // block is TYPED then SUBMITTED with a separate Enter write; the queue drains
+  // one block fully (type → settle → submit → settle) before starting the next,
+  // so blocks arriving close together in a parallel drain are submitted as
+  // DISTINCT messages, never concatenated into one input line.
+  const dispatcherQueue = useRef<string[]>([]);
+  const dispatcherPumping = useRef<boolean>(false);
 
   // --- Merge state (issue 08; issue 17) ------------------------------------
   // `mergeDisplay` is the pure selector's decision of what the Merge UI shows
@@ -287,6 +295,8 @@ export function App(): JSX.Element {
     // panel kills the session.
     setDispatcher(null);
     dispatcherFed.current.clear();
+    dispatcherQueue.current = [];
+    dispatcherPumping.current = false;
     setMerging(false);
     setAborting(false);
     setMergeDisplay(null);
@@ -907,15 +917,47 @@ export function App(): JSX.Element {
     };
   }, [projectPath]);
 
-  // --- Feed Completion blocks to the Dispatcher (issue 35) -----------------
+  // --- Feed Completion blocks to the Dispatcher (issue 35, issue 41) --------
   // As each Run finishes and its Completion block is captured into the Run log,
   // hand that STRUCTURED block to the Dispatcher session — this is the input
   // contract's stream (ADR-0009). It is built from the parsed record via the
   // pure assembler, so it can NEVER carry raw Pane scroll. Fed once per Run
   // (guarded by `dispatcherFed`), and only once the block parsed to something
   // real (outcome !== 'unknown'), so a still-streaming capture isn't fed as
-  // noise. The message is flattened to one line + Enter so it submits cleanly
-  // into the orchestrator's chat.
+  // noise.
+  //
+  // Submission (issue 41): a block must be SUBMITTED, not just typed. Typing the
+  // text and its `\r` in one PTY write lets the claude TUI's bracketed-paste
+  // handling swallow the `\r` as literal text, so the block sat unsent. Instead
+  // we enqueue the block and pump the queue: for each block we TYPE the text,
+  // let it settle, then SUBMIT with a SEPARATE `\r` write (`buildSubmitSequence`
+  // is the pure step builder). The queue drains one block fully before the next,
+  // so parallel-arriving blocks are submitted as distinct messages.
+  const pumpDispatcherQueue = useCallback((sessionId: string): void => {
+    if (dispatcherPumping.current) return;
+    dispatcherPumping.current = true;
+    const nextBlock = (): void => {
+      const message = dispatcherQueue.current.shift();
+      if (message === undefined) {
+        dispatcherPumping.current = false;
+        return;
+      }
+      const steps = buildSubmitSequence(message);
+      let i = 0;
+      const runStep = (): void => {
+        if (i >= steps.length) {
+          nextBlock();
+          return;
+        }
+        const step = steps[i++];
+        window.mc.writePty({ sessionId, data: step.data });
+        setTimeout(runStep, step.settleMs);
+      };
+      runStep();
+    };
+    nextBlock();
+  }, []);
+
   useEffect(() => {
     const sessionId = dispatcher?.sessionId ?? null;
     if (sessionId === null) return;
@@ -924,10 +966,10 @@ export function App(): JSX.Element {
       if (dispatcherFed.current.has(rec.id)) continue;
       dispatcherFed.current.add(rec.id);
       const text = renderCompletionEvent(toCompletionEvent({ id: rec.id, record: rec }));
-      const oneLine = text.replace(/\s*\n\s*/g, ' · ');
-      window.mc.writePty({ sessionId, data: `${oneLine}\r` });
+      dispatcherQueue.current.push(text);
     }
-  }, [runLog, dispatcher]);
+    pumpDispatcherQueue(sessionId);
+  }, [runLog, dispatcher, pumpDispatcherQueue]);
 
   const startDrain = useCallback(
     (chosenCap: number): void => {
@@ -978,6 +1020,8 @@ export function App(): JSX.Element {
   const dismissDispatcher = useCallback((): void => {
     setDispatcher(null);
     dispatcherFed.current.clear();
+    dispatcherQueue.current = [];
+    dispatcherPumping.current = false;
   }, []);
 
   // Keep the App's backlog copy fresh from every Map load/live-change so the
