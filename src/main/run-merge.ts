@@ -35,8 +35,8 @@ import { removeWorktree } from './git-worktree-adapter';
 import { ensureLocallyIgnored } from './local-ignore';
 import { afkMergeConfContent } from '../shared/merge-plan';
 import { branchFor } from '../shared/isolation-policy';
-import { parseMergeSummary, classifyMergeFailure } from '../shared/merge-output';
-import type { MergeRunsResult } from '../shared/ipc-contract';
+import { parseMergeSummary, classifyMergeFailure, parsePartialMerge } from '../shared/merge-output';
+import type { MergeRunsResult, MergeAbortResult } from '../shared/ipc-contract';
 
 const exec = promisify(execFile);
 
@@ -141,16 +141,52 @@ export async function mergeRuns(
     // preflight refusal is reported as its real cause instead of a false
     // "conflict" or a generic "could not run".
     const cause = classifyMergeFailure(output);
-    const conflicted = cause === 'conflict';
+
+    if (cause === 'conflict') {
+      // A conflict leaves `main` MID-MERGE: the script merges + commits each slug
+      // in turn, so earlier slugs are already ON main while a later one's conflict
+      // stopped the run with a conflicted index / MERGE_HEAD (issue 24). Recover
+      // the partial truth from the per-slug progress lines (the `=== summary ===`
+      // block is never reached) so the report says "A merged, B conflicted, main
+      // is mid-merge" instead of the old, wrong "nothing merged / cleaned up".
+      const partial = parsePartialMerge(output);
+      const merged = partial.mergedBeforeConflict;
+      const conflictedOn = partial.conflictedSlug;
+      const files = partial.conflictingFiles;
+
+      const mergedPart =
+        merged.length > 0
+          ? `Merged ${merged.length} branch${merged.length === 1 ? '' : 'es'} into main ` +
+            `(${merged.join(', ')}), then hit`
+          : 'Hit';
+      const conflictPart = conflictedOn ? `a conflict on ${conflictedOn}` : 'a conflict';
+      const filesPart = files.length > 0 ? ` in ${files.join(', ')}` : '';
+      const staySuffix =
+        merged.length > 0
+          ? ` (the already-merged branch${merged.length === 1 ? '' : 'es'} stay${merged.length === 1 ? 's' : ''} merged)`
+          : '';
+      const message =
+        `${mergedPart} ${conflictPart}${filesPart} — main is now mid-merge. ` +
+        `Resolve the conflict and commit, or Abort the merge to return main to a clean state${staySuffix}.`;
+
+      return {
+        ok: false,
+        conflicted: true,
+        midMerge: true,
+        merged,
+        conflictingFiles: files,
+        message,
+        output,
+      };
+    }
+
     const message =
-      cause === 'conflict'
-        ? 'Merge stopped on a conflict — resolve the listed files, then Merge again. Nothing was cleaned up.'
-        : cause === 'dirty-tree'
-          ? 'Merge preflight failed: the repository has uncommitted changes. Commit or stash them, then Merge again.'
-          : cause === 'wrong-branch'
-            ? 'Merge preflight failed: the repository is not on its main branch. Check out main, then Merge again.'
-            : 'Merge could not run — see details below.';
-    return { ok: false, conflicted, merged: [], message, output };
+      cause === 'dirty-tree'
+        ? 'Merge preflight failed: the repository has uncommitted changes. Commit or stash them, then Merge again.'
+        : cause === 'wrong-branch'
+          ? 'Merge preflight failed: the repository is not on its main branch. Check out main, then Merge again.'
+          : 'Merge could not run — see details below.';
+    return { ok: false, conflicted: false, midMerge: false, merged: [], message, output };
   }
 
   // Clean merge (exit 0). The script exits 0 even when it SKIPPED branches that
@@ -204,5 +240,33 @@ export async function mergeRuns(
         : '.';
   const message = `${base}${skipSuffix}${cleanupSuffix}`;
 
-  return { ok: true, conflicted: false, merged, message, output };
+  return { ok: true, conflicted: false, midMerge: false, merged, message, output };
+}
+
+/**
+ * Abort an in-progress (conflicted) merge on `main` (issue 24). A partial
+ * `afk-merge.sh` run leaves `main` mid-merge — a conflicted index with MERGE_HEAD
+ * set — after committing earlier clean slugs; `git merge --abort` unwinds JUST
+ * that in-progress merge, returning `main` to a clean state (the already-committed
+ * clean slugs stay merged; only the conflicting merge is undone). This is the
+ * in-app "back to a clean main" path so a non-git user isn't stranded and a new
+ * drain/Run isn't blocked forever.
+ *
+ * Idempotent: if there is nothing to abort (no MERGE_HEAD), git errors with "no
+ * merge to abort" — we treat that as success (main is already clean) rather than
+ * surfacing a scary failure.
+ */
+export async function abortMerge(projectPath: string): Promise<MergeAbortResult> {
+  try {
+    await exec('git', ['merge', '--abort'], { cwd: projectPath });
+    return { ok: true, error: null };
+  } catch (err) {
+    const failure = err as ExecFailure;
+    const detail = `${failure.stderr ?? ''}${failure.stdout ?? ''}`.trim();
+    // Nothing in progress to abort ⇒ main is already clean; not a real failure.
+    if (/no merge to abort|MERGE_HEAD missing/i.test(detail)) {
+      return { ok: true, error: null };
+    }
+    return { ok: false, error: detail || 'git merge --abort failed' };
+  }
 }

@@ -174,6 +174,23 @@ export async function scanAfkBranches(projectPath: string): Promise<AfkBranchFac
   return facts.sort((a, b) => a.issueId - b.issueId);
 }
 
+/**
+ * Is `main` left MID-MERGE — an in-progress (conflicted) merge with MERGE_HEAD
+ * present (issue 24)? `afk-merge.sh` commits each clean slug to `main` before the
+ * next, so a later slug's conflict `exit 1`s with `main` holding a conflicted
+ * index and MERGE_HEAD set. A new drain/Run must not start on top of that, and
+ * the UI offers an Abort until it's resolved. `git rev-parse --verify --quiet
+ * MERGE_HEAD` exits 0 only while a merge is in progress.
+ */
+export async function isMidMerge(projectPath: string): Promise<boolean> {
+  try {
+    await git(projectPath, ['rev-parse', '--verify', '--quiet', 'MERGE_HEAD']);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Read the full on-disk isolation state for the policy to reconcile against. */
 export async function currentState(projectPath: string): Promise<IsolationState> {
   return {

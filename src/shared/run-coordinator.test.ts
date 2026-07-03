@@ -213,6 +213,34 @@ describe('planDrain — drain-stop conditions', () => {
   });
 });
 
+describe('planDrain — refuses to start on a mid-merge main (issue 24)', () => {
+  it('stops with a mid-merge reason and opens no Panes', () => {
+    const issues = [mk(1, 'open'), mk(2, 'open')];
+    const plan = planDrain({ issues, maxConcurrent: 2, activeRuns: [], midMerge: true });
+    expect(plan.drain.stop).toBe(true);
+    expect(plan.drain.reason).toBe('mid-merge');
+    expect(plan.startable).toEqual([]);
+    expect(plan.drain.message).toMatch(/mid-merge/i);
+  });
+
+  it('prefers mid-merge over run-blocked and no-eligible', () => {
+    const issues = [mk(1, 'open')];
+    const plan = planDrain({
+      issues,
+      maxConcurrent: 2,
+      activeRuns: [{ issueId: 9, status: 'blocked' }],
+      midMerge: true,
+    });
+    expect(plan.drain.reason).toBe('mid-merge');
+  });
+
+  it('drains normally when midMerge is false/absent', () => {
+    const issues = [mk(1, 'open'), mk(2, 'open')];
+    expect(planDrain({ issues, maxConcurrent: 2, activeRuns: [], midMerge: false }).startable).toEqual([1, 2]);
+    expect(planDrain({ issues, maxConcurrent: 2, activeRuns: [] }).startable).toEqual([1, 2]);
+  });
+});
+
 describe('planDrain — determinism', () => {
   it('is idempotent: re-planning identical input yields an identical plan', () => {
     const issues = [mk(1, 'open'), mk(2, 'open'), mk(3, 'open')];

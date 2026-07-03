@@ -114,3 +114,60 @@ export function classifyMergeFailure(output: string): MergeFailureCause {
   if (/has uncommitted changes/.test(clean)) return 'dirty-tree';
   return 'tool-error';
 }
+
+/** The partial-merge facts recovered from a conflict-exit run (issue 24). */
+export interface PartialMergeState {
+  /**
+   * Slugs the script merged CLEANLY into `main` before it hit the conflict —
+   * parsed from the per-slug `+ <label>: merged afk/<slug> cleanly` /
+   * `… (kept both …)` lines it prints as it goes (the `=== summary ===` block is
+   * never reached on a conflict exit). First-seen order, deduped across repos.
+   */
+  mergedBeforeConflict: string[];
+  /** The slug whose merge conflicted (the one that stopped the run), or null. */
+  conflictedSlug: string | null;
+  /** The files git reported as conflicting under the conflicted slug. */
+  conflictingFiles: string[];
+}
+
+/**
+ * Recover the partial-merge truth from a conflict-exit run. `afk-merge.sh`
+ * merges each requested slug into `main` and commits it before moving to the
+ * next, so the FIRST non-append conflict `exit 1`s with EARLIER slugs already on
+ * `main` and `main` left mid-merge — but before the `=== summary ===` block is
+ * printed, so `parseMergeSummary` sees nothing. This reads the per-slug progress
+ * lines instead, so the adapter can report "A merged, B conflicted, main is
+ * mid-merge" rather than the wrong "nothing merged".
+ *
+ * Order-independent by design: the adapter joins the script's stdout and stderr
+ * as two blocks (the `+ merged` lines land on stdout, the `x conflict` line on
+ * stderr, the `  - <file>` list back on stdout), so their interleaving is lost.
+ * Each fact is matched wherever it appears rather than by sequence.
+ */
+export function parsePartialMerge(output: string): PartialMergeState {
+  const lines = stripAnsi(output).split('\n');
+  const mergedBeforeConflict: string[] = [];
+  let conflictedSlug: string | null = null;
+  const conflictingFiles: string[] = [];
+  for (const line of lines) {
+    const merged = /^\+\s+\S+:\s+merged afk\/(\S+)\s+(?:cleanly|\(kept both)/.exec(line);
+    if (merged) {
+      if (!mergedBeforeConflict.includes(merged[1])) mergedBeforeConflict.push(merged[1]);
+      continue;
+    }
+    const conflict = /^x\s+\S+:\s+conflict in afk\/(\S+)\s+needs you/.exec(line);
+    if (conflict) {
+      conflictedSlug = conflict[1];
+      continue;
+    }
+    // Conflict file listing: `    - <file>` (4-space indent + dash). The union
+    // fallback annotates unresolved files as `<file> (union did not parse …)` —
+    // strip that trailing parenthetical so we keep just the path.
+    const file = /^ {4}- (.+?)(?:\s+\(.*\))?\s*$/.exec(line);
+    if (file) {
+      const path = file[1].trim();
+      if (path && !conflictingFiles.includes(path)) conflictingFiles.push(path);
+    }
+  }
+  return { mergedBeforeConflict, conflictedSlug, conflictingFiles };
+}

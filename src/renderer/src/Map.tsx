@@ -87,6 +87,16 @@ interface MapProps {
    * 17). Null when no Merge has been triggered yet.
    */
   mergeDisplay?: MergeDisplay | null;
+  /**
+   * True when `main` is left mid-merge by a partial merge conflict (issue 24):
+   * some slugs merged then a later one conflicted, leaving a conflicted index.
+   * While true the Map blocks new Runs/Drain and shows an Abort affordance.
+   */
+  midMerge?: boolean;
+  /** Abort the in-progress merge, returning `main` to a clean state (issue 24). */
+  onAbortMerge?: () => void;
+  /** True while an Abort is running. */
+  aborting?: boolean;
 }
 
 /**
@@ -118,6 +128,9 @@ export function Map({
   onMerge,
   merging,
   mergeDisplay,
+  midMerge,
+  onAbortMerge,
+  aborting,
 }: MapProps = {}): JSX.Element {
   const activeRunSet = new Set(activeRunIssueIds ?? []);
   const worktreeRunningSet = new Set(worktreeRunningIds ?? []);
@@ -252,6 +265,31 @@ export function Map({
         </div>
       )}
 
+      {/* Mid-merge banner (issue 24): a partial afk-merge.sh conflict left `main`
+          with earlier slugs merged and a later one conflicted, so `main` is
+          mid-merge. New Runs/Drain are blocked until this clears; Abort runs
+          `git merge --abort` to return `main` to a clean state (no manual git),
+          keeping the already-merged slugs. */}
+      {midMerge && resolvedPath !== null && (
+        <div className="map__midmerge">
+          <span className="map__midmerge-text">
+            main is mid-merge — a merge stopped on a conflict with some branches
+            already integrated. Resolve the conflict and commit, or abort to return
+            main to a clean state. New Runs and Drain are paused until then.
+          </span>
+          {onAbortMerge && (
+            <button
+              className="map__midmerge-abort"
+              onClick={() => onAbortMerge()}
+              disabled={aborting}
+              title="Run git merge --abort to return main to a clean state (already-merged branches stay merged)"
+            >
+              {aborting ? 'Aborting…' : 'Abort merge'}
+            </button>
+          )}
+        </div>
+      )}
+
       {onDrain && resolvedPath !== null && (
         <div className="map__drainbar">
           <label className="map__cap">
@@ -271,7 +309,16 @@ export function Map({
               ■ Stop drain
             </button>
           ) : (
-            <button className="map__drain" onClick={() => onDrain(cap ?? 2)}>
+            <button
+              className="map__drain"
+              onClick={() => onDrain(cap ?? 2)}
+              disabled={midMerge}
+              title={
+                midMerge
+                  ? 'Blocked: main is mid-merge — resolve or abort the merge first'
+                  : 'Drain the backlog, starting eligible Runs up to the cap'
+              }
+            >
               ▶▶ Drain backlog
             </button>
           )}
@@ -405,7 +452,7 @@ export function Map({
               state={deriveIssueState(issue, backlog!.issues)}
               onSelect={() => setSelectedId(issue.id)}
               onRun={
-                onRun && resolvedPath !== null
+                onRun && resolvedPath !== null && !midMerge
                   ? () =>
                       onRun({
                         issueId: issue.id,
@@ -447,6 +494,7 @@ export function Map({
                 ) : (
                   backlog &&
                   onRun &&
+                  !midMerge &&
                   runnableNow(selected, backlog.issues, inFlight) && (
                     <button
                       className="run-btn"

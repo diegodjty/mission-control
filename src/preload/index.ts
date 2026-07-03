@@ -20,6 +20,8 @@ import {
   type IssueStatusObserveResult,
   type MergeRunsRequest,
   type MergeRunsResult,
+  type MergeAbortRequest,
+  type MergeAbortResult,
   type MissionControlApi,
   type ProjectActionResult,
   type ProjectListResult,
@@ -68,6 +70,9 @@ const api: MissionControlApi = {
 
   mergeRuns: (req: MergeRunsRequest): Promise<MergeRunsResult> =>
     ipcRenderer.invoke(IpcChannel.MergeRuns, req),
+
+  abortMerge: (req: MergeAbortRequest): Promise<MergeAbortResult> =>
+    ipcRenderer.invoke(IpcChannel.MergeAbort, req),
 
   openProject: (req: ProjectOpenRequest): Promise<ProjectActionResult> =>
     ipcRenderer.invoke(IpcChannel.ProjectOpen, req),

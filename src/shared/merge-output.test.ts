@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseMergeSummary, classifyMergeFailure } from './merge-output';
+import { parseMergeSummary, classifyMergeFailure, parsePartialMerge } from './merge-output';
 
 /**
  * These fixtures are the VERBATIM strings afk-merge.sh emits when piped (no TTY,
@@ -112,5 +112,81 @@ describe('classifyMergeFailure — the real cause, not a substring', () => {
     expect(classifyMergeFailure('x missing config: /tmp/proj/issues/afk-merge.conf')).toBe(
       'tool-error',
     );
+  });
+});
+
+describe('parsePartialMerge — the partial truth on a conflict exit (issue 24)', () => {
+  it('reports the slug that merged before the conflict and the one that conflicted', () => {
+    const s = parsePartialMerge(conflict);
+    expect(s.mergedBeforeConflict).toEqual(['03-a']);
+    expect(s.conflictedSlug).toBe('04-b');
+    expect(s.conflictingFiles).toEqual(['README.md']);
+  });
+
+  it('recovers the facts when stdout and stderr are joined as separate blocks', () => {
+    // The adapter joins stdout then stderr, so the `x conflict` line (stderr)
+    // trails the `+ merged` and `  - file` lines (stdout) — order is lost. The
+    // parser must still recover every fact.
+    const split = [
+      '. Project: /tmp/proj',
+      '',
+      '=== 03-a ===',
+      '+ app: merged afk/03-a cleanly',
+      '',
+      '=== 05-c ===',
+      '+ app: merged afk/05-c cleanly',
+      '',
+      '=== 04-b ===',
+      '    - README.md',
+      '    - src/app.ts',
+      '',
+      'x app: conflict in afk/04-b needs you — not a clean append:',
+    ].join('\n');
+    const s = parsePartialMerge(split);
+    expect(s.mergedBeforeConflict).toEqual(['03-a', '05-c']);
+    expect(s.conflictedSlug).toBe('04-b');
+    expect(s.conflictingFiles).toEqual(['README.md', 'src/app.ts']);
+  });
+
+  it('treats a "kept both" clean merge as merged-before-conflict', () => {
+    const out = [
+      '=== 07-x ===',
+      '+ app: merged afk/07-x (kept both in: src/lib/api.ts)',
+      '=== 08-y ===',
+      'x app: conflict in afk/08-y needs you — not a clean append:',
+      '    - src/main.ts',
+    ].join('\n');
+    const s = parsePartialMerge(out);
+    expect(s.mergedBeforeConflict).toEqual(['07-x']);
+    expect(s.conflictedSlug).toBe('08-y');
+  });
+
+  it('strips the "union did not parse" annotation from a conflicting file', () => {
+    const out = [
+      'x app: conflict in afk/08-y needs you — not a clean append:',
+      '    - config/urls.py (union did not parse — resolve by hand)',
+    ].join('\n');
+    expect(parsePartialMerge(out).conflictingFiles).toEqual(['config/urls.py']);
+  });
+
+  it('reports no merges when the very first slug conflicts', () => {
+    const out = [
+      '=== 04-b ===',
+      'x app: conflict in afk/04-b needs you — not a clean append:',
+      '    - README.md',
+    ].join('\n');
+    const s = parsePartialMerge(out);
+    expect(s.mergedBeforeConflict).toEqual([]);
+    expect(s.conflictedSlug).toBe('04-b');
+  });
+
+  it('dedupes a slug merged across more than one repo/label', () => {
+    const out = [
+      '+ api: merged afk/03-a cleanly',
+      '+ web: merged afk/03-a cleanly',
+      'x web: conflict in afk/04-b needs you — not a clean append:',
+      '    - src/lib/api.ts',
+    ].join('\n');
+    expect(parsePartialMerge(out).mergedBeforeConflict).toEqual(['03-a']);
   });
 });

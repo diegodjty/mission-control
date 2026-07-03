@@ -35,7 +35,7 @@ export interface ActiveRun {
 }
 
 /** Why a drain stopped. */
-export type DrainStopReason = 'no-eligible' | 'run-blocked';
+export type DrainStopReason = 'no-eligible' | 'run-blocked' | 'mid-merge';
 
 export interface DrainDecision {
   /** True when the drain should start no further Runs. */
@@ -64,6 +64,15 @@ export interface DrainInput {
   maxConcurrent: number;
   /** The Runs the UI is currently tracking. */
   activeRuns: ActiveRun[];
+  /**
+   * True when `main` is left mid-merge — a partial `afk-merge.sh` run committed
+   * some slugs then hit a conflict, leaving a conflicted index / MERGE_HEAD
+   * (issue 24). A new drain must NOT start on top of that: worktree creation and
+   * isolation all assume a clean `main`, and a fresh Run would compound the mess.
+   * The user resolves or aborts the merge first. Optional (defaults false) so
+   * callers/tests without merge state get the normal plan.
+   */
+  midMerge?: boolean;
 }
 
 /** A Run still occupies a slot only while it is `running`. */
@@ -116,7 +125,17 @@ export function planDrain(input: DrainInput): DrainPlan {
   const blocked = input.activeRuns.find((r) => r.status === 'blocked') ?? null;
 
   let drain: DrainDecision;
-  if (blocked) {
+  if (input.midMerge) {
+    // main is mid-merge (a partial afk-merge conflict): refuse to start anything
+    // until it's resolved or aborted — never drain on top of a conflicted index.
+    drain = {
+      stop: true,
+      reason: 'mid-merge',
+      blockedIssueId: null,
+      message:
+        'Stopped: main is mid-merge — resolve the conflict or abort the merge before draining.',
+    };
+  } else if (blocked) {
     drain = {
       stop: true,
       reason: 'run-blocked',

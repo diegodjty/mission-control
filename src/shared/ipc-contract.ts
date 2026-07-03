@@ -66,6 +66,14 @@ export const IpcChannel = {
    */
   MergeRuns: 'merge:runs',
   /**
+   * renderer → main (invoke): abort an in-progress (conflicted) merge on `main`
+   * left behind by a partial `afk-merge.sh` run (issue 24) — runs `git merge
+   * --abort` to return `main` to a clean, non-mid-merge state (slugs that merged
+   * cleanly before the conflict stay merged). Human-triggered. Resolves to a
+   * MergeAbortResult.
+   */
+  MergeAbort: 'merge:abort',
+  /**
    * renderer → main (invoke): open (register-if-needed + claim) a Project repo
    * in the CALLING Window. Rejected — with a clear message — if another Window
    * already manages that repo (ADR-0004's "no double-managing a repo"). Also
@@ -230,6 +238,13 @@ export interface AfkScanRequest {
 export interface AfkScanResult {
   /** On-disk facts per `afk/NN-slug` branch, ascending by issue id (issue 16). */
   branches: AfkBranchFacts[];
+  /**
+   * True when `main` is left mid-merge — a partial `afk-merge.sh` run committed
+   * some slugs then hit a conflict, so `main` has a conflicted index / MERGE_HEAD
+   * (issue 24). Polled alongside the branch scan so the UI can block a new
+   * drain/Run and offer an Abort until it is resolved.
+   */
+  midMerge: boolean;
 }
 
 export interface AfkDiscardRequest {
@@ -283,12 +298,39 @@ export interface MergeRunsResult {
   ok: boolean;
   /** True when the merge stopped on a conflict a human must resolve. */
   conflicted: boolean;
-  /** The slugs that were merged into `main` (empty on failure/conflict). */
+  /**
+   * The slugs that were merged into `main`. On a clean run, all of them; on a
+   * PARTIAL conflict (issue 24) the slugs that merged cleanly BEFORE the conflict
+   * — these are genuinely on `main` even though the overall run failed, so the
+   * report can say "A merged, B conflicted" instead of the wrong "nothing merged".
+   */
   merged: string[];
+  /**
+   * True when the run left `main` mid-merge — a conflict stopped it with a
+   * conflicted index / MERGE_HEAD in place (issue 24). Distinguishes a partial
+   * conflict (main dirty, needs resolve/abort) from a preflight refusal (main
+   * untouched). Only meaningful when `conflicted` is true.
+   */
+  midMerge?: boolean;
+  /** On a conflict, the files git reported conflicting (issue 24). */
+  conflictingFiles?: string[];
   /** A short human-readable summary for the Map. */
   message: string;
   /** The full `afk-merge.sh` output (stdout+stderr) for the UI to show. */
   output: string;
+}
+
+export interface MergeAbortRequest {
+  /** The Project repo path (`main` checkout) to run `git merge --abort` in. */
+  projectPath: string;
+}
+
+/** The outcome of aborting an in-progress merge on `main` (issue 24). */
+export interface MergeAbortResult {
+  /** True when `main` is now clean (aborted, or there was nothing to abort). */
+  ok: boolean;
+  /** A human-readable error when the abort failed, else null. */
+  error: string | null;
 }
 
 /**
@@ -403,6 +445,11 @@ export interface MissionControlApi {
    * `afk/NN-slug` branches into `main` and clean up the worktrees (issue 08).
    */
   mergeRuns(req: MergeRunsRequest): Promise<MergeRunsResult>;
+  /**
+   * Abort an in-progress (conflicted) merge left on `main` by a partial merge
+   * (issue 24): `git merge --abort` back to a clean, non-mid-merge `main`.
+   */
+  abortMerge(req: MergeAbortRequest): Promise<MergeAbortResult>;
   /** Open (register-if-needed + claim) a Project repo in this Window. */
   openProject(req: ProjectOpenRequest): Promise<ProjectActionResult>;
   /** Switch this Window's active Project to another registered repo. */

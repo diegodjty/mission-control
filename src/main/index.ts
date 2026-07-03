@@ -14,10 +14,11 @@ import { BacklogWatcher } from './backlog-watcher';
 import {
   applyIsolation,
   discardWorktree,
+  isMidMerge,
   readIsolatedIssueStatus,
   scanAfkBranches,
 } from './git-worktree-adapter';
-import { mergeRuns } from './run-merge';
+import { mergeRuns, abortMerge } from './run-merge';
 import {
   IpcChannel,
   type AfkScanRequest,
@@ -31,6 +32,8 @@ import {
   type IssueStatusObserveRequest,
   type IssueStatusObserveResult,
   type MergeRunsRequest,
+  type MergeAbortRequest,
+  type MergeAbortResult,
   type ProjectActionResult,
   type ProjectListResult,
   type ProjectOpenRequest,
@@ -223,6 +226,9 @@ function registerIpc(): void {
     IpcChannel.AfkScan,
     async (_event, req: AfkScanRequest): Promise<AfkScanResult> => ({
       branches: await scanAfkBranches(req.projectPath),
+      // Also report whether `main` is left mid-merge by a partial merge conflict
+      // (issue 24) so the renderer can block a new drain/Run and offer an Abort.
+      midMerge: await isMidMerge(req.projectPath),
     }),
   );
 
@@ -256,6 +262,15 @@ function registerIpc(): void {
   // response to the user clicking Merge.
   ipcMain.handle(IpcChannel.MergeRuns, (_event, req: MergeRunsRequest) =>
     mergeRuns(req.projectPath, req.slugs),
+  );
+
+  // Abort an in-progress merge left on `main` by a partial conflict (issue 24):
+  // `git merge --abort` back to a clean, non-mid-merge `main` so a non-git user
+  // isn't stranded and a new drain/Run is unblocked. Human-triggered only.
+  ipcMain.handle(
+    IpcChannel.MergeAbort,
+    (_event, req: MergeAbortRequest): Promise<MergeAbortResult> =>
+      abortMerge(req.projectPath),
   );
 
   ipcMain.handle(IpcChannel.PtySpawn, (_event, req: PtySpawnRequest) =>

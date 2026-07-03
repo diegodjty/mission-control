@@ -18,8 +18,8 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
-import { mergeRuns, ensureMergeConf, defaultMergeScriptPath } from './run-merge';
-import { createWorktree, worktreePathFor } from './git-worktree-adapter';
+import { mergeRuns, ensureMergeConf, defaultMergeScriptPath, abortMerge } from './run-merge';
+import { createWorktree, worktreePathFor, isMidMerge } from './git-worktree-adapter';
 import { branchFor } from '../shared/isolation-policy';
 
 const exec = promisify(execFile);
@@ -104,8 +104,10 @@ describe('mergeRuns — the real afk-merge.sh against real parallel branches', (
     expect(await branchExists('04-b')).toBe(false);
   });
 
-  it('surfaces a conflict, resolves nothing, and cleans up nothing', async () => {
-    // Both Runs edit the same file differently → the second branch conflicts.
+  it('reports the partial truth on a conflict: A merged, B conflicted, main mid-merge (issue 24)', async () => {
+    // The script merges 03-a cleanly and COMMITS it to main, then 04-b — which
+    // edits the same file differently — conflicts and stops the run, leaving main
+    // mid-merge with 03-a already integrated.
     await finishedRun('03-a', 'README.md', '# scratch repo\nchange from run 3\n');
     await finishedRun('04-b', 'README.md', '# scratch repo\nDIFFERENT change from run 4\n');
 
@@ -113,14 +115,56 @@ describe('mergeRuns — the real afk-merge.sh against real parallel branches', (
 
     expect(result.ok).toBe(false);
     expect(result.conflicted).toBe(true);
-    expect(result.merged).toEqual([]);
+    // Not the old, wrong "nothing merged": 03-a really is on main; 04-b conflicted.
+    expect(result.merged).toEqual(['03-a']);
+    expect(result.midMerge).toBe(true);
+    expect(result.conflictingFiles).toContain('README.md');
+    expect(result.message).toMatch(/03-a/);
+    expect(result.message).toMatch(/mid-merge/i);
     // The conflicting file is named in the surfaced output.
     expect(result.output).toContain('README.md');
+
+    // The reported state matches main's ACTUAL state: main is genuinely mid-merge,
+    // and 03-a's commit is an ancestor of main (integrated) while 04-b is not.
+    expect(await isMidMerge(repo)).toBe(true);
+    await expect(
+      git(repo, 'merge-base', '--is-ancestor', branchFor('03-a'), 'HEAD'),
+    ).resolves.toBeDefined();
+    await expect(
+      git(repo, 'merge-base', '--is-ancestor', branchFor('04-b'), 'HEAD'),
+    ).rejects.toBeTruthy();
 
     // Nothing was auto-resolved or cleaned up: the conflicting branch survives,
     // and at least one worktree is left in place for the human to sort out.
     expect(await branchExists('04-b')).toBe(true);
     expect(existsSync(worktreePathFor(repo, '04-b'))).toBe(true);
+  });
+
+  it('abortMerge returns main to a clean state, keeping the pre-conflict merge (issue 24)', async () => {
+    await finishedRun('03-a', 'README.md', '# scratch repo\nchange from run 3\n');
+    await finishedRun('04-b', 'README.md', '# scratch repo\nDIFFERENT change from run 4\n');
+    await mergeRuns(repo, ['03-a', '04-b'], { scriptPath: SCRIPT });
+    expect(await isMidMerge(repo)).toBe(true);
+
+    const aborted = await abortMerge(repo);
+    expect(aborted.ok).toBe(true);
+
+    // main is clean again — no in-progress merge, no dirty working tree.
+    expect(await isMidMerge(repo)).toBe(false);
+    expect((await git(repo, 'status', '--porcelain')).trim()).toBe('');
+    // 03-a's clean merge is kept (it's still an ancestor of main); 04-b is not.
+    await expect(
+      git(repo, 'merge-base', '--is-ancestor', branchFor('03-a'), 'HEAD'),
+    ).resolves.toBeDefined();
+    await expect(
+      git(repo, 'merge-base', '--is-ancestor', branchFor('04-b'), 'HEAD'),
+    ).rejects.toBeTruthy();
+  });
+
+  it('abortMerge is a harmless no-op when main is not mid-merge (issue 24)', async () => {
+    const res = await abortMerge(repo);
+    expect(res.ok).toBe(true);
+    expect(res.error).toBeNull();
   });
 
   it('unblocks a repo that already has an un-ignored .afk-parallel marker (issue 18)', async () => {

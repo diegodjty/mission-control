@@ -405,6 +405,40 @@ body {
   flex: 0 0 auto;
 }
 
+/* Mid-merge banner (issue 24): main is left with an in-progress merge after a
+   partial afk-merge conflict. Blocks new Runs/Drain and offers an Abort. */
+.map__midmerge {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 8px 14px;
+  border-bottom: 1px solid #3a1c1c;
+  background: #1a0f0f;
+  flex: 0 0 auto;
+}
+
+.map__midmerge-text {
+  font-size: 11px;
+  color: #e08a8a;
+  flex: 1 1 260px;
+}
+
+.map__midmerge-abort {
+  background: #2a1212;
+  color: #f0a0a0;
+  border: 1px solid #7a2323;
+  border-radius: 6px;
+  padding: 4px 14px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.map__midmerge-abort:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 /* Stranded-Runs cleanup bar (issue 22): lists blocked/stopped/commit-failed
    Runs that can't merge, each with a Discard action, so the batch can proceed. */
 .map__strandedbar {

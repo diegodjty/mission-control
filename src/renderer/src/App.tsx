@@ -178,6 +178,14 @@ export function App(): JSX.Element {
   const [merging, setMerging] = useState(false);
   const [mergeDisplay, setMergeDisplay] = useState<MergeDisplay | null>(null);
 
+  // --- Mid-merge state (issue 24) ------------------------------------------
+  // `main` is left mid-merge when a partial `afk-merge.sh` run committed some
+  // slugs then hit a conflict (a conflicted index / MERGE_HEAD). Polled from disk
+  // alongside the afk/ scan. While true, a new drain/Run is refused and an Abort
+  // affordance is offered so a non-git user can return `main` to a clean state.
+  const [midMerge, setMidMerge] = useState(false);
+  const [aborting, setAborting] = useState(false);
+
   // --- Isolated-Run completion (issue 13) ----------------------------------
   // An isolated Run works in its own worktree on an `afk/NN-slug` branch and
   // flips its issue to `done` there — a change the main-checkout backlog
@@ -288,7 +296,9 @@ export function App(): JSX.Element {
       void window.mc
         .scanAfkRuns({ projectPath })
         .then((res) => {
-          if (!cancelled) setAfkScan(res.branches);
+          if (cancelled) return;
+          setAfkScan(res.branches);
+          setMidMerge(res.midMerge);
         })
         .catch(() => {
           // Transient read/git error: keep the last scan; the next tick retries.
@@ -362,6 +372,11 @@ export function App(): JSX.Element {
   const startRun = useCallback(
     (target: RunTarget): void => {
       const tracked = runs.some((r) => r.target.issueId === target.issueId);
+
+      // main is mid-merge (a partial afk-merge conflict, issue 24): refuse to
+      // start a fresh Run on top of a conflicted index — the user resolves or
+      // aborts the merge first. A Run already tracked is still surfaced below.
+      if (!tracked && midMerge) return;
 
       // On-disk truth wins over in-memory tracking (issue 21): an issue already
       // live in a worktree, or finished-but-unmerged on its `afk/` branch, must
@@ -469,6 +484,7 @@ export function App(): JSX.Element {
       runs,
       projectPath,
       needsIsolation,
+      midMerge,
       worktreeRunningIds,
       finishedUnmergedIds,
       strandedIds,
@@ -573,12 +589,22 @@ export function App(): JSX.Element {
     );
   }, []);
 
-  const startDrain = useCallback((chosenCap: number): void => {
-    setCap(Math.max(1, Math.floor(chosenCap) || 1));
-    setDrainMessage('');
-    setDraining(true);
-    setView('pane');
-  }, []);
+  const startDrain = useCallback(
+    (chosenCap: number): void => {
+      // Refuse to drain onto a mid-merge main (issue 24) — resolve/abort first.
+      if (midMerge) {
+        setDrainMessage(
+          'Cannot drain: main is mid-merge — resolve the conflict or Abort the merge first.',
+        );
+        return;
+      }
+      setCap(Math.max(1, Math.floor(chosenCap) || 1));
+      setDrainMessage('');
+      setDraining(true);
+      setView('pane');
+    },
+    [midMerge],
+  );
 
   const stopDrain = useCallback((): void => {
     setDraining(false);
@@ -613,7 +639,7 @@ export function App(): JSX.Element {
       issueId: r.target.issueId,
       status: runStatusOf(r),
     }));
-    const plan = planDrain({ issues: backlog.issues, maxConcurrent: cap, activeRuns });
+    const plan = planDrain({ issues: backlog.issues, maxConcurrent: cap, activeRuns, midMerge });
 
     if (plan.drain.stop) {
       setDraining(false);
@@ -681,7 +707,7 @@ export function App(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [draining, backlog, runs, cap, projectPath, runStatusOf]);
+  }, [draining, backlog, runs, cap, projectPath, midMerge, runStatusOf]);
 
   // --- Merge readiness (issue 08, ADR-0002; issue 16) ---------------------
   // Whether a human-triggered Merge is offered — and which branches it targets —
@@ -738,6 +764,41 @@ export function App(): JSX.Element {
       })
       .finally(() => setMerging(false));
   }, [projectPath, merging, mergePlan]);
+
+  // Abort an in-progress merge left on `main` by a partial conflict (issue 24):
+  // `git merge --abort` back to a clean `main` (already-merged slugs stay merged),
+  // so a non-git user isn't stranded and a new drain/Run is unblocked. Refreshes
+  // the scan immediately so `midMerge` clears without waiting for the next poll.
+  const runAbortMerge = useCallback((): void => {
+    if (projectPath === null || aborting) return;
+    setAborting(true);
+    void window.mc
+      .abortMerge({ projectPath })
+      .then((res) => {
+        if (!res.ok) {
+          window.alert(`Could not abort the merge: ${res.error ?? 'unknown error'}`);
+          return;
+        }
+        // The conflicted merge is gone; drop the stale conflict panel and re-scan.
+        setMergeDisplay(null);
+        void window.mc
+          .scanAfkRuns({ projectPath })
+          .then((r) => {
+            setAfkScan(r.branches);
+            setMidMerge(r.midMerge);
+          })
+          .catch(() => {
+            // The 1.5s poll will pick up the cleared mid-merge state regardless.
+          });
+      })
+      .catch((err: unknown) => {
+        window.alert(
+          `Could not abort the merge: ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      })
+      .finally(() => setAborting(false));
+  }, [projectPath, aborting]);
 
   // Adaptive tiled grid: the pure layout function decides the shape from the
   // live Run count (issue 12). A maximized tile overrides it with a single cell.
@@ -824,6 +885,9 @@ export function App(): JSX.Element {
             onMerge={runMerge}
             merging={merging}
             mergeDisplay={mergeDisplay}
+            midMerge={midMerge}
+            onAbortMerge={runAbortMerge}
+            aborting={aborting}
           />
         </div>
 
