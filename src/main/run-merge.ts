@@ -31,7 +31,11 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { removeWorktree, detectDefaultBranch } from './git-worktree-adapter';
+import {
+  removeWorktree,
+  detectDefaultBranch,
+  reconcileMergedWorktrees,
+} from './git-worktree-adapter';
 import { ensureLocallyIgnored } from './local-ignore';
 import { afkMergeConfContent } from '../shared/merge-plan';
 import { branchFor } from '../shared/isolation-policy';
@@ -251,6 +255,21 @@ export async function mergeRuns(
       }
     }
     merged.push(slug);
+  }
+
+  // Beyond the slugs THIS run merged, reconcile any OTHER on-disk `afk/` worktree
+  // or branch whose work already reached the default branch (issue 50). The
+  // per-slug loop above only cleans what `afk-merge.sh` merged THIS invocation;
+  // residue that got onto the default branch by another route — a prior merge, a
+  // re-run, the solo-committed-then-merged path — is SKIPPED by the script and so
+  // was never cleaned, leaving `.afk-worktrees` directories behind after a
+  // fully-merged drain. The sweep reuses the default-branch-aware merged check and
+  // leaves not-yet-merged (finished-unmerged / running) worktrees untouched.
+  if (cleanup) {
+    const swept = await reconcileMergedWorktrees(projectPath);
+    for (const slug of swept.leftBehind) {
+      if (!leftBehind.includes(slug)) leftBehind.push(slug);
+    }
   }
 
   // Name any requested slugs that were skipped (missing branch / already in

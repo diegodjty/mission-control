@@ -26,7 +26,11 @@ import {
 import { buildBacklog, type IssueStatus } from '../shared/backlog-model';
 import { resolveDefaultBranch } from '../shared/default-branch';
 import { shouldCommitWorktree, shouldCommitMain } from '../shared/run-state';
-import { issueIdFromSlug, type AfkBranchFacts } from '../shared/worktree-scan';
+import {
+  issueIdFromSlug,
+  mergedAfkSlugsToReclaim,
+  type AfkBranchFacts,
+} from '../shared/worktree-scan';
 import { ensureLocallyIgnored } from './local-ignore';
 import type {
   IsolationApplyResult,
@@ -156,7 +160,7 @@ export async function detectDefaultBranch(projectPath: string): Promise<string> 
  * correctly seen as merged instead of the `merge-base` erroring and the branch
  * reading `finished (unmerged)` forever.
  */
-async function isMergedIntoDefaultBranch(
+export async function isMergedIntoDefaultBranch(
   projectPath: string,
   slug: string,
   defaultBranch: string,
@@ -268,6 +272,69 @@ export async function createWorktree(
 export async function removeWorktree(projectPath: string, slug: string): Promise<void> {
   const path = worktreePathFor(projectPath, slug);
   await git(projectPath, ['worktree', 'remove', path]);
+}
+
+/** The outcome of a merged-worktree reconciliation sweep (issue 50). */
+export interface ReconcileMergedResult {
+  /** Slugs whose worktree (if any) was removed AND `afk/<slug>` branch deleted. */
+  reclaimed: string[];
+  /**
+   * Merged slugs LEFT in place because a non-force worktree remove refused on
+   * uncommitted/untracked leftovers — the merged work is safe on the default
+   * branch, so we keep both worktree and branch and report them rather than
+   * force-discarding a human's stray edits.
+   */
+  leftBehind: string[];
+}
+
+/**
+ * Sweep the Project's on-disk `afk/` state and reclaim every slug whose work is
+ * CONFIRMED merged into the default branch (issue 50): remove its worktree (when
+ * one is still registered) and delete its `afk/<slug>` branch, so a fully-merged
+ * drain leaves NO `.afk-worktrees` residue and no merged `afk/*` branch behind.
+ *
+ * This closes the gap the per-Run merge cleanup left. `mergeRuns` only cleaned the
+ * slugs a given `afk-merge.sh` invocation ACTUALLY merged; a worktree/branch that
+ * reached the default branch by another route — a prior merge, a re-run, or the
+ * solo-committed-then-merged path — was SKIPPED by the script and so never cleaned,
+ * leaving the leftover `02-run-me` / `05-manual-check` worktrees the dogfood drain
+ * produced. The reclaim set reuses issue 27's default-branch-aware merged detection
+ * (via `scanAfkBranches`' `mergedIntoMain`) and the pure `mergedAfkSlugsToReclaim`
+ * decision, so a not-yet-merged worktree — `finished-unmerged` (still mergeable),
+ * `running`, `stranded`, or a fresh worktree on an empty branch — is NEVER touched.
+ *
+ * Best-effort and idempotent: a non-force `worktree remove` refuses on uncommitted
+ * leftovers (reported in `leftBehind`, worktree + branch kept); the branch is
+ * deleted only once its worktree is gone (git refuses to delete a checked-out
+ * branch), with `-d` (safe delete) as a second belt-and-braces merged check.
+ */
+export async function reconcileMergedWorktrees(
+  projectPath: string,
+): Promise<ReconcileMergedResult> {
+  const facts = await scanAfkBranches(projectPath);
+  const hasWorktree = new Set(facts.filter((f) => f.hasWorktree).map((f) => f.slug));
+  const reclaimed: string[] = [];
+  const leftBehind: string[] = [];
+  for (const slug of mergedAfkSlugsToReclaim(facts)) {
+    if (hasWorktree.has(slug)) {
+      try {
+        await removeWorktree(projectPath, slug);
+      } catch {
+        // Uncommitted/untracked leftovers block a non-force remove. The merged
+        // work is safely on the default branch, so keep the worktree + branch
+        // (git also refuses to delete a still-checked-out branch) and report it.
+        leftBehind.push(slug);
+        continue;
+      }
+    }
+    try {
+      await git(projectPath, ['branch', '-d', branchFor(slug)]);
+    } catch {
+      // Branch already gone (or -d refused) — the worktree is cleaned regardless.
+    }
+    reclaimed.push(slug);
+  }
+  return { reclaimed, leftBehind };
 }
 
 /**

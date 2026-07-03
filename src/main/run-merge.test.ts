@@ -19,7 +19,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { mergeRuns, ensureMergeConf, defaultMergeScriptPath, abortMerge } from './run-merge';
-import { createWorktree, worktreePathFor, isMidMerge } from './git-worktree-adapter';
+import {
+  createWorktree,
+  worktreePathFor,
+  isMidMerge,
+  reconcileMergedWorktrees,
+} from './git-worktree-adapter';
 import { branchFor } from '../shared/isolation-policy';
 
 const exec = promisify(execFile);
@@ -37,6 +42,24 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
 async function finishedRun(slug: string, file: string, content: string): Promise<string> {
   const wt = await createWorktree(repo, slug, branchFor(slug));
   await writeFile(join(wt, file), content);
+  await git(wt, 'add', '.');
+  await git(wt, 'commit', '-m', `work for ${slug}`);
+  return wt;
+}
+
+/**
+ * A finished parallel Run whose issue file is committed `done` on its branch
+ * (issue 15) — the shape the merged-worktree sweep (issue 50) keys on. The `done`
+ * commit plus merged status is what marks a worktree/branch as reclaimable.
+ */
+async function finishedRunWithIssue(slug: string): Promise<string> {
+  const wt = await createWorktree(repo, slug, branchFor(slug));
+  await mkdir(join(wt, 'issues'), { recursive: true });
+  await writeFile(
+    join(wt, 'issues', `${slug}.md`),
+    `---\nstatus: done\ndepends_on: []\n---\n# ${slug}\n`,
+  );
+  await writeFile(join(wt, `${slug}.txt`), `work for ${slug}\n`);
   await git(wt, 'add', '.');
   await git(wt, 'commit', '-m', `work for ${slug}`);
   return wt;
@@ -316,5 +339,68 @@ describe('mergeRuns — the real afk-merge.sh against real parallel branches', (
     expect(result.ok).toBe(false);
     expect(result.conflicted).toBe(false);
     expect(result.message).toMatch(/not found/i);
+  });
+});
+
+describe('reconcileMergedWorktrees — sweeps leftover merged residue, spares unmerged (issue 50)', () => {
+  it('removes a merged worktree + branch (residue) and leaves a finished-unmerged one', async () => {
+    // A finished Run whose work reached `main` by a DIFFERENT route than the
+    // per-Run merge cleanup (here: a direct merge) — the exact leftover-residue
+    // case (`02-run-me` / `05-manual-check`) the dogfood drain produced.
+    const mergedWt = await finishedRunWithIssue('02-run-me');
+    await git(repo, 'merge', '--no-ff', '-m', 'merge 02', branchFor('02-run-me'));
+    // A finished-but-unmerged Run: committed `done`, never merged — still mergeable.
+    const unmergedWt = await finishedRunWithIssue('05-manual-check');
+    expect(existsSync(mergedWt)).toBe(true);
+    expect(existsSync(unmergedWt)).toBe(true);
+
+    const result = await reconcileMergedWorktrees(repo);
+
+    expect(result.reclaimed).toEqual(['02-run-me']);
+    expect(result.leftBehind).toEqual([]);
+    // The merged residue is gone from disk AND from git's branch list.
+    expect(existsSync(worktreePathFor(repo, '02-run-me'))).toBe(false);
+    expect(await branchExists('02-run-me')).toBe(false);
+    // The not-yet-merged Run survives untouched.
+    expect(existsSync(worktreePathFor(repo, '05-manual-check'))).toBe(true);
+    expect(await branchExists('05-manual-check')).toBe(true);
+  });
+
+  it('does NOT reclaim a fresh worktree whose empty branch is trivially an ancestor of main', async () => {
+    // A worktree created but with no committed `done` yet — its branch tip is
+    // `main` (an ancestor of itself), so a naive "is-ancestor" check would flag it
+    // merged. The `committedStatus === 'done'` guard must keep it in place.
+    const freshWt = await createWorktree(repo, '07-fresh', branchFor('07-fresh'));
+    expect(existsSync(freshWt)).toBe(true);
+
+    const result = await reconcileMergedWorktrees(repo);
+
+    expect(result.reclaimed).toEqual([]);
+    expect(existsSync(worktreePathFor(repo, '07-fresh'))).toBe(true);
+    expect(await branchExists('07-fresh')).toBe(true);
+  });
+
+  it('a full mergeRuns leaves no merged residue behind, even a worktree it did not merge itself', async () => {
+    // Pre-existing residue merged before this merge even runs.
+    await finishedRunWithIssue('02-run-me');
+    await git(repo, 'merge', '--no-ff', '-m', 'merge 02', branchFor('02-run-me'));
+    // The Run THIS merge integrates.
+    await finishedRunWithIssue('03-a');
+    // A finished-unmerged Run that must survive the whole operation.
+    await finishedRunWithIssue('05-manual-check');
+
+    const result = await mergeRuns(repo, ['03-a'], { scriptPath: SCRIPT });
+    expect(result.ok).toBe(true);
+    expect(result.merged).toEqual(['03-a']);
+
+    // Both the just-merged Run and the pre-existing residue are cleaned up —
+    // a fully-merged drain leaves no `.afk-worktrees` residue.
+    expect(existsSync(worktreePathFor(repo, '03-a'))).toBe(false);
+    expect(await branchExists('03-a')).toBe(false);
+    expect(existsSync(worktreePathFor(repo, '02-run-me'))).toBe(false);
+    expect(await branchExists('02-run-me')).toBe(false);
+    // The unmerged Run survives.
+    expect(existsSync(worktreePathFor(repo, '05-manual-check'))).toBe(true);
+    expect(await branchExists('05-manual-check')).toBe(true);
   });
 });

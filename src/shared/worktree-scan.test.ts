@@ -6,6 +6,7 @@ import {
   dropMergedBranches,
   markBranchCommitted,
   mergeReadinessOnDisk,
+  mergedAfkSlugsToReclaim,
   needsWorktreeCommit,
   issueIdFromSlug,
   type AfkBranchFacts,
@@ -353,5 +354,39 @@ describe('markBranchCommitted — optimistic commit reflection (issue 30)', () =
     const facts = [branch(3, { hasWorktree: true, worktreeStatus: 'done', committedStatus: 'wip' })];
     markBranchCommitted(facts, '03-x');
     expect(facts[0].committedStatus).toBe('wip');
+  });
+});
+
+describe('mergedAfkSlugsToReclaim — the safe-to-reclaim set for the merged-worktree sweep (issue 50)', () => {
+  it('reclaims a committed-done branch that is already merged (a leftover worktree)', () => {
+    const facts = [branch(2, { hasWorktree: true, committedStatus: 'done', mergedIntoMain: true })];
+    expect(mergedAfkSlugsToReclaim(facts)).toEqual(['02-x']);
+  });
+
+  it('reclaims a merged done branch even with no worktree (a bare merged branch)', () => {
+    const facts = [branch(2, { hasWorktree: false, committedStatus: 'done', mergedIntoMain: true })];
+    expect(mergedAfkSlugsToReclaim(facts)).toEqual(['02-x']);
+  });
+
+  it('does NOT reclaim a finished-unmerged branch (done but not merged — still mergeable)', () => {
+    const facts = [branch(5, { hasWorktree: true, committedStatus: 'done', mergedIntoMain: false })];
+    expect(mergedAfkSlugsToReclaim(facts)).toEqual([]);
+  });
+
+  it('does NOT reclaim a fresh/in-flight worktree whose empty branch is trivially an ancestor of the default branch', () => {
+    // mergedIntoMain is true (empty branch == default tip) but nothing is committed
+    // done yet — a Run in progress must survive the sweep.
+    const facts = [branch(7, { hasWorktree: true, committedStatus: null, mergedIntoMain: true })];
+    expect(mergedAfkSlugsToReclaim(facts)).toEqual([]);
+    const running = [branch(8, { hasWorktree: true, committedStatus: 'wip', mergedIntoMain: true })];
+    expect(mergedAfkSlugsToReclaim(running)).toEqual([]);
+  });
+
+  it('sorts the reclaim set ascending by issue id', () => {
+    const facts = [
+      branch(9, { committedStatus: 'done', mergedIntoMain: true }),
+      branch(3, { committedStatus: 'done', mergedIntoMain: true }),
+    ];
+    expect(mergedAfkSlugsToReclaim(facts)).toEqual(['03-x', '09-x']);
   });
 });

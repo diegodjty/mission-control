@@ -278,3 +278,29 @@ export function dropMergedBranches(
   const merged = new Set(mergedSlugs);
   return facts.filter((f) => !merged.has(f.slug));
 }
+
+/**
+ * The `afk/` slugs whose work is CONFIRMED integrated into the default branch and
+ * whose worktree + branch are therefore safe to reclaim (issue 50): a committed
+ * `done` branch (issue 15 — the Run finished and its work landed on the branch)
+ * that is already an ancestor of the default branch (`mergedIntoMain`, computed by
+ * the adapter with issue 27's default-branch-aware detection). This is exactly the
+ * "integrated" case `classifyBranch` reports as `null`, named for the sweep that
+ * removes it so a fully-merged drain leaves no `.afk-worktrees` residue.
+ *
+ * It deliberately EXCLUDES the two states that must survive a sweep:
+ *   - `finished-unmerged` (`done` committed but NOT merged) — still mergeable, the
+ *     acceptance criterion's "don't remove a not-yet-merged worktree/branch";
+ *   - a fresh / in-flight worktree whose empty `afk/` branch is trivially an
+ *     ancestor of the default branch (so `mergedIntoMain` is true) but has not yet
+ *     committed `done`. The `committedStatus === 'done'` guard is precisely what
+ *     stops the sweep from nuking a Run in progress whose branch merely shares the
+ *     default branch's tip.
+ * Sorted ascending by issue id; pure.
+ */
+export function mergedAfkSlugsToReclaim(facts: AfkBranchFacts[]): string[] {
+  return facts
+    .filter((f) => f.committedStatus === 'done' && f.mergedIntoMain)
+    .sort((a, b) => a.issueId - b.issueId)
+    .map((f) => f.slug);
+}
