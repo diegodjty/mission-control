@@ -25,7 +25,12 @@ import {
   worktreePathFor,
   worktreeBase,
 } from './git-worktree-adapter';
-import { branchFor, decideIsolation, reconcile } from '../shared/isolation-policy';
+import {
+  branchFor,
+  decideIsolation,
+  isolationRunSetWith,
+  reconcile,
+} from '../shared/isolation-policy';
 
 const exec = promisify(execFile);
 
@@ -164,6 +169,36 @@ describe('applyIsolation — the full solo↔parallel lifecycle (real git)', () 
     expect(isParallel(repo)).toBe(false); // flag removed
     expect(await listWorktreeSlugs(repo)).toEqual([]); // both worktrees gone
     expect(existsSync(worktreePathFor(repo, '04-b'))).toBe(false);
+  });
+
+  it('the MANUAL path: a lone Run runs on main, then a second isolates BOTH (issue 20)', async () => {
+    // First manual "▶ Run": the only live Run → solo on main, no worktree.
+    const first = await applyIsolation(
+      repo,
+      isolationRunSetWith([], run(3, '03-a')),
+    );
+    expect(first.parallel).toBe(false);
+    expect(first.placements).toEqual([
+      { issueId: 3, slug: '03-a', cwd: repo, branch: null },
+    ]);
+    expect(existsSync(worktreeBase(repo))).toBe(false);
+
+    // Second manual "▶ Run" while the first is still active → BOTH isolate into
+    // worktrees; neither is left on the shared main checkout. This composes the
+    // manual path's set-builder with real git exactly as startRun does.
+    const active = [run(3, '03-a')]; // the first Run, still live
+    const second = await applyIsolation(
+      repo,
+      isolationRunSetWith(active, run(4, '04-b')),
+    );
+    expect(second.parallel).toBe(true);
+    expect(isParallel(repo)).toBe(true);
+    for (const placed of second.placements) {
+      expect(placed.cwd).toBe(worktreePathFor(repo, placed.slug));
+      expect(placed.cwd).not.toBe(repo); // NEITHER Run runs on main
+      expect(existsSync(placed.cwd)).toBe(true);
+    }
+    expect((await listWorktreeSlugs(repo)).sort()).toEqual(['03-a', '04-b']);
   });
 
   it('is idempotent — re-applying the same parallel set makes no further changes', async () => {

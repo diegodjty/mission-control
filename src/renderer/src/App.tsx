@@ -10,7 +10,7 @@ import {
   type RunStatus,
 } from '../../shared/run-state';
 import { planDrain, type ActiveRun } from '../../shared/run-coordinator';
-import type { IsolationRun } from '../../shared/isolation-policy';
+import { isolationRunSetWith, type IsolationRun } from '../../shared/isolation-policy';
 import {
   deriveWorktreeRunStates,
   mergeReadinessOnDisk,
@@ -301,16 +301,94 @@ export function App(): JSX.Element {
 
   const activeRunIssueIds = runs.map((r) => r.target.issueId);
 
+  // Which tracked Runs are part of the isolation set once a new Run joins: every
+  // Run still `running`, plus any already working in a worktree (an isolated
+  // Run keeps its worktree until merged, per the Isolation Policy). A finished/
+  // stopped SOLO Run on `main` is done competing for the working tree, so it is
+  // NOT counted — it must never inflate the concurrency and pull the lone new
+  // Run into a needless worktree.
+  const needsIsolation = useCallback(
+    (r: TrackedRun): boolean => runStatusOf(r) === 'running' || isIsolated(r),
+    [runStatusOf, isIsolated],
+  );
+
   // Start (or focus) a single Run — the manual "▶ Run" path from the Map.
-  const startRun = useCallback((target: RunTarget): void => {
-    setRuns((prev) =>
-      prev.some((r) => r.target.issueId === target.issueId)
-        ? prev
-        : [...prev, newRun(target)],
-    );
-    setFocusedId(target.issueId);
-    setView('pane');
-  }, []);
+  //
+  // This routes through the SAME concurrency-keyed isolation reconcile the drain
+  // uses (issue 20): starting a second Run while one is active isolates BOTH into
+  // worktrees (neither stays on the shared `main` checkout); a lone Run stays
+  // solo on `main`. Isolation is a function of concurrency, not of which button
+  // started the Run.
+  const startRun = useCallback(
+    (target: RunTarget): void => {
+      setView('pane');
+      setFocusedId(target.issueId);
+
+      // Already tracked → just surface it, exactly as before (no re-spawn).
+      if (runs.some((r) => r.target.issueId === target.issueId)) return;
+
+      // No resolved Project path yet: can't reconcile isolation, so fall back to
+      // spawning on the target's given path (a lone Run). Never blocks the Pane.
+      if (projectPath === null) {
+        setRuns((prev) =>
+          prev.some((r) => r.target.issueId === target.issueId)
+            ? prev
+            : [...prev, newRun(target)],
+        );
+        return;
+      }
+
+      // The Runs that need isolation once this one joins = the ones still live
+      // (running or in a worktree) plus the new target, deduped by issueId.
+      const active: IsolationRun[] = runs.filter(needsIsolation).map((r) => ({
+        issueId: r.target.issueId,
+        slug: slugOf(r.target.issueFileName),
+      }));
+      const isolationRuns = isolationRunSetWith(active, {
+        issueId: target.issueId,
+        slug: slugOf(target.issueFileName),
+      });
+
+      // Apply the resolved placements: re-point every tracked Run to its cwd —
+      // a Run that was solo on `main` re-parents into its worktree when this
+      // second Run turns on parallel mode (its Pane respawns there, keyed on the
+      // changed cwd) — and add the new Run in its own resolved cwd.
+      const place = (cwdOf: (issueId: number) => string): void => {
+        setRuns((prev) => {
+          const repointed = prev.map((r) => {
+            const cwd = cwdOf(r.target.issueId);
+            return cwd === r.target.projectPath
+              ? r
+              : { ...r, target: { ...r.target, projectPath: cwd } };
+          });
+          if (repointed.some((r) => r.target.issueId === target.issueId)) {
+            return repointed;
+          }
+          return [...repointed, newRun({ ...target, projectPath: cwdOf(target.issueId) })];
+        });
+      };
+
+      void window.mc
+        .applyIsolation({ projectPath, runs: isolationRuns })
+        .then((result) => {
+          const cwdById: Record<number, string> = {};
+          for (const p of result.placements) cwdById[p.issueId] = p.cwd;
+          // A Run not in the placement set keeps its current cwd (fall back to
+          // `main`); every isolated/new Run gets its resolved worktree/main cwd.
+          place((id) => cwdById[id] ?? projectPath);
+        })
+        .catch(() => {
+          // Isolation failed (e.g. a git worktree error): don't disturb the live
+          // Runs — just open the new Pane on `main` so it still starts.
+          setRuns((prev) =>
+            prev.some((r) => r.target.issueId === target.issueId)
+              ? prev
+              : [...prev, newRun({ ...target, projectPath })],
+          );
+        });
+    },
+    [runs, projectPath, needsIsolation],
+  );
 
   const stopRun = useCallback((issueId: number): void => {
     setRuns((prev) =>

@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   decideIsolation,
+  decideIsolationWith,
+  isolationRunSetWith,
   reconcile,
   branchFor,
   commitMessageForRun,
@@ -59,6 +61,63 @@ describe('decideIsolation — solo vs parallel', () => {
   it('is deterministic — same input yields the same decision', () => {
     const runs = [run(2, 'b'), run(1, 'a')];
     expect(decideIsolation(runs)).toEqual(decideIsolation(runs));
+  });
+});
+
+describe('decideIsolationWith — the manual "▶ Run" path (issue 20)', () => {
+  it('a single manual Run (nothing else live) stays solo on main', () => {
+    const d = decideIsolationWith([], run(3, '03-run-issue-in-pane'));
+    expect(d.parallel).toBe(false);
+    expect(d.placements).toEqual([
+      { issueId: 3, slug: '03-run-issue-in-pane', placement: { kind: 'main' } },
+    ]);
+  });
+
+  it('a second manual Run started while one is active isolates BOTH into worktrees', () => {
+    // One Run already live; the user hits ▶ Run on another issue.
+    const d = decideIsolationWith(
+      [run(3, '03-run-issue-in-pane')],
+      run(4, '04-dependency-graph-map'),
+    );
+    expect(d.parallel).toBe(true);
+    // Neither Run is left on the shared main checkout — each gets a worktree.
+    expect(d.placements).toEqual([
+      {
+        issueId: 3,
+        slug: '03-run-issue-in-pane',
+        placement: { kind: 'worktree', branch: 'afk/03-run-issue-in-pane' },
+      },
+      {
+        issueId: 4,
+        slug: '04-dependency-graph-map',
+        placement: { kind: 'worktree', branch: 'afk/04-dependency-graph-map' },
+      },
+    ]);
+    expect(d.placements.every((p) => p.placement.kind === 'worktree')).toBe(true);
+  });
+
+  it('re-triggering an already-live issue does not double-count it (stays solo)', () => {
+    // Clicking Run again on the only live issue must not fabricate a second Run
+    // and flip the lone Run into a needless worktree.
+    const d = decideIsolationWith(
+      [run(3, '03-run-issue-in-pane')],
+      run(3, '03-run-issue-in-pane'),
+    );
+    expect(d.parallel).toBe(false);
+    expect(d.placements).toEqual([
+      { issueId: 3, slug: '03-run-issue-in-pane', placement: { kind: 'main' } },
+    ]);
+  });
+
+  it('isolationRunSetWith dedupes and sorts the resulting concurrency set', () => {
+    expect(
+      isolationRunSetWith([run(4, 'd'), run(2, 'b')], run(3, 'c')),
+    ).toEqual([run(2, 'b'), run(3, 'c'), run(4, 'd')]);
+    // Adding a Run already in the set is a no-op on the set (still sorted).
+    expect(isolationRunSetWith([run(4, 'd'), run(2, 'b')], run(2, 'b'))).toEqual([
+      run(2, 'b'),
+      run(4, 'd'),
+    ]);
   });
 });
 

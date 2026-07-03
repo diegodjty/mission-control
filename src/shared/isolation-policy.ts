@@ -97,6 +97,43 @@ export function decideIsolation(runs: IsolationRun[]): IsolationDecision {
   return { parallel, placements };
 }
 
+/**
+ * The set of Runs that need isolation once `added` joins the ones already
+ * live — the concurrency input the *manual* "▶ Run" path feeds to isolation,
+ * exactly as the drain builds its own set (issue 20). Deduped by issueId (so
+ * re-triggering an already-live issue doesn't double-count it and inflate the
+ * concurrency), then sorted ascending — the same normalization `decideIsolation`
+ * expects. Isolation keys on the *resulting concurrency*, never on which button
+ * started the Run, so this is the single place both entry points describe "who
+ * is live now".
+ */
+export function isolationRunSetWith(
+  active: IsolationRun[],
+  added: IsolationRun,
+): IsolationRun[] {
+  const set = active.some((r) => r.issueId === added.issueId)
+    ? [...active]
+    : [...active, added];
+  return set.sort((a, b) => a.issueId - b.issueId);
+}
+
+/**
+ * The isolation decision for the Run set that results from adding one more Run
+ * to those already live — the manual "▶ Run" path's entry into the very same
+ * concurrency-keyed reconcile the drain uses (issue 20). Starting a second Run
+ * while one is active flips the whole set to parallel, so BOTH the already-live
+ * Run and the new one get a worktree (neither stays on the shared `main`
+ * checkout); adding to an empty set keeps the lone Run solo on `main`. A
+ * convenience over `decideIsolation(isolationRunSetWith(...))` so the manual
+ * path's decision is exercised — and unit-tested — on its own terms.
+ */
+export function decideIsolationWith(
+  active: IsolationRun[],
+  added: IsolationRun,
+): IsolationDecision {
+  return decideIsolation(isolationRunSetWith(active, added));
+}
+
 /** The isolation-relevant facts the adapter reads off disk before reconciling. */
 export interface IsolationState {
   /** Is `issues/.afk-parallel` present? */
