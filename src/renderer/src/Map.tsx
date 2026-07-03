@@ -607,6 +607,13 @@ function RunLogCard({
     ['Bookkeeping', record.bookkeeping],
     ['Doc drift', record.docDrift],
   ];
+  // The free-form report body (blocked reason / verification steps / unparsed
+  // text) only carries substance when there are no named sections — show it as
+  // a "Report" field then, so a blocked Run's card isn't left empty.
+  const sectionsPresent = fields.some(([, v]) => v !== null && v !== '');
+  if (!sectionsPresent && record.detail !== null && record.detail !== '') {
+    fields.push(['Report', record.detail]);
+  }
   const shown = fields.filter(([, v]) => v !== null && v !== '');
   return (
     <li className="runlog-card" onClick={onSelect} title="Show this issue in the backlog">

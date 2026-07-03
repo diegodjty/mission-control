@@ -77,6 +77,13 @@ export interface CompletionBlockEvent {
   verified: string | null;
   bookkeeping: string | null;
   docDrift: string | null;
+  /**
+   * The free-form report body for a blocked / needs-verification / unknown Run
+   * (the reason, the verification steps, the unparsed text). Whitelisted like
+   * the section fields — it is the parser's `detail`, never raw Pane scroll — so
+   * the Dispatcher receives a blocked Run's substance, not just its header.
+   */
+  detail: string | null;
 }
 
 export type DispatcherEvent = CompletionBlockEvent;
@@ -121,6 +128,7 @@ export function toCompletionEvent(result: RunResult): CompletionBlockEvent {
     verified: r.verified,
     bookkeeping: r.bookkeeping,
     docDrift: r.docDrift,
+    detail: r.detail,
   };
 }
 
@@ -159,5 +167,8 @@ export function renderCompletionEvent(event: CompletionBlockEvent): string {
   field('Verified', event.verified);
   field('Bookkeeping', event.bookkeeping);
   field('Doc drift', event.docDrift);
+  // The report body for a blocked / needs-verification / unknown Run: without
+  // it the Dispatcher would see only the header line above.
+  field('Detail', event.detail);
   return lines.join('\n');
 }

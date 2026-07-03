@@ -46,6 +46,15 @@ export interface CompletionRecord {
   bookkeeping: string | null;
   /** The "Doc drift" section body, or null when absent. */
   docDrift: string | null;
+  /**
+   * The free-form report body for shapes that carry no named sections — a
+   * blocked / no-work report's reason, an HITL block's verification steps, or an
+   * unknown/unparsed block's text. This is what keeps a blocked Run from
+   * reaching the Dispatcher as a header with no substance: the meaningful body
+   * survives here even when every section field is null. Null for a normal
+   * completed block (its substance lives in the section fields).
+   */
+  detail: string | null;
   /** Which of the three block kinds this was (or `unknown`). */
   outcome: RunOutcome;
 }
@@ -150,8 +159,21 @@ const EMPTY: CompletionRecord = {
   verified: null,
   bookkeeping: null,
   docDrift: null,
+  detail: null,
   outcome: 'unknown',
 };
+
+/**
+ * The report body to carry for a non-completed shape (blocked / needs-
+ * verification / unknown): the whole ANSI-stripped block, trimmed. Captured
+ * verbatim so the reason a Run gives — its blocker, its verification steps, or
+ * whatever an unparsed block managed to say — reaches the record instead of
+ * being dropped. Null only when there is nothing but whitespace.
+ */
+function captureDetail(text: string): string | null {
+  const body = text.trim();
+  return body.length > 0 ? body : null;
+}
 
 /**
  * Parse a Worker's final output text into a structured Completion record.
@@ -178,6 +200,8 @@ export function parseCompletionBlock(input: unknown): CompletionRecord {
       issue: slug ? `${id} — ${slug}` : String(id),
       issueId: Number.isFinite(id) ? id : null,
       ...sections,
+      // A completed block's substance is its section fields; no free-form body.
+      detail: null,
       outcome: 'completed',
     };
   }
@@ -188,6 +212,7 @@ export function parseCompletionBlock(input: unknown): CompletionRecord {
       issue: null,
       issueId: findIssueId(text),
       ...sections,
+      detail: captureDetail(text),
       outcome: 'needs-verification',
     };
   }
@@ -198,18 +223,21 @@ export function parseCompletionBlock(input: unknown): CompletionRecord {
       issue: null,
       issueId: findIssueId(text),
       ...sections,
+      detail: captureDetail(text),
       outcome: 'blocked',
     };
   }
 
   // Malformed / unrecognised: still best-effort any sections that happen to be
   // present, but flag it `unknown` so nothing downstream treats it as a real
-  // completion.
+  // completion. Carry the body verbatim so an unparsed block isn't silently
+  // reduced to an empty header.
   const sections = extractSections(text);
   return {
     issue: null,
     issueId: findIssueId(text),
     ...sections,
+    detail: captureDetail(text),
     outcome: 'unknown',
   };
 }

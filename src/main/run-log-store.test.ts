@@ -28,6 +28,7 @@ function record(over: Partial<RunLogRecord> = {}): RunLogRecord {
     verified: 'Loaded the Map and clicked Run.',
     bookkeeping: 'Touched Pane.tsx.',
     docDrift: 'none',
+    detail: null,
     outcome: 'completed',
     ...over,
   };

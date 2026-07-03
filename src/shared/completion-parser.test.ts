@@ -50,6 +50,10 @@ describe('parseCompletionBlock — normal completion block', () => {
     expect(rec.whatChanged).not.toMatch(/Try it yourself/);
     expect(rec.verified).not.toMatch(/Bookkeeping/);
   });
+
+  it('leaves detail null for a completed block (its substance is the sections)', () => {
+    expect(rec.detail).toBeNull();
+  });
 });
 
 describe('parseCompletionBlock — heading/section variants', () => {
@@ -101,6 +105,11 @@ worktree with no collision on main.
     expect(rec.tryIt).toMatch(/two Runs at once/);
     expect(rec.verified).toMatch(/Not runtime-verified/);
   });
+
+  it('carries the full block body in detail (issue 42 — body must survive)', () => {
+    expect(rec.detail).toContain('needs a human to confirm on a real repo');
+    expect(rec.detail).toContain('Ready for manual verification');
+  });
 });
 
 describe('parseCompletionBlock — blocked / no work available', () => {
@@ -120,6 +129,22 @@ describe('parseCompletionBlock — blocked / no work available', () => {
     expect(rec.outcome).toBe('blocked');
     expect(rec.issueId).toBe(7);
   });
+
+  it('captures the blocker reason in detail (issue 42 — body must survive)', () => {
+    const report =
+      'No AFK-eligible work available. Issue 62 is wip with uncommitted partial ' +
+      'work in packages/state-machine/src/transfer-phase.ts; issues 63–66 all ' +
+      'depend on it and are blocked. Recommend reverting or finishing 62.';
+    const rec = parseCompletionBlock(report);
+    expect(rec.outcome).toBe('blocked');
+    // The whole reason survives — not just the header — so the Dispatcher gets
+    // substance instead of an empty "blocked" line.
+    expect(rec.detail).toContain('transfer-phase.ts');
+    expect(rec.detail).toContain('Recommend reverting or finishing 62');
+    // ...and every named section field is still null (this shape has none).
+    expect(rec.whatChanged).toBeNull();
+    expect(rec.tryIt).toBeNull();
+  });
 });
 
 describe('parseCompletionBlock — malformed / graceful degradation', () => {
@@ -133,6 +158,7 @@ describe('parseCompletionBlock — malformed / graceful degradation', () => {
       verified: null,
       bookkeeping: null,
       docDrift: null,
+      detail: null,
       outcome: 'unknown',
     });
   });
@@ -150,6 +176,17 @@ describe('parseCompletionBlock — malformed / graceful degradation', () => {
       'the quick brown fox jumped over the lazy dog and then went home',
     );
     expect(rec.outcome).toBe('unknown');
+  });
+
+  it('carries a body-only / unknown block into detail (issue 42 — body survives)', () => {
+    // A block that names no section headers and matches no known shape: its
+    // text must still reach the record so nothing meaningful is silently lost.
+    const rec = parseCompletionBlock(
+      'Hit a wall reconciling the migration; leaving notes here for the human to pick up.',
+    );
+    expect(rec.outcome).toBe('unknown');
+    expect(rec.detail).toContain('reconciling the migration');
+    expect(rec.whatChanged).toBeNull();
   });
 
   it('best-effort extracts sections from a partial block but keeps outcome honest', () => {
