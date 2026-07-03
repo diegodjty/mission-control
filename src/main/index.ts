@@ -19,9 +19,11 @@ import {
   isMidMerge,
   readIsolatedIssueStatus,
   scanAfkBranches,
+  worktreePathFor,
 } from './git-worktree-adapter';
 import { mergeRuns, abortMerge } from './run-merge';
 import { RunLogStore } from './run-log-store';
+import { ReceiptWatcher } from './receipt-watcher';
 import { parseCompletionBlock } from '../shared/completion-parser';
 import {
   IpcChannel,
@@ -51,6 +53,7 @@ import {
   type ProjectTransitionRequest,
   type ProjectPickFolderResult,
   type ProjectView,
+  type ReceiptWatchRequest,
   type RunLogCaptureRequest,
   type RunLogCaptureResult,
   type RunLogLoadRequest,
@@ -224,6 +227,38 @@ const backlogWatcher = new BacklogWatcher();
 // under the app's userData dir, so the Execution view's feed survives closing
 // Panes and app restarts. Instantiated in `whenReady` (needs `app.getPath`).
 let runLogStore: RunLogStore;
+
+// The Receipt capture edge (issue 56, ADR-0013): watches each Project's
+// `issues/completions/` (checkout + live worktrees) for Worker Receipts, keyed
+// per renderer WebContents like the Backlog Watcher, so a closing Window never
+// leaks a watch.
+const receiptWatcher = new ReceiptWatcher();
+
+// Per-Project dedupe memory for the Receipt edge: record id (issue + finished)
+// → fingerprint of the ingested content, or null for ids seeded from the
+// persisted Run log (an MC restart must not re-feed Receipts already captured
+// in an earlier session — ADR-0013). Cached as a promise per normalised repo
+// path so concurrent watch requests share ONE seeding read and one live map.
+const receiptSeenByProject = new Map<string, Promise<Map<string, string | null>>>();
+
+function seenReceiptsFor(projectPath: string): Promise<Map<string, string | null>> {
+  const key = normalizeRepoPath(projectPath);
+  let promise = receiptSeenByProject.get(key);
+  if (!promise) {
+    promise = runLogStore
+      .read(projectPath)
+      .then((records) => {
+        const seen = new Map<string, string | null>();
+        for (const rec of records) {
+          if (rec.id.startsWith('receipt:')) seen.set(rec.id, null);
+        }
+        return seen;
+      })
+      .catch(() => new Map<string, string | null>());
+    receiptSeenByProject.set(key, promise);
+  }
+  return promise;
+}
 
 /** The `NN-slug` for a Run's issue file name (`NN-slug.md`). */
 function slugOfFile(fileName: string): string {
@@ -552,6 +587,42 @@ function registerIpc(): void {
       return { records: await runLogStore.read(req.projectPath) };
     },
   );
+
+  // Receipt capture edge (issue 56, ADR-0013): watch the Project's
+  // `issues/completions/` — the checkout's, plus each live worktree's copy (the
+  // renderer names the worktree slugs; the paths are main's own convention) —
+  // and, for each genuinely-new Receipt (debounced, deduped by issue +
+  // `finished`), persist it to the Run log and push it to the owning Window.
+  // From there it enters the EXISTING feed pipeline (noise floor, lifecycle
+  // derivation, Run-log card) exactly where scroll-captured records enter.
+  // A non-owner must not watch (or write the log for) a repo it doesn't drive.
+  ipcMain.on(IpcChannel.ReceiptWatch, (event, req: ReceiptWatchRequest) => {
+    const sender = event.sender;
+    const key = String(sender.id);
+    if (ownershipError(event, req.projectPath)) {
+      receiptWatcher.unwatch(key);
+      return;
+    }
+    const roots = [
+      join(req.projectPath, 'issues'),
+      ...req.worktreeSlugs.map((slug) => join(worktreePathFor(req.projectPath, slug), 'issues')),
+    ];
+    void seenReceiptsFor(req.projectPath).then((seen) => {
+      // The Window may have gone away while the seed read ran.
+      if (sender.isDestroyed()) return;
+      receiptWatcher.watch(key, roots, seen, (record) => {
+        // Persist first (the durable Run log is the record of truth, ADR-0009);
+        // a failed append still surfaces the record live rather than dropping it.
+        void runLogStore.append(req.projectPath, record).catch(() => {});
+        if (!sender.isDestroyed()) {
+          sender.send(IpcChannel.ReceiptCaptured, { projectPath: req.projectPath, record });
+        }
+      });
+    });
+    // Close this Window's Receipt watch when its renderer goes away, so
+    // watchers never outlive the Window that needed them.
+    sender.once('destroyed', () => receiptWatcher.unwatch(key));
+  });
 }
 
 app.whenReady().then(() => {
@@ -567,10 +638,12 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   ptyManager.killAll();
   backlogWatcher.closeAll();
+  receiptWatcher.closeAll();
   if (process.platform !== 'darwin') app.quit();
 });
 
 app.on('before-quit', () => {
   ptyManager.killAll();
   backlogWatcher.closeAll();
+  receiptWatcher.closeAll();
 });

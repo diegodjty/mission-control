@@ -152,6 +152,22 @@ export const IpcChannel = {
    * Resolves to a RunLogLoadResult.
    */
   RunLogLoad: 'runlog:load',
+  /**
+   * renderer → main (send): watch a Project's `issues/completions/` for Receipt
+   * files (issue 56, ADR-0013) — the checkout's for solo Runs plus each live
+   * parallel Run's worktree copy (named by `worktreeSlugs`; main derives the
+   * worktree paths it owns). Re-sent whenever the worktree set changes; main
+   * reconciles the watched roots.
+   */
+  ReceiptWatch: 'receipt:watch',
+  /**
+   * main → renderer (send): a genuinely-new Receipt was ingested at the capture
+   * edge (parsed, debounced, deduped by issue + `finished`) and persisted to
+   * the Run log. The renderer upserts it into the SAME feed pipeline
+   * scroll-captured records enter (noise floor, lifecycle derivation, Run-log
+   * card) — no bespoke path.
+   */
+  ReceiptCaptured: 'receipt:captured',
 } as const;
 
 export type IpcChannel = (typeof IpcChannel)[keyof typeof IpcChannel];
@@ -541,6 +557,30 @@ export interface RunLogLoadResult {
   records: RunLogRecord[];
 }
 
+export interface ReceiptWatchRequest {
+  /** The Project repo path whose `issues/completions/` to watch. */
+  projectPath: string;
+  /**
+   * The `NN-slug`s of Runs currently living in worktrees, so main also watches
+   * each worktree's own `issues/completions/` copy (a parallel Run's Receipt
+   * lands there, invisible to the checkout watch, and must surface live —
+   * before any Merge). Main derives the worktree paths; it owns them.
+   */
+  worktreeSlugs: string[];
+}
+
+/**
+ * Pushed to the renderer when the Receipt capture edge ingests a genuinely-new
+ * Receipt (issue 56): already parsed, debounced (no truncated half-writes) and
+ * deduped (issue + `finished`), and already persisted to the Run log on disk.
+ */
+export interface ReceiptCapturedMessage {
+  /** The Project the Receipt belongs to (the watch request's path). */
+  projectPath: string;
+  /** The parsed record, in the exact shape the Run-log feed consumes. */
+  record: RunLogRecord;
+}
+
 /**
  * The surface preload exposes on `window.mc`. Declared here so main, preload,
  * and renderer all agree on one shape.
@@ -621,6 +661,13 @@ export interface MissionControlApi {
   captureRunLog(req: RunLogCaptureRequest): Promise<RunLogCaptureResult>;
   /** Load a Project's persisted Run log for the Execution view feed (issue 34). */
   loadRunLog(req: RunLogLoadRequest): Promise<RunLogLoadResult>;
+  /**
+   * Start (or re-point) the Receipt watch for a Project (issue 56): the
+   * checkout's `issues/completions/` plus each named worktree's copy.
+   */
+  watchReceipts(req: ReceiptWatchRequest): void;
+  /** Subscribe to ingested Receipts; returns an unsubscribe function. */
+  onReceiptCaptured(listener: (msg: ReceiptCapturedMessage) => void): () => void;
   spawnPty(req: PtySpawnRequest): Promise<PtySpawnResult>;
   writePty(msg: PtyWriteMessage): void;
   resizePty(msg: PtyResizeMessage): void;

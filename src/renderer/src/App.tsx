@@ -1053,6 +1053,46 @@ export function App(): JSX.Element {
     };
   }, [projectPath]);
 
+  // --- Receipt capture edge (issue 56, ADR-0013) ----------------------------
+  // Point main's Receipt watch at the active Project: its checkout
+  // `issues/completions/` plus each LIVE worktree's copy (a parallel Run's
+  // Receipt lands in its own worktree and must surface live, before any Merge).
+  // The worktree set comes from the same on-disk scan the Map trusts; the key
+  // string keeps the effect from re-sending on every scan tick — it re-points
+  // only when the set actually changes (main reconciles roots incrementally, so
+  // a re-point never re-feeds: the edge dedupes by issue + `finished`).
+  const receiptWorktreeKey = useMemo(
+    () =>
+      activeScan.branches
+        .filter((b) => b.hasWorktree)
+        .map((b) => b.slug)
+        .sort()
+        .join(','),
+    [activeScan],
+  );
+  useEffect(() => {
+    if (projectPath === null) return;
+    const worktreeSlugs = receiptWorktreeKey === '' ? [] : receiptWorktreeKey.split(',');
+    window.mc.watchReceipts({ projectPath, worktreeSlugs });
+  }, [projectPath, receiptWorktreeKey]);
+
+  // Ingested Receipts enter the feed EXACTLY where scroll-captured records do
+  // (issue 56 acceptance: no parallel bespoke path): one upsert into `runLog`,
+  // from which the Run-log card, the Dispatcher block feed, the lifecycle
+  // reactions, and the status model all already derive. The edge has parsed,
+  // debounced, deduped, and persisted the record; here we apply the same noise
+  // floor as every other capture (ADR-0012) and scope it to the active Project
+  // (the record is already persisted for ITS project either way).
+  useEffect(
+    () =>
+      window.mc.onReceiptCaptured((msg) => {
+        if (projectPathRef.current !== msg.projectPath) return;
+        if (!isRealCapture(msg.record)) return;
+        upsertRunLog(msg.record);
+      }),
+    [upsertRunLog],
+  );
+
   // --- Feed Completion blocks to the Dispatcher (issue 35, issue 41) --------
   // As each Run finishes and its Completion block is captured into the Run log,
   // hand that STRUCTURED block to the Dispatcher session — this is the input

@@ -33,6 +33,8 @@ import {
   type ProjectSwitchRequest,
   type ProjectTransitionRequest,
   type ProjectPickFolderResult,
+  type ReceiptCapturedMessage,
+  type ReceiptWatchRequest,
   type RunLogCaptureRequest,
   type RunLogCaptureResult,
   type RunLogLoadRequest,
@@ -119,6 +121,18 @@ const api: MissionControlApi = {
 
   loadRunLog: (req: RunLogLoadRequest): Promise<RunLogLoadResult> =>
     ipcRenderer.invoke(IpcChannel.RunLogLoad, req),
+
+  watchReceipts: (req: ReceiptWatchRequest): void => {
+    ipcRenderer.send(IpcChannel.ReceiptWatch, req);
+  },
+
+  onReceiptCaptured: (
+    listener: (msg: ReceiptCapturedMessage) => void,
+  ): (() => void) => {
+    const handler = (_e: IpcRendererEvent, msg: ReceiptCapturedMessage): void => listener(msg);
+    ipcRenderer.on(IpcChannel.ReceiptCaptured, handler);
+    return () => ipcRenderer.removeListener(IpcChannel.ReceiptCaptured, handler);
+  },
 
   spawnPty: (req: PtySpawnRequest): Promise<PtySpawnResult> =>
     ipcRenderer.invoke(IpcChannel.PtySpawn, req),
