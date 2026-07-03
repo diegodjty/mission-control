@@ -15,8 +15,12 @@ import { isolationRunSetWith, type IsolationRun } from '../../shared/isolation-p
 import {
   deriveWorktreeRunStates,
   mergeReadinessOnDisk,
-  type AfkBranchFacts,
 } from '../../shared/worktree-scan';
+import {
+  isProjectSwitch,
+  scanForProject,
+  type ScopedScan,
+} from '../../shared/project-switch';
 import { gridShape } from '../../shared/pane-grid';
 import { decideWindowBootstrap } from '../../shared/window-bootstrap';
 import {
@@ -78,6 +82,14 @@ export function App(): JSX.Element {
   const [activeRepoPath, setActiveRepoPath] = useState<string | null>(null);
   const [newRepoPath, setNewRepoPath] = useState('');
   const [projectError, setProjectError] = useState<string | null>(null);
+  // Mirrors `activeRepoPath` for the callbacks/effects that need the CURRENT
+  // active repo without re-subscribing (issue 26): they compare it against an
+  // incoming path via `isProjectSwitch` to decide whether to reset per-Project
+  // state, and a live ref keeps that decision correct without widening deps.
+  const activeRepoPathRef = useRef<string | null>(null);
+  useEffect(() => {
+    activeRepoPathRef.current = activeRepoPath;
+  }, [activeRepoPath]);
 
   // Bootstrap this Window exactly once: pick up any repo the opener queued, else
   // re-attach to whatever this Window already owns, else open NO Project (empty
@@ -113,51 +125,23 @@ export function App(): JSX.Element {
 
   // Any Window opening/closing/switching a repo changes ownership everywhere —
   // refresh this Window's switcher so a repo freed elsewhere becomes openable.
+  // If THIS Window's active repo is handed a different one out from under it
+  // (another Window switched the shared active Project), reset the per-Project
+  // run/merge state too, so the new Project never inherits the old one's Runs
+  // or indicators (issue 26).
   useEffect(() => {
     const off = window.mc.onProjectRegistryChanged(() => {
       void window.mc.listProjects().then((list) => {
         setProjects(list.projects);
-        setActiveRepoPath((cur) => list.activeRepoPath ?? cur);
+        const next = list.activeRepoPath;
+        if (next !== null && isProjectSwitch(activeRepoPathRef.current, next)) {
+          resetForProjectSwitch();
+        }
+        setActiveRepoPath((cur) => next ?? cur);
       });
     });
     return off;
-  }, []);
-
-  const openProjectHere = useCallback(async (repoPath: string): Promise<void> => {
-    // Only open on an explicit path; an empty path is a no-op, never a claim on
-    // the backend cwd (issue 14).
-    if (!repoPath.trim()) return;
-    const res = await window.mc.openProject({ repoPath });
-    setProjects(res.projects);
-    setProjectError(res.error);
-    if (res.ok) {
-      setActiveRepoPath(res.activeRepoPath);
-      setNewRepoPath('');
-    }
-  }, []);
-
-  const switchProject = useCallback(async (repoPath: string): Promise<void> => {
-    const res = await window.mc.switchProject({ repoPath });
-    setProjects(res.projects);
-    setProjectError(res.error);
-    if (res.ok) setActiveRepoPath(res.activeRepoPath);
-  }, []);
-
-  const openInNewWindow = useCallback((): void => {
-    const repoPath = newRepoPath.trim();
-    if (!repoPath) return;
-    void window.mc.openWindow({ repoPath });
-    setNewRepoPath('');
-  }, [newRepoPath]);
-
-  // Browse… for a Project folder with the native OS chooser (issue 19). The
-  // chosen path just populates the repo-path field, so the existing Open here /
-  // Open in new Window buttons then act on it exactly as a pasted path would —
-  // one picker serving both flows. Cancelling the dialog resolves to a null
-  // path and is a clean no-op (the field keeps whatever was there).
-  const browseForFolder = useCallback(async (): Promise<void> => {
-    const { path } = await window.mc.pickProjectFolder();
-    if (path) setNewRepoPath(path);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // --- Run state -----------------------------------------------------------
@@ -186,10 +170,12 @@ export function App(): JSX.Element {
 
   // --- Mid-merge state (issue 24) ------------------------------------------
   // `main` is left mid-merge when a partial `afk-merge.sh` run committed some
-  // slugs then hit a conflict (a conflicted index / MERGE_HEAD). Polled from disk
-  // alongside the afk/ scan. While true, a new drain/Run is refused and an Abort
-  // affordance is offered so a non-git user can return `main` to a clean state.
-  const [midMerge, setMidMerge] = useState(false);
+  // slugs then hit a conflict (a conflicted index / MERGE_HEAD). It is polled
+  // from disk as part of the afk/ scan and DERIVED from that scan below (scoped
+  // to the active Project — issue 26), never held as its own state that could
+  // outlive a Project switch. While true, a new drain/Run is refused and an
+  // Abort affordance is offered so a non-git user can return `main` to a clean
+  // state.
   const [aborting, setAborting] = useState(false);
 
   // --- Isolated-Run completion (issue 13) ----------------------------------
@@ -218,7 +204,88 @@ export function App(): JSX.Element {
   // Merge affordance keep working after every Pane is closed (which drops the
   // in-memory Runs). Polled from disk whenever a Project is open; the pure
   // `worktree-scan` selectors turn these facts into what the UI shows.
-  const [afkScan, setAfkScan] = useState<AfkBranchFacts[]>([]);
+  //
+  // Tagged with the Project it was scanned for (issue 26): the scan is only ever
+  // read through `scanForProject` against the active Project, so a scan taken
+  // for the previous Project — whether still in state right after a switch or
+  // kept after a transient scan error — can never mark the new Project's issues
+  // (its id-keyed indicators would otherwise bleed: A's "05 finished-unmerged"
+  // lighting up B's issue 05 and offering a bogus Merge). Null = not scanned yet.
+  const [afkScan, setAfkScan] = useState<ScopedScan | null>(null);
+
+  // Reset ALL per-Project run/scan/merge state (issue 26). Switching the active
+  // Project used to change only `activeRepoPath`, leaving the previous Project's
+  // Runs (and their Panes), on-disk scan, observed worktree statuses, and merge
+  // message in place — which bled indicators across Projects and offered a bogus
+  // Merge against branches that don't exist in the new Project. Called on every
+  // real switch (see `isProjectSwitch`), BEFORE the Map reloads, so the new
+  // Project starts from a blank slate and shows no indicator until its own fresh
+  // scan lands. `backlog`/`projectPath` are cleared too so the Coordinator never
+  // plans the new Project against the old one's backlog in the transition.
+  const resetForProjectSwitch = useCallback((): void => {
+    setRuns([]);
+    setFocusedId(null);
+    setMaximizedId(null);
+    setDraining(false);
+    setDrainMessage('');
+    setMerging(false);
+    setAborting(false);
+    setMergeDisplay(null);
+    setAfkScan(null);
+    setWorktreeStatuses({});
+    setWorktreeCommitErrors({});
+    committedSoloIds.current.clear();
+    setBacklog(null);
+    setProjectPath(null);
+  }, []);
+
+  const openProjectHere = useCallback(async (repoPath: string): Promise<void> => {
+    // Only open on an explicit path; an empty path is a no-op, never a claim on
+    // the backend cwd (issue 14).
+    if (!repoPath.trim()) return;
+    const res = await window.mc.openProject({ repoPath });
+    setProjects(res.projects);
+    setProjectError(res.error);
+    if (res.ok) {
+      // Opening a different Project than the one active resets its state (issue 26).
+      if (isProjectSwitch(activeRepoPathRef.current, res.activeRepoPath)) {
+        resetForProjectSwitch();
+      }
+      setActiveRepoPath(res.activeRepoPath);
+      setNewRepoPath('');
+    }
+  }, [resetForProjectSwitch]);
+
+  const switchProject = useCallback(async (repoPath: string): Promise<void> => {
+    const res = await window.mc.switchProject({ repoPath });
+    setProjects(res.projects);
+    setProjectError(res.error);
+    if (res.ok) {
+      // Clear the previous Project's Runs/scan/merge state before the Map loads
+      // the new one, so nothing bleeds across the switch (issue 26).
+      if (isProjectSwitch(activeRepoPathRef.current, res.activeRepoPath)) {
+        resetForProjectSwitch();
+      }
+      setActiveRepoPath(res.activeRepoPath);
+    }
+  }, [resetForProjectSwitch]);
+
+  const openInNewWindow = useCallback((): void => {
+    const repoPath = newRepoPath.trim();
+    if (!repoPath) return;
+    void window.mc.openWindow({ repoPath });
+    setNewRepoPath('');
+  }, [newRepoPath]);
+
+  // Browse… for a Project folder with the native OS chooser (issue 19). The
+  // chosen path just populates the repo-path field, so the existing Open here /
+  // Open in new Window buttons then act on it exactly as a pasted path would —
+  // one picker serving both flows. Cancelling the dialog resolves to a null
+  // path and is a clean no-op (the field keeps whatever was there).
+  const browseForFolder = useCallback(async (): Promise<void> => {
+    const { path } = await window.mc.pickProjectFolder();
+    if (path) setNewRepoPath(path);
+  }, []);
 
   /** True when a Run works in a worktree on an `afk/` branch (not `main`). */
   const isIsolated = useCallback(
@@ -327,11 +394,15 @@ export function App(): JSX.Element {
         .scanAfkRuns({ projectPath })
         .then((res) => {
           if (cancelled) return;
-          setAfkScan(res.branches);
-          setMidMerge(res.midMerge);
+          // Tag the scan with the Project it was taken for so it is only ever
+          // surfaced while that Project is active (issue 26).
+          setAfkScan({ projectPath, branches: res.branches, midMerge: res.midMerge });
         })
         .catch(() => {
           // Transient read/git error: keep the last scan; the next tick retries.
+          // If a switch happened first, the kept scan is tagged with the OLD
+          // Project, so `scanForProject` hides it rather than showing the
+          // previous Project's branches (issue 26).
         });
     };
     scan();
@@ -352,6 +423,15 @@ export function App(): JSX.Element {
     [runs, runStatusOf],
   );
 
+  // The scan, scoped to the ACTIVE Project (issue 26). Every worktree/merge
+  // indicator below derives from `activeScan.branches`, never the raw `afkScan`,
+  // so a scan taken for the previous Project contributes nothing the instant a
+  // new Project is active — no bogus finished-unmerged, no stale Merge, and no
+  // id-keyed cross-contamination between two Projects that share an issue id.
+  // `midMerge` is likewise derived here, so it can't outlive a switch either.
+  const activeScan = useMemo(() => scanForProject(afkScan, projectPath), [afkScan, projectPath]);
+  const midMerge = activeScan.midMerge;
+
   // Pure derivations from the on-disk scan + the live-Run set: which issues show
   // `running` / `stranded` / `commit failed` / `finished (unmerged)` on the Map,
   // and whether the Merge is offered (from disk, so it survives closing Panes).
@@ -359,8 +439,8 @@ export function App(): JSX.Element {
   // keeps `startRun` (which consults them to refuse a duplicate) from being
   // rebuilt on every unrelated render.
   const worktreeRunStates = useMemo(
-    () => deriveWorktreeRunStates(afkScan, liveRunIssueIds),
-    [afkScan, liveRunIssueIds],
+    () => deriveWorktreeRunStates(activeScan.branches, liveRunIssueIds),
+    [activeScan, liveRunIssueIds],
   );
   const worktreeRunningIds = useMemo(
     () => worktreeRunStates.filter((s) => s.kind === 'running').map((s) => s.issueId),
@@ -599,7 +679,7 @@ export function App(): JSX.Element {
           // Refresh the scan immediately so the discarded Run's row/Merge clears.
           void window.mc
             .scanAfkRuns({ projectPath })
-            .then((r) => setAfkScan(r.branches))
+            .then((r) => setAfkScan({ projectPath, branches: r.branches, midMerge: r.midMerge }))
             .catch(() => {
               // The 1.5s poll will pick it up regardless.
             });
@@ -748,7 +828,7 @@ export function App(): JSX.Element {
   // the affordance survives closing every Pane (issue 16). It appears once every
   // isolated Run's branch is committed-done (issue 15) and none is still in
   // flight, and never triggers on its own (ADR-0002).
-  const mergePlan = mergeReadinessOnDisk(afkScan, liveRunIssueIds);
+  const mergePlan = mergeReadinessOnDisk(activeScan.branches, liveRunIssueIds);
 
   const runMerge = useCallback((): void => {
     if (projectPath === null || merging) return;
@@ -816,10 +896,7 @@ export function App(): JSX.Element {
         setMergeDisplay(null);
         void window.mc
           .scanAfkRuns({ projectPath })
-          .then((r) => {
-            setAfkScan(r.branches);
-            setMidMerge(r.midMerge);
-          })
+          .then((r) => setAfkScan({ projectPath, branches: r.branches, midMerge: r.midMerge }))
           .catch(() => {
             // The 1.5s poll will pick up the cleared mid-merge state regardless.
           });
