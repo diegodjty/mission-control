@@ -16,6 +16,11 @@ import {
 } from '../../shared/dispatcher-input-contract';
 import { buildSubmitSequence } from '../../shared/dispatcher-feed';
 import {
+  recordActivity,
+  resolveActivity,
+  type DispatcherActivity,
+} from '../../shared/dispatcher-proposal';
+import {
   deriveRunStatus,
   isTerminal,
   observedIssueStatus,
@@ -216,6 +221,14 @@ export function App(): JSX.Element {
   // DISTINCT messages, never concatenated into one input line.
   const dispatcherQueue = useRef<string[]>([]);
   const dispatcherPumping = useRef<boolean>(false);
+  // The Dispatcher's hybrid-authority activity log (issue 36, ADR-0007):
+  // autonomous actions it took (auto — shown as quiet notes) and scope-changing
+  // actions it's proposing (needs-approval — shown with one-click approve/reject
+  // that don't execute until approved). `mergeProposalSig` guards the derived
+  // Merge proposal so a rejected one isn't re-added every poll while the same
+  // branches stay mergeable (see the merge-proposal effect).
+  const [dispatcherActivities, setDispatcherActivities] = useState<DispatcherActivity[]>([]);
+  const mergeProposalSig = useRef<string | null>(null);
 
   // --- Merge state (issue 08; issue 17) ------------------------------------
   // `mergeDisplay` is the pure selector's decision of what the Merge UI shows
@@ -297,6 +310,8 @@ export function App(): JSX.Element {
     dispatcherFed.current.clear();
     dispatcherQueue.current = [];
     dispatcherPumping.current = false;
+    setDispatcherActivities([]);
+    mergeProposalSig.current = null;
     setMerging(false);
     setAborting(false);
     setMergeDisplay(null);
@@ -967,6 +982,14 @@ export function App(): JSX.Element {
       dispatcherFed.current.add(rec.id);
       const text = renderCompletionEvent(toCompletionEvent({ id: rec.id, record: rec }));
       dispatcherQueue.current.push(text);
+      // Synthesizing/relaying a finished Run's block is an autonomous (auto)
+      // action per ADR-0007 — log it so the panel shows what the Dispatcher did
+      // on its own, distinct from the scope-changing actions it must propose.
+      setDispatcherActivities((prev) =>
+        prev.some((a) => a.id === `synthesize:${rec.id}`)
+          ? prev
+          : [...prev, recordActivity(`synthesize:${rec.id}`, 'synthesize')],
+      );
     }
     pumpDispatcherQueue(sessionId);
   }, [runLog, dispatcher, pumpDispatcherQueue]);
@@ -1022,6 +1045,8 @@ export function App(): JSX.Element {
     dispatcherFed.current.clear();
     dispatcherQueue.current = [];
     dispatcherPumping.current = false;
+    setDispatcherActivities([]);
+    mergeProposalSig.current = null;
   }, []);
 
   // Keep the App's backlog copy fresh from every Map load/live-change so the
@@ -1212,6 +1237,59 @@ export function App(): JSX.Element {
       .finally(() => setMerging(false));
   }, [projectPath, merging, mergePlan]);
 
+  // --- Dispatcher hybrid-authority gate (issue 36, ADR-0007) --------------
+  // A Merge is always human-approved (ADR-0002): rather than only living as a
+  // Map button, surface it in the Dispatcher panel as a one-click approve/reject
+  // PROPOSAL whenever the Dispatcher is driving and branches are mergeable. The
+  // signature (the sorted mergeable slugs) guards it so a rejected proposal isn't
+  // re-added on every ~1.5s scan while the same branches stay ready; readiness
+  // clearing (a merge succeeding, branches vanishing) resets the guard so a later
+  // set of finished Runs proposes afresh.
+  useEffect(() => {
+    if (!dispatcher) return;
+    const sig = mergePlan.ready
+      ? mergePlan.mergeable.map((m) => m.slug).sort().join(',')
+      : null;
+    if (sig === null) {
+      mergeProposalSig.current = null;
+      return;
+    }
+    if (sig === mergeProposalSig.current) return;
+    mergeProposalSig.current = sig;
+    const id = `merge:${sig}`;
+    setDispatcherActivities((prev) =>
+      prev.some((a) => a.id === id) ? prev : [...prev, recordActivity(id, 'merge')],
+    );
+  }, [dispatcher, mergePlan.ready, mergePlan.mergeable]);
+
+  // Approve a pending proposal: mark it approved, then EXECUTE the action (the
+  // gate's whole point — nothing ran until this click). Execution is dispatched
+  // by the action; a Merge runs the existing merge path, an abort stops the
+  // drain. Non-executable proposals are simply recorded as approved.
+  const approveProposal = useCallback(
+    (id: string): void => {
+      let action: DispatcherActivity['action'] | null = null;
+      setDispatcherActivities((prev) =>
+        prev.map((a) => {
+          if (a.id !== id || a.status !== 'pending') return a;
+          action = a.action;
+          return resolveActivity(a, 'approved');
+        }),
+      );
+      if (action === 'merge') runMerge();
+      else if (action === 'abort-drain') stopDrain();
+    },
+    [runMerge, stopDrain],
+  );
+
+  // Reject a pending proposal: drop it (mark rejected) and DO NOT execute — the
+  // Dispatcher continues without the scope change.
+  const rejectProposal = useCallback((id: string): void => {
+    setDispatcherActivities((prev) =>
+      prev.map((a) => (a.id === id && a.status === 'pending' ? resolveActivity(a, 'rejected') : a)),
+    );
+  }, []);
+
   // Abort an in-progress merge left on `main` by a partial conflict (issue 24):
   // `git merge --abort` back to a clean `main` (already-merged slugs stay merged),
   // so a non-git user isn't stranded and a new drain/Run is unblocked. Refreshes
@@ -1346,6 +1424,9 @@ export function App(): JSX.Element {
               onSession={handleDispatcherSession}
               onDismiss={dismissDispatcher}
               ingestedCount={runLog.filter((r) => r.outcome !== 'unknown').length}
+              activities={dispatcherActivities}
+              onApprove={approveProposal}
+              onReject={rejectProposal}
             />
           )}
         </div>

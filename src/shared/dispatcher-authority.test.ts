@@ -2,10 +2,25 @@ import { describe, expect, it } from 'vitest';
 import {
   classifyAuthority,
   isAuto,
+  type Authority,
   type DispatcherAction,
 } from './dispatcher-authority';
 
-describe('dispatcher authority classifier (ADR-0007, minimal slice)', () => {
+// The full ADR-0007 line as a table — every action mapped to its authority.
+// Kept exhaustive so a newly-added action forces a decision here (and a failing
+// test) rather than silently defaulting.
+const LINE: Record<DispatcherAction, Authority> = {
+  'commit-checkpoint': 'auto',
+  'start-next': 'auto',
+  synthesize: 'auto',
+  relay: 'auto',
+  'log-issue': 'needs-approval',
+  merge: 'needs-approval',
+  'abort-drain': 'needs-approval',
+  'course-change': 'needs-approval',
+};
+
+describe('dispatcher authority classifier (ADR-0007, full line)', () => {
   it('marks commit-checkpoint, start-next and synthesize as auto', () => {
     // The exact three the tracer-bullet spine (issue 35) must self-authorize.
     expect(classifyAuthority('commit-checkpoint')).toBe('auto');
@@ -27,6 +42,31 @@ describe('dispatcher authority classifier (ADR-0007, minimal slice)', () => {
     for (const action of scope) {
       expect(classifyAuthority(action)).toBe('needs-approval');
     }
+  });
+
+  it('Merge is always approval-gated (ADR-0002 — no auto-merge)', () => {
+    // Called out explicitly because a Merge is the costliest, hard-to-unwind
+    // action; it must never fall on the auto side.
+    expect(classifyAuthority('merge')).toBe('needs-approval');
+    expect(isAuto('merge')).toBe(false);
+  });
+
+  it('classifies the entire action union exactly per the ADR-0007 table', () => {
+    for (const [action, authority] of Object.entries(LINE) as [
+      DispatcherAction,
+      Authority,
+    ][]) {
+      expect(classifyAuthority(action)).toBe(authority);
+      expect(isAuto(action)).toBe(authority === 'auto');
+    }
+  });
+
+  it('returns exactly four auto actions and four needs-approval actions', () => {
+    const actions = Object.keys(LINE) as DispatcherAction[];
+    const auto = actions.filter((a) => classifyAuthority(a) === 'auto');
+    const gated = actions.filter((a) => classifyAuthority(a) === 'needs-approval');
+    expect(auto).toHaveLength(4);
+    expect(gated).toHaveLength(4);
   });
 
   it('isAuto agrees with classifyAuthority', () => {

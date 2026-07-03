@@ -213,6 +213,138 @@ body {
   min-height: 0;
 }
 
+/* ---- Dispatcher activity + approval strip (issue 36, ADR-0007) ---- */
+
+.dispatcher__activities {
+  flex: 0 0 auto;
+  max-height: 45%;
+  overflow-y: auto;
+  border-bottom: 1px solid #1c2530;
+  padding: 8px;
+}
+
+.dispatcher__activities-head {
+  color: #f0b429;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 2px 4px 8px;
+}
+
+.dispatcher__activity-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dispatcher__activity {
+  border-radius: 6px;
+  padding: 7px 9px;
+  font-size: 12px;
+  border: 1px solid transparent;
+}
+
+/* Autonomous: quiet, "already done" — muted, no border emphasis. */
+.dispatcher__activity--auto {
+  background: #0f151c;
+  color: #9aa7b4;
+}
+
+/* Proposed: an action item — warm border, brighter text, stands out. */
+.dispatcher__activity--proposed {
+  background: #1a1508;
+  border-color: #6b5410;
+  color: #e6edf3;
+}
+
+.dispatcher__activity--approved {
+  background: #0e1a12;
+  border-color: #1f5136;
+  color: #9aa7b4;
+}
+
+.dispatcher__activity--rejected {
+  background: #1a0f10;
+  border-color: #5a2530;
+  color: #9aa7b4;
+}
+
+.dispatcher__activity-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.dispatcher__activity-tag {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.dispatcher__activity-tag[data-kind='auto'] {
+  color: #5b6b7a;
+}
+
+.dispatcher__activity-tag[data-kind='proposed'] {
+  color: #f0b429;
+}
+
+.dispatcher__activity--approved .dispatcher__activity-tag {
+  color: #3fb27f;
+}
+
+.dispatcher__activity--rejected .dispatcher__activity-tag {
+  color: #d15b6b;
+}
+
+.dispatcher__activity-label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.dispatcher__activity-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.dispatcher__approve,
+.dispatcher__reject {
+  flex: 1 1 auto;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid #2a3644;
+}
+
+.dispatcher__approve {
+  background: #17492f;
+  border-color: #1f5136;
+  color: #d6f5e4;
+}
+
+.dispatcher__approve:hover {
+  background: #1d5c3b;
+}
+
+.dispatcher__reject {
+  background: #1c2530;
+  color: #e6edf3;
+}
+
+.dispatcher__reject:hover {
+  background: #3a1f26;
+  border-color: #5a2530;
+}
+
 /* ---- Run controls ---- */
 
 .app__run {

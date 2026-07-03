@@ -5,12 +5,13 @@
  * one-click human approval on **scope-changing** judgment calls. This module is
  * the encoding of that division: a proposed action → `auto | needs-approval`.
  *
- * This is the MINIMAL classifier the tracer-bullet spine (issue 35) needs — it
- * only has to get the auto side right (commit a checkpoint, start the next Run
- * within the cap, synthesize/relay). Issue 36 thickens it with the full
- * approval-gate UX (proposing an action, one-click approve/reject) on the
- * scope-changing side; the classification itself already lives here so that
- * slice builds on a tested rule rather than re-deriving it.
+ * This is the FULL ADR-0007 line (issue 36): the auto side (commit a checkpoint,
+ * start the next Run within the cap, synthesize/relay) AND the scope-changing
+ * side (log a new issue, Merge, abort a drain, any course change) are both
+ * classified here. The approval-gate UX that consumes it — proposing an action,
+ * one-click approve/reject, distinguishing autonomous from proposed — lives in
+ * `dispatcher-proposal` (also pure) and `DispatcherPanel`, so every gate builds
+ * on this one tested rule rather than re-deriving the boundary.
  *
  * PURE: no I/O, no Electron, no LLM — a table lookup, unit-testable in isolation
  * and safe to share across main/renderer.
