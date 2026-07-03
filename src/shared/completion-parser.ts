@@ -137,8 +137,14 @@ function findIssueId(text: string): number | null {
 // A completion block's defining heading: `## Completed issue NN — <slug>`.
 const COMPLETED_HEADING = /(?:^|\n)[ \t]*#{0,6}\s*Completed issue\s+(\d+)\s*[—–-]?\s*([^\n]*)/i;
 
-// The HITL block is explicitly labelled "Ready for manual verification".
-const NEEDS_VERIFICATION = /ready for manual verification/i;
+// The HITL block's defining TITLE: "Ready for manual verification" as a block
+// heading/label at a line start (optionally a bullet / markdown heading / bold
+// marker), NOT the same phrase buried in a completed block's prose (e.g. a
+// "Verified — …, ready for manual verification by QA" line). Anchoring to a
+// block-start is what keeps a genuine completion from being mistaken for an HITL
+// park, while still catching the Worker's real HITL block wherever it sits.
+const NEEDS_VERIFICATION_TITLE =
+  /(?:^|\n)[ \t]*(?:[-•]\s*)?(?:#{1,6}\s*)?(?:\*\*|__)?\s*Ready for manual verification/i;
 
 /** Heuristics for a "blocked / no work available" report. */
 function looksBlocked(text: string): boolean {
@@ -187,8 +193,20 @@ export function parseCompletionBlock(input: unknown): CompletionRecord {
 
   const text = stripAnsi(input);
 
+  // A Worker's FINAL message is what its outcome is — and the run buffer is
+  // tail-truncated (PTY manager) precisely so that final block is preserved. So
+  // when more than one block-defining TITLE is present in the captured scroll
+  // (e.g. a parked HITL Run whose tail also carries an earlier "Completed issue
+  // NN" line from prior narration / a relayed completion / a quoted example), the
+  // block that starts LATEST wins — not a fixed completed-beats-HITL precedence.
+  // Getting this wrong is the issue-53 firing gap: a parked HITL Run misclassified
+  // `completed` maps to `finished` and the `hitl-waiting` notification never fires.
   const completed = COMPLETED_HEADING.exec(text);
-  if (completed) {
+  const hitl = NEEDS_VERIFICATION_TITLE.exec(text);
+  const completedWins =
+    completed !== null && (hitl === null || completed.index >= hitl.index);
+
+  if (completedWins && completed) {
     const id = Number(completed[1]);
     const slug = completed[2].trim();
     // Scope section extraction to the block body (from the heading onward) so a
@@ -206,13 +224,19 @@ export function parseCompletionBlock(input: unknown): CompletionRecord {
     };
   }
 
-  if (NEEDS_VERIFICATION.test(text)) {
-    const sections = extractSections(text);
+  if (hitl) {
+    // Scope id/section/detail recovery to the HITL block itself (from its title
+    // onward), so an EARLIER "Completed issue 03" scroll line or a prior sibling's
+    // sections can't misattribute this record to the wrong issue or leak into its
+    // steps. When the block names no issue of its own, id stays null and the
+    // capture edge falls back to the Run's known target id (issue 34).
+    const body = text.slice(hitl.index);
+    const sections = extractSections(body);
     return {
       issue: null,
-      issueId: findIssueId(text),
+      issueId: findIssueId(body),
       ...sections,
-      detail: captureDetail(text),
+      detail: captureDetail(body),
       outcome: 'needs-verification',
     };
   }

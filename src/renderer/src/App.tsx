@@ -29,10 +29,10 @@ import {
   type TypingState,
 } from '../../shared/dispatcher-channel';
 import {
+  actionForLifecycle,
   lifecycleKindForOutcome,
   reactToLifecycleEvent,
   type LifecycleEvent,
-  type LifecycleEventKind,
 } from '../../shared/dispatcher-lifecycle';
 import type { DispatcherAction } from '../../shared/dispatcher-authority';
 import { shouldAutoMerge, decideDispatcherMerge } from '../../shared/dispatcher-merge';
@@ -125,27 +125,6 @@ function loadDispatcherWidth(): number {
 /** The `NN-slug` for a Run, from its issue file name (`NN-slug.md`). */
 function slugOf(fileName: string): string {
   return fileName.replace(/\.md$/, '');
-}
-
-/**
- * The Dispatcher action a lifecycle event corresponds to, so its channel is
- * decided by the same tested authority line (issue 48): a HITL gate awaiting
- * sign-off is a `blocking` prompt (→ chat); a blocked/stranded Run maps to the
- * non-blocking `discard-and-continue`, and any other alert to a plain `relay` —
- * both routine passive facts (→ ambient log).
- */
-function actionForLifecycle(kind: LifecycleEventKind): DispatcherAction {
-  switch (kind) {
-    case 'hitl-waiting':
-      return 'hitl-signoff';
-    case 'blocked':
-    case 'stranded':
-      return 'discard-and-continue';
-    case 'needs-attention':
-    case 'started':
-    case 'finished':
-      return 'relay';
-  }
 }
 
 type View = 'map' | 'pane';

@@ -110,6 +110,35 @@ worktree with no collision on main.
     expect(rec.detail).toContain('needs a human to confirm on a real repo');
     expect(rec.detail).toContain('Ready for manual verification');
   });
+
+  // Issue 53 firing gap: a parked HITL Run's tail-truncated buffer can also carry
+  // an EARLIER "Completed issue NN" line (prior narration, a relayed completion, a
+  // quoted example). The old fixed precedence (completed-beats-HITL) misclassified
+  // this as `completed` → `finished` → the hitl-waiting notification never fired.
+  // The Worker's FINAL block is what its outcome is, so the LATER block-title wins.
+  it('classifies a HITL block that FOLLOWS earlier completed scroll as needs-verification', () => {
+    const scroll =
+      '## Completed issue 03 — run-issue-in-pane\n\n' +
+      '**What changed** — an earlier sibling that really did finish.\n\n' +
+      'Completion block for issue 04 (completed) — relayed by the Dispatcher.\n\n';
+    const rec2 = parseCompletionBlock(scroll + HITL);
+    expect(rec2.outcome).toBe('needs-verification');
+    expect(rec2.detail).toContain('Ready for manual verification');
+  });
+
+  // The guard on that fix: the phrase "ready for manual verification" appearing in
+  // a genuine completed block's PROSE (mid-line, not a block title) must NOT flip
+  // it to needs-verification — the completed heading is the later real block title.
+  it('keeps a completed block whose prose mentions the HITL phrase as completed', () => {
+    const rec3 = parseCompletionBlock(
+      '## Completed issue 07 — parallel-worktree-isolation\n\n' +
+        '**Verified** — type-check + build pass; live worktree behavior is ready ' +
+        'for manual verification by a human on a real repo.\n\n' +
+        '**Doc drift** — none',
+    );
+    expect(rec3.outcome).toBe('completed');
+    expect(rec3.issueId).toBe(7);
+  });
 });
 
 describe('parseCompletionBlock — blocked / no work available', () => {

@@ -188,6 +188,30 @@ export function reactToLifecycleEvent(event: LifecycleEvent): DispatcherReaction
 }
 
 /**
+ * The Dispatcher action a lifecycle event corresponds to, so its surfacing
+ * CHANNEL is decided by the same tested authority line (issues 45/48): a HITL
+ * gate awaiting sign-off is a `blocking` prompt (→ chat, ADR-0012); a blocked/
+ * stranded Run maps to the non-blocking `discard-and-continue`, and any other
+ * alert to a plain `relay` — both routine passive facts (→ ambient log). PURE and
+ * total over the kind union, so the caller (App.tsx) routes a reaction through
+ * `channelForAction(actionForLifecycle(kind))` with no second boundary to keep in
+ * sync — and the full capture→hitl-waiting→chat chain is unit-testable.
+ */
+export function actionForLifecycle(kind: LifecycleEventKind): DispatcherAction {
+  switch (kind) {
+    case 'hitl-waiting':
+      return 'hitl-signoff';
+    case 'blocked':
+    case 'stranded':
+      return 'discard-and-continue';
+    case 'needs-attention':
+    case 'started':
+    case 'finished':
+      return 'relay';
+  }
+}
+
+/**
  * Map a captured Run outcome (from the completion parser, issue 42) to the
  * lifecycle kind that should react to it, given whether the issue is HITL
  * (`hitl: true` / `(HITL)`, per the afk-issue-runner's own detection):
