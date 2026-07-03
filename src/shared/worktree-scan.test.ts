@@ -1,9 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import {
+  afkScanUnchanged,
   classifyBranch,
   deriveWorktreeRunStates,
   dropMergedBranches,
+  markBranchCommitted,
   mergeReadinessOnDisk,
+  needsWorktreeCommit,
   issueIdFromSlug,
   type AfkBranchFacts,
 } from './worktree-scan';
@@ -264,5 +267,91 @@ describe('dropMergedBranches — closes the double-merge race (issue 29)', () =>
     ];
     dropMergedBranches(facts, ['03-x']);
     expect(facts.map((f) => f.issueId)).toEqual([3, 4]);
+  });
+});
+
+describe('needsWorktreeCommit — the once-only, event-driven commit trigger (issue 30)', () => {
+  it('is true exactly on the finished transition: worktree done, branch tip not', () => {
+    const f = branch(3, { hasWorktree: true, worktreeStatus: 'done', committedStatus: 'wip' });
+    expect(needsWorktreeCommit(f)).toBe(true);
+  });
+
+  it('is false once the done flip is already committed (no re-commit each tick)', () => {
+    const f = branch(3, { hasWorktree: true, worktreeStatus: 'done', committedStatus: 'done' });
+    expect(needsWorktreeCommit(f)).toBe(false);
+  });
+
+  it('is false while the Run is still in progress (worktree not yet done)', () => {
+    const f = branch(3, { hasWorktree: true, worktreeStatus: 'wip', committedStatus: 'wip' });
+    expect(needsWorktreeCommit(f)).toBe(false);
+  });
+
+  it('is false for a bare branch with no worktree (nothing to commit from)', () => {
+    const f = branch(3, { hasWorktree: false, worktreeStatus: null, committedStatus: 'done' });
+    expect(needsWorktreeCommit(f)).toBe(false);
+  });
+
+  it('matches the on-disk `commit-failed` shape classifyBranch reports', () => {
+    // A finished-but-uncommitted worktree is exactly what fires the commit; if it
+    // never lands it reads commit-failed, so the trigger and the state agree.
+    const f = branch(3, { hasWorktree: true, worktreeStatus: 'done', committedStatus: 'wip' });
+    expect(needsWorktreeCommit(f)).toBe(true);
+    expect(classifyBranch(f)).toBe('commit-failed');
+  });
+});
+
+describe('afkScanUnchanged — value-stable scan across no-change ticks (issue 30)', () => {
+  it('is true when two scans carry identical facts (keep the same state identity)', () => {
+    const a = [branch(3, { hasWorktree: true, committedStatus: 'wip', worktreeStatus: 'wip' })];
+    const b = [branch(3, { hasWorktree: true, committedStatus: 'wip', worktreeStatus: 'wip' })];
+    expect(afkScanUnchanged(a, b)).toBe(true);
+  });
+
+  it('is false when a committed status changes (a real finished transition)', () => {
+    const a = [branch(3, { hasWorktree: true, committedStatus: 'wip', worktreeStatus: 'done' })];
+    const b = [branch(3, { hasWorktree: true, committedStatus: 'done', worktreeStatus: 'done' })];
+    expect(afkScanUnchanged(a, b)).toBe(false);
+  });
+
+  it('is false when a branch appears or disappears', () => {
+    const a = [branch(3, { hasWorktree: true })];
+    const b = [branch(3, { hasWorktree: true }), branch(4, { hasWorktree: true })];
+    expect(afkScanUnchanged(a, b)).toBe(false);
+    expect(afkScanUnchanged([], [])).toBe(true);
+  });
+
+  it('is false when the worktree presence changes (Pane closed → worktree removed)', () => {
+    const a = [branch(3, { hasWorktree: true, committedStatus: 'done' })];
+    const b = [branch(3, { hasWorktree: false, committedStatus: 'done' })];
+    expect(afkScanUnchanged(a, b)).toBe(false);
+  });
+});
+
+describe('markBranchCommitted — optimistic commit reflection (issue 30)', () => {
+  it('sets committedStatus to done for the given slug so there is no commit-failed flash', () => {
+    const before = [branch(3, { hasWorktree: true, worktreeStatus: 'done', committedStatus: 'wip' })];
+    // Before: the branch reads commit-failed (worktree done, tip not).
+    expect(deriveWorktreeRunStates(before, [])).toEqual([
+      { issueId: 3, slug: '03-x', kind: 'commit-failed' },
+    ]);
+    const after = markBranchCommitted(before, '03-x');
+    // After the optimistic mark it reads finished-unmerged, matching what the next
+    // real scan will confirm — no transient commit-failed.
+    expect(after[0].committedStatus).toBe('done');
+    expect(deriveWorktreeRunStates(after, [])).toEqual([
+      { issueId: 3, slug: '03-x', kind: 'finished-unmerged' },
+    ]);
+  });
+
+  it('returns the input unchanged (same identity) when the slug is absent or already done', () => {
+    const facts = [branch(3, { committedStatus: 'done' })];
+    expect(markBranchCommitted(facts, '99-nope')).toBe(facts);
+    expect(markBranchCommitted(facts, '03-x')).toBe(facts);
+  });
+
+  it('does not mutate the input array', () => {
+    const facts = [branch(3, { hasWorktree: true, worktreeStatus: 'done', committedStatus: 'wip' })];
+    markBranchCommitted(facts, '03-x');
+    expect(facts[0].committedStatus).toBe('wip');
   });
 });

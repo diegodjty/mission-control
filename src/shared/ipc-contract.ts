@@ -34,6 +34,15 @@ export const IpcChannel = {
    */
   MainCommit: 'main:commit',
   /**
+   * renderer → main (invoke): auto-commit a finished ISOLATED Run's worktree onto
+   * its `afk/NN-slug` branch (issue 15/30). Driven EVENT-driven off the on-disk
+   * scan — once, on the finished transition (worktree `done`, branch tip not) —
+   * NOT on every status-read tick, so the status read stays a pure read and a
+   * drain isn't spawning a commit per tick. Idempotent. Resolves to a
+   * WorktreeCommitResult.
+   */
+  WorktreeCommit: 'worktree:commit',
+  /**
    * renderer → main (invoke): scan the Project's on-disk `afk/` branches +
    * worktrees (issue 16) so the Map can show in-flight/finished-unmerged Runs
    * and the Merge affordance can be derived from disk — surviving closing every
@@ -254,6 +263,24 @@ export interface MainCommitResult {
   error: string | null;
 }
 
+export interface WorktreeCommitRequest {
+  /** The Project repo path (`main` checkout); the worktree base derives from it. */
+  projectPath: string;
+  /** The `NN-slug` of the finished isolated Run whose worktree to commit. */
+  slug: string;
+}
+
+export interface WorktreeCommitResult {
+  /** True when a new commit landed on the `afk/NN-slug` branch this call. */
+  committed: boolean;
+  /**
+   * The git error message when the commit was ATTEMPTED and failed, else null —
+   * so a failed auto-commit is surfaced (a "commit failed" state) rather than
+   * swallowed, exactly as the old status-read path reported it.
+   */
+  error: string | null;
+}
+
 export interface AfkScanRequest {
   /** The Project repo path (`main` checkout); the scan reads its `afk/` branches. */
   projectPath: string;
@@ -453,6 +480,14 @@ export interface MissionControlApi {
    * clean and mergeable. Only commits on the done transition; idempotent.
    */
   commitFinishedMain(req: MainCommitRequest): Promise<MainCommitResult>;
+  /**
+   * Auto-commit a finished isolated Run's worktree onto its `afk/` branch (issue
+   * 15/30), event-driven off the scan on the finished transition — once, not per
+   * status tick. Idempotent.
+   */
+  commitFinishedWorktree(
+    req: WorktreeCommitRequest,
+  ): Promise<WorktreeCommitResult>;
   /**
    * Scan the Project's on-disk `afk/` branches/worktrees (issue 16) so the Map
    * reflects in-flight/finished-unmerged Runs and the Merge affordance survives

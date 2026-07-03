@@ -182,6 +182,80 @@ export function mergeReadinessOnDisk(
 }
 
 /**
+ * Whether Mission Control should auto-commit this `afk/` branch's finished
+ * worktree onto its branch (issue 30). True exactly when the agent has FINISHED
+ * in the worktree (`worktreeStatus === 'done'`) but that `done` has not yet
+ * reached the committed branch tip — the once-only, event-driven commit trigger
+ * that replaces committing on every status-read tick. It is the same on-disk
+ * shape `classifyBranch` reports as `commit-failed`; the caller fires the commit
+ * ONCE per Run (guarded by an id set) rather than re-committing each poll, so a
+ * genuinely failed commit is surfaced instead of retried into churn. Pure so the
+ * "commit now?" decision is unit-testable; the git side effect lives in the
+ * Git/Worktree Adapter's `commitFinishedWorktree`.
+ */
+export function needsWorktreeCommit(f: AfkBranchFacts): boolean {
+  return f.hasWorktree && f.worktreeStatus === 'done' && f.committedStatus !== 'done';
+}
+
+/** Value-equality of one `afk/` branch's scanned facts (issue 30). */
+function branchFactsEqual(a: AfkBranchFacts, b: AfkBranchFacts): boolean {
+  return (
+    a.issueId === b.issueId &&
+    a.slug === b.slug &&
+    a.hasWorktree === b.hasWorktree &&
+    a.committedStatus === b.committedStatus &&
+    a.worktreeStatus === b.worktreeStatus &&
+    a.mergedIntoMain === b.mergedIntoMain
+  );
+}
+
+/**
+ * Whether two on-disk `afk/` scans carry the SAME facts (issue 30). The scan
+ * poll reads git every ~1.5s, but most ticks observe no change; storing a fresh
+ * array each tick would give every downstream memo/effect a new identity and
+ * re-run the drain re-plan (and its `applyIsolation`) needlessly. Guarding the
+ * scan setState on this value-equality keeps the scan's identity — and therefore
+ * every derived Run status, Map indicator, and the drain plan — STABLE across
+ * no-change ticks, which is what removes the per-tick churn and the running↔
+ * finished flicker. Order-sensitive because `scanAfkBranches` sorts by issue id,
+ * so equal scans always list branches in the same order. Pure.
+ */
+export function afkScanUnchanged(
+  prev: AfkBranchFacts[],
+  next: AfkBranchFacts[],
+): boolean {
+  if (prev.length !== next.length) return false;
+  for (let i = 0; i < prev.length; i++) {
+    if (!branchFactsEqual(prev[i], next[i])) return false;
+  }
+  return true;
+}
+
+/**
+ * Optimistically mark a branch's committed status as `done` for the given slug
+ * (issue 30) — applied the instant Mission Control's event-driven auto-commit
+ * succeeds, mirroring `dropMergedBranches`' optimistic prefix (issue 29). Without
+ * it, the branch reads `commit-failed` (worktree done, tip not) for the whole
+ * ~1.5s until the next scan confirms the commit — a transient wrong state. The
+ * next real scan observes the same committed `done`, so this is a safe optimistic
+ * prefix of it. Pure; input untouched (a slug not present is a no-op).
+ */
+export function markBranchCommitted(
+  facts: AfkBranchFacts[],
+  slug: string,
+): AfkBranchFacts[] {
+  let changed = false;
+  const next = facts.map((f) => {
+    if (f.slug === slug && f.committedStatus !== 'done') {
+      changed = true;
+      return { ...f, committedStatus: 'done' as IssueStatus };
+    }
+    return f;
+  });
+  return changed ? next : facts;
+}
+
+/**
  * Drop the just-merged `afk/` branches (by slug) from a scan's on-disk facts —
  * an optimistic clear applied the instant a Merge succeeds (issue 29).
  *

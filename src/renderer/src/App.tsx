@@ -17,9 +17,12 @@ import {
   type IsolationRun,
 } from '../../shared/isolation-policy';
 import {
+  afkScanUnchanged,
   deriveWorktreeRunStates,
   dropMergedBranches,
+  markBranchCommitted,
   mergeReadinessOnDisk,
+  needsWorktreeCommit,
 } from '../../shared/worktree-scan';
 import {
   isProjectSwitch,
@@ -183,16 +186,22 @@ export function App(): JSX.Element {
   // state.
   const [aborting, setAborting] = useState(false);
 
-  // --- Isolated-Run completion (issue 13) ----------------------------------
+  // --- Isolated-Run completion (issue 13/30) -------------------------------
   // An isolated Run works in its own worktree on an `afk/NN-slug` branch and
-  // flips its issue to `done` there — a change the main-checkout backlog
-  // watcher never sees. We observe each isolated Run's issue status from its
-  // worktree/branch and key it by issue id; the pure `observedIssueStatus`
-  // selector then chooses this source for isolated Runs and the main backlog
-  // for solo Runs. Null = not observed yet (treated as not-done).
-  const [worktreeStatuses, setWorktreeStatuses] = useState<
-    Record<number, IssueStatus | null>
-  >({});
+  // flips its issue to `done` there — a change the main-checkout backlog watcher
+  // never sees. Its completion is now read from the SAME on-disk `afk/` scan that
+  // drives the Map (issue 30): the branch's committed status is the authoritative
+  // "finished" source (issue 15), so there is one source of truth for both the
+  // Pane tile and the Map — no separate per-Run status poll racing the scan, and
+  // no running↔finished flicker. See `committedStatusById` below.
+
+  // Isolated Runs whose finished worktree MC has already asked to commit onto its
+  // `afk/` branch (issue 30). The commit is now EVENT-driven — fired once on the
+  // finished transition the scan reports (worktree `done`, branch tip not) —
+  // instead of on every status-read tick (the old poll committed a git write per
+  // tick). Cleared for an id when a fresh Run of it starts / it is dismissed /
+  // discarded / merged, so a later Run of the same id commits its own work.
+  const committedWorktreeIds = useRef<Set<number>>(new Set<number>());
 
   // The auto-commit failure (if any) observed for each isolated Run, keyed by
   // issue id (issue 22, corr-5). A finished Run whose commit failed shows a
@@ -237,9 +246,9 @@ export function App(): JSX.Element {
     setAborting(false);
     setMergeDisplay(null);
     setAfkScan(null);
-    setWorktreeStatuses({});
     setWorktreeCommitErrors({});
     committedSoloIds.current.clear();
+    committedWorktreeIds.current.clear();
     setBacklog(null);
     setProjectPath(null);
   }, []);
@@ -306,6 +315,28 @@ export function App(): JSX.Element {
     [backlog],
   );
 
+  // The on-disk `afk/` scan, scoped to the ACTIVE Project (issue 26). Every
+  // worktree/merge indicator — AND every isolated Run's completion (issue 30) —
+  // derives from `activeScan.branches`, never the raw `afkScan`, so a scan taken
+  // for the previous Project contributes nothing the instant a new Project is
+  // active. `midMerge` is likewise derived here, so it can't outlive a switch.
+  const activeScan = useMemo(() => scanForProject(afkScan, projectPath), [afkScan, projectPath]);
+  const midMerge = activeScan.midMerge;
+
+  // Each isolated Run's COMMITTED issue status, keyed by issue id, read from the
+  // single on-disk scan (issue 30). This replaces the old separate per-Run status
+  // poll: a Run is "finished" once its work is committed on its `afk/` branch
+  // (issue 15), which the scan already reads — so the Pane tile and the Map share
+  // ONE source and can't disagree tick-to-tick (no running↔finished flicker). Its
+  // identity only changes when the scan's facts actually change (the scan setState
+  // is value-guarded below), so `runStatusOf` and the drain re-plan stay stable
+  // across the ~1.5s no-change ticks.
+  const committedStatusById = useMemo(() => {
+    const map: Record<number, IssueStatus | null> = {};
+    for (const b of activeScan.branches) map[b.issueId] = b.committedStatus;
+    return map;
+  }, [activeScan]);
+
   const runStatusOf = useCallback(
     (run: TrackedRun): RunStatus =>
       deriveRunStatus({
@@ -314,53 +345,11 @@ export function App(): JSX.Element {
         issueStatus: observedIssueStatus({
           isolated: isIsolated(run),
           mainStatus: issueStatusOf(run.target.issueId),
-          worktreeStatus: worktreeStatuses[run.target.issueId] ?? null,
+          worktreeStatus: committedStatusById[run.target.issueId] ?? null,
         }),
       }),
-    [issueStatusOf, isIsolated, worktreeStatuses],
+    [issueStatusOf, isIsolated, committedStatusById],
   );
-
-  // Poll each isolated Run's worktree/branch for its issue status. The
-  // main-checkout backlog watcher drives the Map's bird's-eye view and every
-  // solo Run's status, but it can't see a `done` flip that lands on an `afk/`
-  // branch — so isolated Runs get their completion from here (issue 13). Solo
-  // runs are skipped entirely; the interval clears once no isolated Run remains.
-  useEffect(() => {
-    if (projectPath === null) return;
-    const isolatedRuns = runs
-      .filter((r) => r.target.projectPath !== projectPath)
-      .map((r) => ({ issueId: r.target.issueId, slug: slugOf(r.target.issueFileName) }));
-    if (isolatedRuns.length === 0) return;
-
-    let cancelled = false;
-    const observe = (): void => {
-      for (const { issueId, slug } of isolatedRuns) {
-        void window.mc
-          .observeIssueStatus({ projectPath, slug })
-          .then((res) => {
-            if (cancelled) return;
-            setWorktreeStatuses((prev) =>
-              prev[issueId] === res.status ? prev : { ...prev, [issueId]: res.status },
-            );
-            setWorktreeCommitErrors((prev) =>
-              prev[issueId] === res.commitError
-                ? prev
-                : { ...prev, [issueId]: res.commitError },
-            );
-          })
-          .catch(() => {
-            // A transient read/git error just means "not observed this tick";
-            // the next poll retries. Never crash the drain over it.
-          });
-      }
-    };
-    observe();
-    const timer = setInterval(observe, 1500);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [runs, projectPath]);
 
   // Auto-commit a finished SOLO Run's work on `main` (issue 25). A solo Run's
   // agent flips its issue to `done` and leaves its files + the flip UNCOMMITTED
@@ -369,7 +358,8 @@ export function App(): JSX.Element {
   // derived status is `finished` (its `done` flip seen by the main-checkout
   // watcher), MC commits it — once per Run, idempotently — so "finished"
   // uniformly means "committed" and `main` stays mergeable. Isolated Runs commit
-  // on their own `afk/` branch (above), so they are skipped here.
+  // on their own `afk/` branch (the worktree-commit effect below), so they are
+  // skipped here.
   useEffect(() => {
     if (projectPath === null) return;
     for (const run of runs) {
@@ -386,6 +376,54 @@ export function App(): JSX.Element {
     }
   }, [runs, projectPath, isIsolated, runStatusOf]);
 
+  // Auto-commit a finished ISOLATED Run's worktree onto its `afk/` branch (issue
+  // 15), now EVENT-driven off the on-disk scan (issue 30). The old status-read
+  // poll performed this git write on EVERY ~1.5s tick — a "read" that mutated —
+  // and, racing the separate scan poll, made rows flicker running↔finished. Here
+  // MC commits ONCE, exactly when the scan first reports the finished transition
+  // (`needsWorktreeCommit`: worktree `done`, branch tip not `done`), keyed by
+  // issue id so a re-scan never re-fires it. On success the scan is optimistically
+  // advanced to committed-`done` (mirrors the merge optimistic drop, issue 29) so
+  // the branch doesn't read `commit-failed` for the ~1.5s until the next scan; a
+  // genuine failure is recorded and surfaced (a "commit failed" state) and NOT
+  // auto-retried every tick — the user discards it (issue 22).
+  useEffect(() => {
+    if (projectPath === null) return;
+    for (const b of activeScan.branches) {
+      if (!needsWorktreeCommit(b)) continue;
+      const id = b.issueId;
+      if (committedWorktreeIds.current.has(id)) continue;
+      committedWorktreeIds.current.add(id);
+      const slug = b.slug;
+      void window.mc
+        .commitFinishedWorktree({ projectPath, slug })
+        .then((res) => {
+          if (res.committed) {
+            // Reflect the committed `done` at once so there is no commit-failed
+            // flash before the next scan confirms it (a safe optimistic prefix).
+            setAfkScan((prev) =>
+              prev && prev.projectPath === projectPath
+                ? { ...prev, branches: markBranchCommitted(prev.branches, slug) }
+                : prev,
+            );
+          } else if (res.error) {
+            // The commit was attempted and genuinely failed: surface it (distinct
+            // "commit failed" state) and leave the id marked so it isn't retried
+            // every tick — the user resolves/discards it.
+            setWorktreeCommitErrors((prev) =>
+              prev[id] === res.error ? prev : { ...prev, [id]: res.error },
+            );
+          }
+          // committed=false, error=null ⇒ nothing to commit (already clean); the
+          // id stays marked so we don't re-probe every tick.
+        })
+        .catch(() => {
+          // Transient IPC/git error: allow a later scan tick to retry this Run.
+          committedWorktreeIds.current.delete(id);
+        });
+    }
+  }, [activeScan, projectPath]);
+
   // Poll the Project's on-disk `afk/` state on an interval, independent of the
   // tracked Runs (issue 16). This is what lets the Map still show a finished-
   // unmerged Run — and still offer its Merge — after its Pane has been closed
@@ -400,8 +438,20 @@ export function App(): JSX.Element {
         .then((res) => {
           if (cancelled) return;
           // Tag the scan with the Project it was taken for so it is only ever
-          // surfaced while that Project is active (issue 26).
-          setAfkScan({ projectPath, branches: res.branches, midMerge: res.midMerge });
+          // surfaced while that Project is active (issue 26). Keep the SAME state
+          // object when the facts are unchanged (issue 30): most ~1.5s ticks
+          // observe no change, and a fresh object each tick would give every
+          // derived Run status / Map indicator / drain plan a new identity and
+          // re-run `applyIsolation` needlessly. The value-guard keeps the scan
+          // stable across no-change ticks, cutting the churn and the flicker.
+          setAfkScan((prev) =>
+            prev &&
+            prev.projectPath === projectPath &&
+            prev.midMerge === res.midMerge &&
+            afkScanUnchanged(prev.branches, res.branches)
+              ? prev
+              : { projectPath, branches: res.branches, midMerge: res.midMerge },
+          );
         })
         .catch(() => {
           // Transient read/git error: keep the last scan; the next tick retries.
@@ -427,15 +477,6 @@ export function App(): JSX.Element {
     () => runs.filter((r) => runStatusOf(r) === 'running').map((r) => r.target.issueId),
     [runs, runStatusOf],
   );
-
-  // The scan, scoped to the ACTIVE Project (issue 26). Every worktree/merge
-  // indicator below derives from `activeScan.branches`, never the raw `afkScan`,
-  // so a scan taken for the previous Project contributes nothing the instant a
-  // new Project is active — no bogus finished-unmerged, no stale Merge, and no
-  // id-keyed cross-contamination between two Projects that share an issue id.
-  // `midMerge` is likewise derived here, so it can't outlive a switch either.
-  const activeScan = useMemo(() => scanForProject(afkScan, projectPath), [afkScan, projectPath]);
-  const midMerge = activeScan.midMerge;
 
   // Pure derivations from the on-disk scan + the live-Run set: which issues show
   // `running` / `stranded` / `commit failed` / `finished (unmerged)` on the Map,
@@ -519,24 +560,21 @@ export function App(): JSX.Element {
       // Already tracked → just surface it, exactly as before (no re-spawn).
       if (tracked) return;
 
-      // A genuinely fresh Run for this id: drop any stale worktree status left by
-      // a previous Run of the same id, so this Run isn't shown `finished` until
-      // its own work actually reaches `done` on disk (issue 21).
-      setWorktreeStatuses((prev) => {
-        if (!(target.issueId in prev)) return prev;
-        const next = { ...prev };
-        delete next[target.issueId];
-        return next;
-      });
+      // A genuinely fresh Run for this id: drop any stale commit-failure left by a
+      // previous Run of the same id (the isolated Run's `finished` now derives
+      // from the on-disk scan, so a fresh worktree's uncommitted state can't read
+      // `finished` — issue 21/30).
       setWorktreeCommitErrors((prev) => {
         if (!(target.issueId in prev)) return prev;
         const next = { ...prev };
         delete next[target.issueId];
         return next;
       });
-      // ...and let a fresh solo Run of this id auto-commit its OWN work (issue
-      // 25), not be treated as already-committed by a prior Run of the same id.
+      // ...and let a fresh Run of this id auto-commit its OWN work — clear both the
+      // solo (issue 25) and isolated (issue 30) once-committed markers so it isn't
+      // treated as already-committed by a prior Run of the same id.
       committedSoloIds.current.delete(target.issueId);
+      committedWorktreeIds.current.delete(target.issueId);
 
       // No resolved Project path yet: can't reconcile isolation, so fall back to
       // spawning on the target's given path (a lone Run). Never blocks the Pane.
@@ -647,20 +685,16 @@ export function App(): JSX.Element {
     setRuns((prev) => prev.filter((r) => r.target.issueId !== issueId));
     setMaximizedId((cur) => (cur === issueId ? null : cur));
     setFocusedId((cur) => (cur === issueId ? null : cur));
-    // Drop this Run's observed worktree status + commit error so a later Run of
-    // the same id doesn't inherit a stale `finished`/`commit failed` (issue 21/22).
-    setWorktreeStatuses((prev) => {
-      if (!(issueId in prev)) return prev;
-      const next = { ...prev };
-      delete next[issueId];
-      return next;
-    });
+    // Drop this Run's commit error + once-committed marker so a later Run of the
+    // same id doesn't inherit a stale `commit failed` and can commit afresh
+    // (issue 21/22/30).
     setWorktreeCommitErrors((prev) => {
       if (!(issueId in prev)) return prev;
       const next = { ...prev };
       delete next[issueId];
       return next;
     });
+    committedWorktreeIds.current.delete(issueId);
   }, []);
 
   // Discard a STRANDED / commit-failed isolated Run (issue 22): force-remove its
@@ -683,18 +717,13 @@ export function App(): JSX.Element {
           setRuns((prev) => prev.filter((r) => r.target.issueId !== issueId));
           setMaximizedId((cur) => (cur === issueId ? null : cur));
           setFocusedId((cur) => (cur === issueId ? null : cur));
-          setWorktreeStatuses((prev) => {
-            if (!(issueId in prev)) return prev;
-            const next = { ...prev };
-            delete next[issueId];
-            return next;
-          });
           setWorktreeCommitErrors((prev) => {
             if (!(issueId in prev)) return prev;
             const next = { ...prev };
             delete next[issueId];
             return next;
           });
+          committedWorktreeIds.current.delete(issueId);
           // Refresh the scan immediately so the discarded Run's row/Merge clears.
           void window.mc
             .scanAfkRuns({ projectPath })
@@ -764,6 +793,13 @@ export function App(): JSX.Element {
   // Worktree Adapter puts a lone Run on `main` and gives each Run its own
   // worktree once 2+ are concurrent, then hands back each Run's cwd — so a
   // parallel Run's Pane spawns inside its worktree, never the shared checkout.
+  //
+  // This effect no longer re-fires on every ~1.5s poll tick (issue 30): its only
+  // status input, `runStatusOf`, now derives from the value-guarded scan
+  // (`committedStatusById`), whose identity is stable across no-change ticks — so
+  // `applyIsolation` runs when the backlog / tracked Runs / cap actually change,
+  // not once per scan. It still early-returns when nothing new is startable, so a
+  // steady-state drain issues no reconcile at all.
   useEffect(() => {
     if (!draining || !backlog || projectPath === null) return;
 
@@ -905,21 +941,15 @@ export function App(): JSX.Element {
           // The merged Runs' worktrees are gone; drop them from tracking so the
           // Merge action clears. Unmerged (blocked/stopped) Runs stay put.
           setRuns((prev) => prev.filter((r) => !mergedIds.has(r.target.issueId)));
-          // Clear the merged ids' observed worktree status too, so re-using any
-          // of those ids for a later Run doesn't inherit a stale `finished`
-          // (issue 21).
-          setWorktreeStatuses((prev) => {
-            if (![...mergedIds].some((id) => id in prev)) return prev;
-            const next = { ...prev };
-            for (const id of mergedIds) delete next[id];
-            return next;
-          });
+          // Clear the merged ids' commit error + once-committed marker so re-using
+          // any of those ids for a later Run starts clean (issue 21/30).
           setWorktreeCommitErrors((prev) => {
             if (![...mergedIds].some((id) => id in prev)) return prev;
             const next = { ...prev };
             for (const id of mergedIds) delete next[id];
             return next;
           });
+          for (const id of mergedIds) committedWorktreeIds.current.delete(id);
         }
       })
       .catch((err: unknown) => {

@@ -20,6 +20,8 @@ import {
   type IssueStatusObserveResult,
   type MainCommitRequest,
   type MainCommitResult,
+  type WorktreeCommitRequest,
+  type WorktreeCommitResult,
   type MergeRunsRequest,
   type MergeRunsResult,
   type MergeAbortRequest,
@@ -63,6 +65,11 @@ const api: MissionControlApi = {
 
   commitFinishedMain: (req: MainCommitRequest): Promise<MainCommitResult> =>
     ipcRenderer.invoke(IpcChannel.MainCommit, req),
+
+  commitFinishedWorktree: (
+    req: WorktreeCommitRequest,
+  ): Promise<WorktreeCommitResult> =>
+    ipcRenderer.invoke(IpcChannel.WorktreeCommit, req),
 
   scanAfkRuns: (req: AfkScanRequest): Promise<AfkScanResult> =>
     ipcRenderer.invoke(IpcChannel.AfkScan, req),

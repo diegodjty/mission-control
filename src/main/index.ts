@@ -14,6 +14,7 @@ import { BacklogWatcher } from './backlog-watcher';
 import {
   applyIsolation,
   commitFinishedMain,
+  commitFinishedWorktree,
   discardWorktree,
   isMidMerge,
   readIsolatedIssueStatus,
@@ -34,6 +35,8 @@ import {
   type IssueStatusObserveResult,
   type MainCommitRequest,
   type MainCommitResult,
+  type WorktreeCommitRequest,
+  type WorktreeCommitResult,
   type MergeRunsRequest,
   type MergeAbortRequest,
   type MergeAbortResult,
@@ -231,6 +234,18 @@ function registerIpc(): void {
     IpcChannel.MainCommit,
     async (_event, req: MainCommitRequest): Promise<MainCommitResult> =>
       commitFinishedMain(req.projectPath, req.slug),
+  );
+
+  // Auto-commit a finished ISOLATED Run's worktree onto its `afk/` branch (issue
+  // 15/30). The renderer fires this ONCE on the finished transition it observes
+  // from the on-disk scan (worktree `done`, branch tip not) — event-driven, not
+  // on every status-read tick — so the status read is a pure read and a drain no
+  // longer spawns a commit per tick. `commitFinishedWorktree` is idempotent, so a
+  // stray re-fire is a no-op; a genuine failure is returned for the UI to surface.
+  ipcMain.handle(
+    IpcChannel.WorktreeCommit,
+    async (_event, req: WorktreeCommitRequest): Promise<WorktreeCommitResult> =>
+      commitFinishedWorktree(req.projectPath, req.slug),
   );
 
   // On-disk `afk/` scan (issue 16): the ground truth for which issues have an
