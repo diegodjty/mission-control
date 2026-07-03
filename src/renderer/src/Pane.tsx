@@ -17,6 +17,13 @@ interface PaneProps {
    */
   dispatcher?: DispatcherTarget;
   onStatusChange?: (status: string) => void;
+  /**
+   * Fired with each chunk of raw input the user types into this Pane's terminal
+   * (issue 48). The Dispatcher uses it on its chat Pane to track the user's
+   * compose state, so a programmatic write is deferred until the input line is
+   * idle and never interleaves with the user's typing.
+   */
+  onInput?: (data: string) => void;
   /** Fired when the underlying session exits (with its exit code). */
   onExit?: (exitCode: number) => void;
   /**
@@ -38,13 +45,17 @@ interface PaneProps {
  * output comes back via onPtyData. A Run passes `run` so main spawns `claude`
  * scoped to the issue instead of a shell.
  */
-export function Pane({ run, dispatcher, onStatusChange, onExit, onSession, stopSignal }: PaneProps): JSX.Element {
+export function Pane({ run, dispatcher, onStatusChange, onInput, onExit, onSession, stopSignal }: PaneProps): JSX.Element {
   const hostRef = useRef<HTMLDivElement>(null);
   const sessionIdRef = useRef<string | null>(null);
   // Keep the latest onSession in a ref so the spawn effect (keyed on the Run
   // target) doesn't need it as a dependency and re-run when the parent re-renders.
   const onSessionRef = useRef(onSession);
   onSessionRef.current = onSession;
+  // Same for onInput: the spawn effect reads it through the ref so a fresh
+  // callback each render doesn't tear down and respawn the session (issue 48).
+  const onInputRef = useRef(onInput);
+  onInputRef.current = onInput;
 
   // Primitive deps so the effect only re-runs when the actual Run/Dispatcher
   // target changes, not on every parent render (the target is a fresh object
@@ -89,6 +100,11 @@ export function Pane({ run, dispatcher, onStatusChange, onExit, onSession, stopS
 
     const inputDisposable = term.onData((data) => {
       if (sessionId) window.mc.writePty({ sessionId, data });
+      // Report the user's keystrokes so the parent can track compose state
+      // (issue 48). This fires ONLY for real user input into the terminal —
+      // programmatic writePty (the Dispatcher's queued messages) bypass onData,
+      // so they never register as the user typing.
+      onInputRef.current?.(data);
     });
 
     const resizeDisposable = term.onResize(({ cols, rows }) => {

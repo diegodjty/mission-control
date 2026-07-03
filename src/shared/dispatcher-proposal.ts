@@ -83,17 +83,24 @@ export function describeAction(action: DispatcherAction): string {
  * click); a non-blocking (`passive` or `silent`) action is already `taken` (the
  * Dispatcher did it on its own) — so only the three-item blocking list ever
  * starts as a gate, and a clean merge or a logged issue never does.
+ *
+ * `label` defaults to the action's generic phrase, but a caller can pass a
+ * concrete plain-language line — the ADR-0012 routing (issue 48) records a
+ * routine passive FACT ("Issue 05 done — …", a status refresh, a doc-drift
+ * finding) as a quiet ambient-log note carrying its own text rather than the
+ * generic action name.
  */
 export function recordActivity(
   id: string,
   action: DispatcherAction,
+  label: string = describeAction(action),
 ): DispatcherActivity {
   const authority = classifyAuthority(action);
   return {
     id,
     action,
     authority,
-    label: describeAction(action),
+    label,
     status: authority === 'blocking' ? 'pending' : 'taken',
   };
 }

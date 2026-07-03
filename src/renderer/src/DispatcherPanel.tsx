@@ -11,6 +11,12 @@ interface DispatcherPanelProps {
   /** Called with the Dispatcher session's PTY id once it spawns, so the parent
    *  can feed it Completion blocks (structured summaries — never raw Pane scroll). */
   onSession?: (sessionId: string) => void;
+  /**
+   * Called with each chunk the user types into the chat (issue 48), so the
+   * parent can defer programmatic chat writes until the input line is idle and
+   * never interleave with the user's message ("prompt over prompt").
+   */
+  onInput?: (data: string) => void;
   /** Dismiss the Dispatcher — ends the session and closes the chat panel. */
   onDismiss?: () => void;
   /** How many Runs' Completion blocks have been captured so far (feed count). */
@@ -124,6 +130,7 @@ function ActivityRow({
 export function DispatcherPanel({
   target,
   onSession,
+  onInput,
   onDismiss,
   ingestedCount,
   activities,
@@ -197,7 +204,7 @@ export function DispatcherPanel({
         </div>
       )}
       <div className="dispatcher__body">
-        <Pane dispatcher={target} onSession={onSession} />
+        <Pane dispatcher={target} onSession={onSession} onInput={onInput} />
       </div>
     </div>
   );

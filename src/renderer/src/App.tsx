@@ -21,10 +21,19 @@ import {
   type DispatcherActivity,
 } from '../../shared/dispatcher-proposal';
 import {
+  channelForAction,
+  canFlushChat,
+  reduceTyping,
+  INITIAL_TYPING_STATE,
+  type TypingState,
+} from '../../shared/dispatcher-channel';
+import {
   lifecycleKindForOutcome,
   reactToLifecycleEvent,
   type LifecycleEvent,
+  type LifecycleEventKind,
 } from '../../shared/dispatcher-lifecycle';
+import type { DispatcherAction } from '../../shared/dispatcher-authority';
 import { shouldAutoMerge, decideDispatcherMerge } from '../../shared/dispatcher-merge';
 import {
   describeDocDrift,
@@ -81,6 +90,22 @@ import {
 /** localStorage key for the app-wide persisted Dispatcher rail width (issue 44). */
 const DISPATCHER_WIDTH_KEY = 'mc.dispatcherWidth';
 
+/**
+ * How often the submit-queue re-checks the defer-while-typing gate while it is
+ * holding for the user to stop typing (issue 48). Short enough that a blocking
+ * prompt lands promptly once the line goes idle, long enough not to busy-spin.
+ */
+const DISPATCHER_TYPING_RECHECK_MS = 250;
+
+/**
+ * Collapse a (possibly multi-line) fact into one quiet ambient-log line (issue
+ * 48): the activity log renders `label` as a single row, so newlines become ` · `
+ * separators the way the chat feed flattens its messages.
+ */
+function oneLineNote(text: string): string {
+  return text.trim().replace(/\s*[\r\n]+\s*/g, ' · ');
+}
+
 /** Read the persisted rail width, clamped; falls back to the default when unset. */
 function loadDispatcherWidth(): number {
   try {
@@ -94,6 +119,27 @@ function loadDispatcherWidth(): number {
 /** The `NN-slug` for a Run, from its issue file name (`NN-slug.md`). */
 function slugOf(fileName: string): string {
   return fileName.replace(/\.md$/, '');
+}
+
+/**
+ * The Dispatcher action a lifecycle event corresponds to, so its channel is
+ * decided by the same tested authority line (issue 48): a HITL gate awaiting
+ * sign-off is a `blocking` prompt (→ chat); a blocked/stranded Run maps to the
+ * non-blocking `discard-and-continue`, and any other alert to a plain `relay` —
+ * both routine passive facts (→ ambient log).
+ */
+function actionForLifecycle(kind: LifecycleEventKind): DispatcherAction {
+  switch (kind) {
+    case 'hitl-waiting':
+      return 'hitl-signoff';
+    case 'blocked':
+    case 'stranded':
+      return 'discard-and-continue';
+    case 'needs-attention':
+    case 'started':
+    case 'finished':
+      return 'relay';
+  }
 }
 
 type View = 'map' | 'pane';
@@ -260,6 +306,12 @@ export function App(): JSX.Element {
   // DISTINCT messages, never concatenated into one input line.
   const dispatcherQueue = useRef<string[]>([]);
   const dispatcherPumping = useRef<boolean>(false);
+  // The user's compose state on the Dispatcher chat's input line (issue 48,
+  // ADR-0012). Folded from the chat Pane's keystrokes, it is the defer-while-
+  // typing gate the pump consults before flushing: a programmatic write is held
+  // while the user is mid-compose and only lands once the input line is idle, so
+  // the app never interleaves with the user's typing ("prompt over prompt").
+  const dispatcherTyping = useRef<TypingState>(INITIAL_TYPING_STATE);
   // The Dispatcher's authority activity log (issue 36, ADR-0011): non-blocking
   // actions it took on its own (silent/passive — shown as quiet notes) and the
   // three-item blocking list it must propose (merge-conflict, abort-drain, HITL
@@ -370,6 +422,7 @@ export function App(): JSX.Element {
     dispatcherFed.current.clear();
     dispatcherQueue.current = [];
     dispatcherPumping.current = false;
+    dispatcherTyping.current = INITIAL_TYPING_STATE;
     setDispatcherActivities([]);
     lifecycleReacted.current.clear();
     discardTargets.current = {};
@@ -1023,6 +1076,19 @@ export function App(): JSX.Element {
     if (dispatcherPumping.current) return;
     dispatcherPumping.current = true;
     const nextBlock = (): void => {
+      if (dispatcherQueue.current.length === 0) {
+        dispatcherPumping.current = false;
+        return;
+      }
+      // Defer-while-typing gate (issue 48, ADR-0012): never inject while the user
+      // is mid-compose. The pure `canFlushChat` reads the compose state folded
+      // from the chat's keystrokes; while it says hold, we re-check shortly rather
+      // than consume the message — so a queued write waits for the input line to
+      // go idle instead of racing the user's typing.
+      if (!canFlushChat(dispatcherTyping.current, Date.now())) {
+        setTimeout(nextBlock, DISPATCHER_TYPING_RECHECK_MS);
+        return;
+      }
       const message = dispatcherQueue.current.shift();
       if (message === undefined) {
         dispatcherPumping.current = false;
@@ -1044,9 +1110,51 @@ export function App(): JSX.Element {
     nextBlock();
   }, []);
 
+  // Report the user's keystrokes on the Dispatcher chat so the defer gate above
+  // knows when the input line is idle (issue 48). Fires only for real user input
+  // into the chat terminal — the Dispatcher's own queued writes go out via
+  // `writePty` and never reach this, so they can't be mistaken for typing.
+  const handleDispatcherInput = useCallback((data: string): void => {
+    dispatcherTyping.current = reduceTyping(dispatcherTyping.current, data, Date.now());
+  }, []);
+
+  // Record a routine passive FACT as a quiet ambient-log note (issue 48,
+  // ADR-0012): it appears in the activity log beside the chat rather than being
+  // typed into the chat session. Deduped by id so a re-render / re-scan can't
+  // double-log it. `label` carries the fact's own plain-language text.
+  const logNote = useCallback(
+    (id: string, action: DispatcherAction, label: string): void => {
+      setDispatcherActivities((prev) =>
+        prev.some((a) => a.id === id)
+          ? prev
+          : [...prev, recordActivity(id, action, oneLineNote(label))],
+      );
+    },
+    [],
+  );
+
+  // Route one Dispatcher event to its channel (issue 48, ADR-0012). The pure,
+  // tested `channelForAction` is the single decision: a `blocking`-tier action is
+  // a conversational prompt typed into the chat PTY via the serialized queue;
+  // every routine passive/silent fact becomes an ambient-log note instead — so
+  // the chat carries ONLY blocking approvals + the user's own conversation.
+  // Returns true when it enqueued a chat write, so the caller knows to pump.
+  const surfaceEvent = useCallback(
+    (id: string, action: DispatcherAction, text: string): boolean => {
+      if (channelForAction(action) === 'chat') {
+        dispatcherQueue.current.push(text);
+        return true;
+      }
+      logNote(id, action, text);
+      return false;
+    },
+    [logNote],
+  );
+
   useEffect(() => {
     const sessionId = dispatcher?.sessionId ?? null;
     if (sessionId === null) return;
+    let pumped = false;
     for (const rec of runLog) {
       // An `unknown` capture has no reliable qualitative content to synthesize,
       // so it does NOT enter the block feed here. Under the ADR-0012 noise floor
@@ -1061,27 +1169,28 @@ export function App(): JSX.Element {
       if (rec.outcome === 'unknown') continue;
       if (dispatcherFed.current.has(rec.id)) continue;
       dispatcherFed.current.add(rec.id);
+      // A finished Run's synthesis is a ROUTINE PASSIVE fact (ADR-0012, issue 48):
+      // it becomes a quiet line in the ambient activity log, NOT a message typed
+      // into the chat session. `surfaceEvent` routes it there via the tested
+      // `channelForAction` (synthesize is silent → log).
       const text = renderCompletionEvent(toCompletionEvent({ id: rec.id, record: rec }));
-      dispatcherQueue.current.push(text);
-      // Synthesizing/relaying a finished Run's block is an autonomous (auto)
-      // action per ADR-0007 — log it so the panel shows what the Dispatcher did
-      // on its own, distinct from the scope-changing actions it must propose.
-      setDispatcherActivities((prev) =>
-        prev.some((a) => a.id === `synthesize:${rec.id}`)
-          ? prev
-          : [...prev, recordActivity(`synthesize:${rec.id}`, 'synthesize')],
-      );
-      // Cross-Run synthesis (issue 38, acceptance a): if this block reports
-      // doc-drift (a PRD/reality contradiction), the Dispatcher SURFACES it as a
-      // plain-language note. Under ADR-0011 amending the plan no longer raises a
-      // blocking approve/reject gate (it is a passive, non-blocking action), so
-      // this only relays the finding — where that passive note renders is issue
-      // 48. Doc-drift free / "none" blocks add nothing.
+      if (surfaceEvent(`synthesize:${rec.id}`, 'synthesize', text)) pumped = true;
+      // Cross-Run synthesis (issue 38, acceptance a): a block that reports doc-drift
+      // (a PRD/reality contradiction) surfaces as a plain-language note. Under
+      // ADR-0011 amending the plan is a passive (non-blocking) action, and under
+      // ADR-0012 that passive note renders in the ambient log — not the chat.
+      // Doc-drift free / "none" blocks add nothing.
       const [drift] = extractDocDrift([rec]);
       if (drift) {
-        dispatcherQueue.current.push(
-          `${describeDocDrift(drift)} — the plan may need amending to reconcile it.`,
-        );
+        if (
+          surfaceEvent(
+            `doc-drift:${rec.id}`,
+            'amend-plan',
+            `${describeDocDrift(drift)} — the plan may need amending to reconcile it.`,
+          )
+        ) {
+          pumped = true;
+        }
       }
     }
     // Cross-Run patterns (issue 38, acceptance b/c): once ≥2 Runs touch the same
@@ -1099,12 +1208,19 @@ export function App(): JSX.Element {
       const runs = group.runs
         .map((r) => (r.issueId !== null ? `issue ${String(r.issueId).padStart(2, '0')}` : r.runId))
         .join(', ');
-      dispatcherQueue.current.push(
-        `${group.runs.length} Runs touched ${group.seam} (${runs}) — consider a consolidated pass rather than treating each separately.`,
-      );
+      // A cross-Run consolidation is a passive note (ADR-0012, issue 48) → log.
+      if (
+        surfaceEvent(
+          `overlap:${group.seam}`,
+          'synthesize',
+          `${group.runs.length} Runs touched ${group.seam} (${runs}) — consider a consolidated pass rather than treating each separately.`,
+        )
+      ) {
+        pumped = true;
+      }
     }
-    pumpDispatcherQueue(sessionId);
-  }, [runLog, dispatcher, pumpDispatcherQueue]);
+    if (pumped) pumpDispatcherQueue(sessionId);
+  }, [runLog, dispatcher, pumpDispatcherQueue, surfaceEvent]);
 
   // --- Ground the Dispatcher's status picture in truth (issue 43) -----------
   // The Dispatcher's AUTHORITATIVE model of which issues are open/wip/done/
@@ -1121,21 +1237,28 @@ export function App(): JSX.Element {
     [backlog, worktreeRunStates, runLog],
   );
 
-  // Re-ground the live Dispatcher with the current status model whenever it
-  // changes (a Run flipping done, a branch becoming finished-unmerged, an unknown
-  // capture landing). Fed through the same serialized submit queue as the blocks,
-  // and guarded by the rendered text so an unchanged model is never re-fed — so
-  // "what's left" always reconciles to reality, and unknown captures are conveyed
-  // (with their detail) rather than skipped.
+  // Re-ground the status picture whenever it changes (a Run flipping done, a
+  // branch becoming finished-unmerged, an unknown capture landing), guarded by the
+  // rendered text so an unchanged model is never re-surfaced. The status refresh
+  // is a ROUTINE PASSIVE fact (ADR-0012, issue 48): it renders as a quiet line in
+  // the ambient log, NOT typed into the chat. It updates ONE `status-refresh` note
+  // in place (rather than appending a new line each change) so the log shows the
+  // current "what's left" without accreting a status entry per transition.
   useEffect(() => {
-    const sessionId = dispatcher?.sessionId ?? null;
-    if (sessionId === null) return;
+    if ((dispatcher?.sessionId ?? null) === null) return;
     const text = renderStatusModel(dispatcherStatusModel);
     if (text === statusRefreshSig.current) return;
     statusRefreshSig.current = text;
-    dispatcherQueue.current.push(text);
-    pumpDispatcherQueue(sessionId);
-  }, [dispatcherStatusModel, dispatcher, pumpDispatcherQueue]);
+    // `relay` is silent → the ambient log (channelForAction === 'log').
+    const note = recordActivity('status-refresh', 'relay', oneLineNote(text));
+    setDispatcherActivities((prev) => {
+      const idx = prev.findIndex((a) => a.id === 'status-refresh');
+      if (idx === -1) return [...prev, note];
+      const next = [...prev];
+      next[idx] = note;
+      return next;
+    });
+  }, [dispatcherStatusModel, dispatcher]);
 
   // --- React to lifecycle events mid-drain (issue 37, ADR-0007) -------------
   // Beyond the Completion-block stream above, the Dispatcher reacts to lightweight
@@ -1200,18 +1323,20 @@ export function App(): JSX.Element {
       if (lifecycleReacted.current.has(key)) continue;
       lifecycleReacted.current.add(key);
       const reaction = reactToLifecycleEvent(event);
-      if (reaction.notification !== null) {
-        dispatcherQueue.current.push(reaction.notification);
+      if (reaction.notification === null) continue;
+      // ADR-0012 (issue 48): route by the event's authority. A HITL gate awaiting
+      // sign-off is a blocking-approval prompt → the chat PTY; a blocked/stranded/
+      // needs-attention alert is a routine passive fact → the ambient log. Either
+      // way it is surfaced once, so a stuck or human-gated drain never stalls
+      // silently — it just no longer races the user's typing in the chat.
+      // ADR-0011: discard-and-continue is not a blocking gate; the user discards a
+      // blocked/stranded Run from the Map's Discard control, so no proposal here.
+      if (surfaceEvent(key, actionForLifecycle(event.kind), reaction.notification)) {
         pumped = true;
       }
-      // ADR-0011: discard-and-continue is no longer a blocking gate (only
-      // merge-conflict, abort-drain and HITL sign-off block). The blocked/
-      // stranded Run is still surfaced proactively via the notification above; the
-      // user discards it from the Map's Discard control. So no approve/reject
-      // proposal is raised here anymore.
     }
     if (pumped) pumpDispatcherQueue(sessionId);
-  }, [runLog, worktreeRunStates, dispatcher, backlog, pumpDispatcherQueue]);
+  }, [runLog, worktreeRunStates, dispatcher, backlog, pumpDispatcherQueue, surfaceEvent]);
 
   const startDrain = useCallback(
     (chosenCap: number): void => {
@@ -1264,6 +1389,7 @@ export function App(): JSX.Element {
     dispatcherFed.current.clear();
     dispatcherQueue.current = [];
     dispatcherPumping.current = false;
+    dispatcherTyping.current = INITIAL_TYPING_STATE;
     setDispatcherActivities([]);
     lifecycleReacted.current.clear();
     discardTargets.current = {};
@@ -1480,23 +1606,20 @@ export function App(): JSX.Element {
           const decision = decideDispatcherMerge(result);
           const sessionId = dispatcher?.sessionId ?? null;
           if (decision.kind === 'auto') {
-            setDispatcherActivities((prev) =>
-              prev.some((a) => a.id === `merge:${sig}`)
-                ? prev
-                : [...prev, recordActivity(`merge:${sig}`, 'merge')],
-            );
-            if (sessionId !== null) {
-              dispatcherQueue.current.push(decision.note);
-              pumpDispatcherQueue(sessionId);
-            }
+            // A CLEAN merge is a routine passive fact ("merged 05 clean") →
+            // ambient log, carrying its own summary text; never typed into the
+            // chat (ADR-0012, issue 48). `merge` is passive → channelForAction 'log'.
+            logNote(`merge:${sig}`, 'merge', decision.note);
           } else if (decision.kind === 'gate') {
+            // A CONFLICT / preflight failure BLOCKS: record the pending proposal
+            // (the panel's approve/reject) and, because it is a blocking-approval
+            // prompt, ALSO surface the reason in the chat via the serialized queue.
             setDispatcherActivities((prev) =>
               prev.some((a) => a.id === `merge-conflict:${sig}`)
                 ? prev
                 : [...prev, recordActivity(`merge-conflict:${sig}`, 'merge-conflict')],
             );
-            if (sessionId !== null) {
-              dispatcherQueue.current.push(decision.reason);
+            if (sessionId !== null && surfaceEvent(`merge-conflict:${sig}`, 'merge-conflict', decision.reason)) {
               pumpDispatcherQueue(sessionId);
             }
           }
@@ -1535,7 +1658,7 @@ export function App(): JSX.Element {
         );
       })
       .finally(() => setMerging(false));
-  }, [projectPath, merging, mergePlan, dispatcher, pumpDispatcherQueue]);
+  }, [projectPath, merging, mergePlan, dispatcher, pumpDispatcherQueue, logNote, surfaceEvent]);
 
   // The manual Map Merge button — the unchanged, human-triggered path (ADR-0002).
   const runMerge = useCallback((): void => runMergeCore(false), [runMergeCore]);
@@ -1745,6 +1868,7 @@ export function App(): JSX.Element {
               <DispatcherPanel
                 target={dispatcher.target}
                 onSession={handleDispatcherSession}
+                onInput={handleDispatcherInput}
                 onDismiss={dismissDispatcher}
                 ingestedCount={runLog.filter((r) => r.outcome !== 'unknown').length}
                 activities={dispatcherActivities}
