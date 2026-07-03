@@ -4,6 +4,7 @@ import {
   isTerminal,
   observedIssueStatus,
   shouldCommitWorktree,
+  shouldCommitMain,
 } from './run-state';
 
 describe('deriveRunStatus', () => {
@@ -105,6 +106,24 @@ describe('shouldCommitWorktree (issue 15 — when to auto-commit)', () => {
 
   it('never auto-commits a solo Run — it works on main and is left for review', () => {
     expect(shouldCommitWorktree({ isolated: false, worktreeStatus: 'done' })).toBe(false);
+  });
+});
+
+describe('shouldCommitMain (issue 25 — when to commit a solo Run on main)', () => {
+  it('commits a solo Run once its issue reaches done on main', () => {
+    expect(shouldCommitMain({ isolated: false, mainStatus: 'done' })).toBe(true);
+  });
+
+  it('does not commit a solo Run still wip (blocked/stopped — left for the user)', () => {
+    expect(shouldCommitMain({ isolated: false, mainStatus: 'wip' })).toBe(false);
+  });
+
+  it('does not commit a solo Run whose status is not yet observed', () => {
+    expect(shouldCommitMain({ isolated: false, mainStatus: null })).toBe(false);
+  });
+
+  it('never commits an isolated Run here — it commits on its own afk branch', () => {
+    expect(shouldCommitMain({ isolated: true, mainStatus: 'done' })).toBe(false);
   });
 });
 

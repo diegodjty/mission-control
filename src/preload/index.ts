@@ -18,6 +18,8 @@ import {
   type IsolationApplyResult,
   type IssueStatusObserveRequest,
   type IssueStatusObserveResult,
+  type MainCommitRequest,
+  type MainCommitResult,
   type MergeRunsRequest,
   type MergeRunsResult,
   type MergeAbortRequest,
@@ -58,6 +60,9 @@ const api: MissionControlApi = {
     req: IssueStatusObserveRequest,
   ): Promise<IssueStatusObserveResult> =>
     ipcRenderer.invoke(IpcChannel.IssueStatusObserve, req),
+
+  commitFinishedMain: (req: MainCommitRequest): Promise<MainCommitResult> =>
+    ipcRenderer.invoke(IpcChannel.MainCommit, req),
 
   scanAfkRuns: (req: AfkScanRequest): Promise<AfkScanResult> =>
     ipcRenderer.invoke(IpcChannel.AfkScan, req),

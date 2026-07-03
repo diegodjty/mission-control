@@ -24,7 +24,7 @@ import {
   type IsolationState,
 } from '../shared/isolation-policy';
 import { buildBacklog, type IssueStatus } from '../shared/backlog-model';
-import { shouldCommitWorktree } from '../shared/run-state';
+import { shouldCommitWorktree, shouldCommitMain } from '../shared/run-state';
 import { issueIdFromSlug, type AfkBranchFacts } from '../shared/worktree-scan';
 import { ensureLocallyIgnored } from './local-ignore';
 import type {
@@ -337,6 +337,19 @@ function statusOf(slug: string, content: string): IssueStatus | null {
   return backlog.issues[0]?.status ?? null;
 }
 
+/** Read a solo Run's issue status from the MAIN checkout working tree, or null. */
+async function readMainIssueStatus(
+  projectPath: string,
+  slug: string,
+): Promise<IssueStatus | null> {
+  const issueFile = join(projectPath, 'issues', `${slug}.md`);
+  try {
+    return statusOf(slug, await readFile(issueFile, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
 /** Read an isolated Run's issue status from its worktree working tree, or null. */
 async function readWorktreeIssueStatus(
   projectPath: string,
@@ -425,6 +438,51 @@ export async function commitFinishedWorktree(
     // No longer swallowed: the finished work stays uncommitted (so the branch
     // is not yet mergeable), and we report WHY so the Run reads "commit failed"
     // rather than perpetually "running".
+    return { committed: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * Auto-commit a finished SOLO Run's work on `main` (issue 25) — the symmetric
+ * counterpart of `commitFinishedWorktree` for isolated Runs. A solo Run works
+ * directly on `main`; the spawned agent (single-issue mode) flips its issue to
+ * `done` and leaves the created/edited files + the flip UNCOMMITTED, so `main`
+ * stays dirty and the next parallel Merge fails its clean-tree preflight
+ * ("commit or stash them first") — the exact wall the QA walkthrough hit. Since
+ * Mission Control owns the Run lifecycle, it makes the commit itself so
+ * "finished" uniformly means "committed".
+ *
+ * Only commits on the finished (done) transition — the pure `shouldCommitMain`
+ * decides that from the main-checkout status; a still-`wip`, blocked, or stopped
+ * solo Run is left for the user. Idempotent: a clean `main` (nothing staged/
+ * untracked — e.g. already committed) is skipped, so re-observing never
+ * double-commits. In solo mode only ONE Run is live at a time (isolation keys on
+ * concurrency), so committing all of `main` captures exactly this Run's work.
+ *
+ * Returns the same structured outcome as `commitFinishedWorktree`: `committed`
+ * says whether a new commit landed, and `error` carries the git failure message
+ * when the commit was ATTEMPTED and failed.
+ */
+export async function commitFinishedMain(
+  projectPath: string,
+  slug: string,
+): Promise<WorktreeCommitOutcome> {
+  const mainStatus = await readMainIssueStatus(projectPath, slug);
+  if (!shouldCommitMain({ isolated: false, mainStatus })) {
+    return { committed: false, error: null };
+  }
+
+  try {
+    // Idempotency guard: with a clean working tree there is nothing to commit
+    // (this Run's work was already committed, by MC or by hand).
+    const porcelain = await git(projectPath, ['status', '--porcelain']);
+    if (porcelain.trim().length === 0) return { committed: false, error: null };
+    await git(projectPath, ['add', '-A']);
+    await git(projectPath, ['commit', '-m', commitMessageForRun(slug)]);
+    return { committed: true, error: null };
+  } catch (err) {
+    // The finished work stays uncommitted (so `main` is still dirty) and we
+    // report WHY rather than swallowing it.
     return { committed: false, error: err instanceof Error ? err.message : String(err) };
   }
 }

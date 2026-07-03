@@ -162,6 +162,12 @@ export function App(): JSX.Element {
 
   // --- Run state -----------------------------------------------------------
   const [runs, setRuns] = useState<TrackedRun[]>([]);
+  // Solo Runs whose finished work MC has already asked to commit onto `main`
+  // (issue 25), so a finished solo Run is auto-committed once — not on every
+  // re-render. Cleared for an id when a genuinely fresh Run of it starts, so a
+  // later Run of the same issue commits its own work. A rejected commit clears
+  // the id so a later observation retries; the adapter commit is idempotent.
+  const committedSoloIds = useRef<Set<number>>(new Set<number>());
   const [focusedId, setFocusedId] = useState<number | null>(null);
   // Which tile (if any) is maximized to fill the Pane area; null = tiled grid.
   const [maximizedId, setMaximizedId] = useState<number | null>(null);
@@ -283,6 +289,30 @@ export function App(): JSX.Element {
       clearInterval(timer);
     };
   }, [runs, projectPath]);
+
+  // Auto-commit a finished SOLO Run's work on `main` (issue 25). A solo Run's
+  // agent flips its issue to `done` and leaves its files + the flip UNCOMMITTED
+  // on `main`; nothing else commits them, so `main` stays dirty and the next
+  // parallel Merge fails its clean-tree preflight. The moment a solo Run's
+  // derived status is `finished` (its `done` flip seen by the main-checkout
+  // watcher), MC commits it — once per Run, idempotently — so "finished"
+  // uniformly means "committed" and `main` stays mergeable. Isolated Runs commit
+  // on their own `afk/` branch (above), so they are skipped here.
+  useEffect(() => {
+    if (projectPath === null) return;
+    for (const run of runs) {
+      if (isIsolated(run) || runStatusOf(run) !== 'finished') continue;
+      const id = run.target.issueId;
+      if (committedSoloIds.current.has(id)) continue;
+      committedSoloIds.current.add(id);
+      void window.mc
+        .commitFinishedMain({ projectPath, slug: slugOf(run.target.issueFileName) })
+        .catch(() => {
+          // Transient/failed commit: allow a later observation to retry.
+          committedSoloIds.current.delete(id);
+        });
+    }
+  }, [runs, projectPath, isIsolated, runStatusOf]);
 
   // Poll the Project's on-disk `afk/` state on an interval, independent of the
   // tracked Runs (issue 16). This is what lets the Map still show a finished-
@@ -419,6 +449,9 @@ export function App(): JSX.Element {
         delete next[target.issueId];
         return next;
       });
+      // ...and let a fresh solo Run of this id auto-commit its OWN work (issue
+      // 25), not be treated as already-committed by a prior Run of the same id.
+      committedSoloIds.current.delete(target.issueId);
 
       // No resolved Project path yet: can't reconcile isolation, so fall back to
       // spawning on the target's given path (a lone Run). Never blocks the Pane.

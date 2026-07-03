@@ -27,6 +27,13 @@ export const IpcChannel = {
    */
   IssueStatusObserve: 'issue:status-observe',
   /**
+   * renderer → main (invoke): auto-commit a finished SOLO Run's work on `main`
+   * (issue 25) so "finished" uniformly means "committed" and a solo Run never
+   * leaves `main` dirty to block the next parallel Merge preflight. Only commits
+   * on the done transition; idempotent. Resolves to a MainCommitResult.
+   */
+  MainCommit: 'main:commit',
+  /**
    * renderer → main (invoke): scan the Project's on-disk `afk/` branches +
    * worktrees (issue 16) so the Map can show in-flight/finished-unmerged Runs
    * and the Merge affordance can be derived from disk — surviving closing every
@@ -230,6 +237,23 @@ export interface IssueStatusObserveResult {
   commitError: string | null;
 }
 
+export interface MainCommitRequest {
+  /** The Project repo path (`main` checkout) where the solo Run did its work. */
+  projectPath: string;
+  /** The `NN-slug` of the finished solo Run, used for the commit message. */
+  slug: string;
+}
+
+export interface MainCommitResult {
+  /** True when a new commit landed on `main` this call (false ⇒ nothing to do). */
+  committed: boolean;
+  /**
+   * The git error message when the commit was ATTEMPTED and failed, else null —
+   * so a failed auto-commit is surfaced rather than silently leaving `main` dirty.
+   */
+  error: string | null;
+}
+
 export interface AfkScanRequest {
   /** The Project repo path (`main` checkout); the scan reads its `afk/` branches. */
   projectPath: string;
@@ -424,6 +448,11 @@ export interface MissionControlApi {
   observeIssueStatus(
     req: IssueStatusObserveRequest,
   ): Promise<IssueStatusObserveResult>;
+  /**
+   * Auto-commit a finished solo Run's work on `main` (issue 25) so `main` stays
+   * clean and mergeable. Only commits on the done transition; idempotent.
+   */
+  commitFinishedMain(req: MainCommitRequest): Promise<MainCommitResult>;
   /**
    * Scan the Project's on-disk `afk/` branches/worktrees (issue 16) so the Map
    * reflects in-flight/finished-unmerged Runs and the Merge affordance survives

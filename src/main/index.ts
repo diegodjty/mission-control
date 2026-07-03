@@ -13,6 +13,7 @@ import { readBacklog } from './backlog-reader';
 import { BacklogWatcher } from './backlog-watcher';
 import {
   applyIsolation,
+  commitFinishedMain,
   discardWorktree,
   isMidMerge,
   readIsolatedIssueStatus,
@@ -31,6 +32,8 @@ import {
   type IsolationApplyRequest,
   type IssueStatusObserveRequest,
   type IssueStatusObserveResult,
+  type MainCommitRequest,
+  type MainCommitResult,
   type MergeRunsRequest,
   type MergeAbortRequest,
   type MergeAbortResult,
@@ -216,6 +219,18 @@ function registerIpc(): void {
     IpcChannel.IssueStatusObserve,
     async (_event, req: IssueStatusObserveRequest): Promise<IssueStatusObserveResult> =>
       readIsolatedIssueStatus(req.projectPath, req.slug),
+  );
+
+  // Auto-commit a finished SOLO Run's work on `main` (issue 25): the symmetric
+  // counterpart of the isolated auto-commit above. A solo Run's agent flips its
+  // issue to `done` and leaves the files + flip uncommitted on `main`; nothing
+  // else commits them, so `main` stays dirty and the next parallel Merge fails
+  // its clean-tree preflight. MC commits — only on the done transition,
+  // idempotent — so "finished" uniformly means "committed".
+  ipcMain.handle(
+    IpcChannel.MainCommit,
+    async (_event, req: MainCommitRequest): Promise<MainCommitResult> =>
+      commitFinishedMain(req.projectPath, req.slug),
   );
 
   // On-disk `afk/` scan (issue 16): the ground truth for which issues have an

@@ -91,9 +91,38 @@ export interface WorktreeCommitFacts {
  * stay uncommitted and the `afk/` branch empty — leaving Merge nothing to
  * integrate. A solo Run (works directly on `main`) is never auto-committed, and
  * a still-`wip`/blocked/stopped isolated Run is left uncommitted (nothing to
- * merge yet). Pure so the "when to commit" decision is unit-testable; the git
- * side effect and idempotency guard live in the Git/Worktree Adapter.
+ * merge yet). A solo Run (works directly on `main`) is not committed HERE — its
+ * symmetric auto-commit onto `main` is `shouldCommitMain` (issue 25). Pure so
+ * the "when to commit" decision is unit-testable; the git side effect and
+ * idempotency guard live in the Git/Worktree Adapter.
  */
 export function shouldCommitWorktree(facts: WorktreeCommitFacts): boolean {
   return facts.isolated && facts.worktreeStatus === 'done';
+}
+
+/** The facts that decide whether a SOLO Run's work on `main` should be committed. */
+export interface MainCommitFacts {
+  /** True when this Run works in a worktree on an `afk/` branch (not `main`). */
+  isolated: boolean;
+  /**
+   * The issue's status as seen in the MAIN-checkout backlog (where a solo Run's
+   * agent flips it to `done` and leaves the change uncommitted), or null.
+   */
+  mainStatus: IssueStatus | null;
+}
+
+/**
+ * Whether Mission Control should auto-commit a SOLO Run's work on `main` (issue
+ * 25) — the symmetric counterpart of `shouldCommitWorktree` for isolated Runs.
+ * The afk-issue-runner solo contract has the spawned agent flip its issue to
+ * `done` and leave the created files + the flip UNCOMMITTED on `main`; nothing
+ * else commits them, so `main` stays dirty and the next parallel Merge fails its
+ * clean-tree preflight ("commit or stash them first"). So MC commits — but ONLY
+ * on the finished (done) transition of a SOLO Run: an isolated Run commits on
+ * its own `afk/` branch (never here), and a still-`wip`/blocked/stopped solo Run
+ * is left for the user. Pure so the "when to commit" decision is unit-testable;
+ * the git side effect and idempotency guard live in the Git/Worktree Adapter.
+ */
+export function shouldCommitMain(facts: MainCommitFacts): boolean {
+  return !facts.isolated && facts.mainStatus === 'done';
 }
