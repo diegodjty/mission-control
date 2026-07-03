@@ -43,6 +43,24 @@ export function isTerminal(status: RunStatus): boolean {
 }
 
 /**
+ * The issue ids whose Run is currently LIVE (`running`) — the set that drives the
+ * Map row "running" indicator and the detail-panel "Run in progress" label
+ * (issue 33). It MUST be status-filtered: a tracked Run that has reached a
+ * terminal status (finished/stopped/blocked) but whose Pane/tile is still on
+ * screen must be EXCLUDED, or its issue keeps reading as "running" /
+ * "Run in progress" until the Pane is manually dismissed. Pure (takes the runs
+ * plus status/issue-id resolvers) so the filtering is unit-testable without a
+ * React render.
+ */
+export function runningIssueIds<R>(
+  runs: readonly R[],
+  statusOf: (run: R) => RunStatus,
+  issueIdOf: (run: R) => number,
+): number[] {
+  return runs.filter((r) => statusOf(r) === 'running').map(issueIdOf);
+}
+
+/**
  * The two disk sources a Run's issue status could be read from, plus whether the
  * Run is isolated (working in its own worktree on an `afk/` branch).
  */

@@ -7,6 +7,7 @@ import type { ProjectView, RunTarget } from '../../shared/ipc-contract';
 import {
   deriveRunStatus,
   observedIssueStatus,
+  runningIssueIds,
   type RunStatus,
 } from '../../shared/run-state';
 import { planDrain, type ActiveRun } from '../../shared/run-coordinator';
@@ -474,7 +475,7 @@ export function App(): JSX.Element {
   // worktree with no `done` commit is only `running` while a live session drives
   // it — otherwise it is `stranded`. Fed to the pure scan derivations below.
   const liveRunIssueIds = useMemo(
-    () => runs.filter((r) => runStatusOf(r) === 'running').map((r) => r.target.issueId),
+    () => runningIssueIds(runs, runStatusOf, (r) => r.target.issueId),
     [runs, runStatusOf],
   );
 
@@ -505,7 +506,12 @@ export function App(): JSX.Element {
     [worktreeRunStates],
   );
 
-  const activeRunIssueIds = runs.map((r) => r.target.issueId);
+  // The issue ids that drive the Map row "running" indicator (`Map.tsx`) and the
+  // detail-panel "Run in progress" label. This MUST be the status-filtered live
+  // set (issue 33) — a Run that has reached `finished`/`stopped`/`blocked` but
+  // whose Pane is still on screen must not keep its issue reading as "running".
+  // `liveRunIssueIds` above is exactly that set (`runStatusOf` === `running`).
+  const activeRunIssueIds = liveRunIssueIds;
 
   // Which tracked Runs are part of the isolation set once a new Run joins: every
   // Run still `running`, plus any already working in a worktree (an isolated

@@ -3,8 +3,10 @@ import {
   deriveRunStatus,
   isTerminal,
   observedIssueStatus,
+  runningIssueIds,
   shouldCommitWorktree,
   shouldCommitMain,
+  type RunStatus,
 } from './run-state';
 
 describe('deriveRunStatus', () => {
@@ -124,6 +126,53 @@ describe('shouldCommitMain (issue 25 — when to commit a solo Run on main)', ()
 
   it('never commits an isolated Run here — it commits on its own afk branch', () => {
     expect(shouldCommitMain({ isolated: true, mainStatus: 'done' })).toBe(false);
+  });
+});
+
+describe('runningIssueIds (issue 33 — the Map "running" / "Run in progress" set is status-filtered)', () => {
+  interface FakeRun {
+    issueId: number;
+    status: RunStatus;
+  }
+  const statusOf = (r: FakeRun): RunStatus => r.status;
+  const idOf = (r: FakeRun): number => r.issueId;
+
+  it('excludes a finished tracked Run whose Pane is still on screen', () => {
+    // This is the issue-33 bug: a solo Run reached `done` (finished) but its
+    // Pane/tile has not been dismissed yet, so it is still a tracked Run.
+    const runs: FakeRun[] = [
+      { issueId: 2, status: 'finished' },
+      { issueId: 5, status: 'running' },
+    ];
+    expect(runningIssueIds(runs, statusOf, idOf)).toEqual([5]);
+  });
+
+  it('excludes stopped and blocked Runs too — only `running` is live', () => {
+    const runs: FakeRun[] = [
+      { issueId: 1, status: 'stopped' },
+      { issueId: 2, status: 'blocked' },
+      { issueId: 3, status: 'finished' },
+      { issueId: 4, status: 'running' },
+    ];
+    expect(runningIssueIds(runs, statusOf, idOf)).toEqual([4]);
+  });
+
+  it('is empty when every tracked Run has reached a terminal status', () => {
+    const runs: FakeRun[] = [
+      { issueId: 7, status: 'finished' },
+      { issueId: 8, status: 'stopped' },
+    ];
+    expect(runningIssueIds(runs, statusOf, idOf)).toEqual([]);
+  });
+
+  it('does NOT return every tracked Run id (the pre-fix bug used runs.map(...) unfiltered)', () => {
+    const runs: FakeRun[] = [
+      { issueId: 2, status: 'finished' },
+      { issueId: 5, status: 'running' },
+    ];
+    // The old `runs.map((r) => r.target.issueId)` returned [2, 5], marking the
+    // finished issue 2 as still running. The filtered set must not.
+    expect(runningIssueIds(runs, statusOf, idOf)).not.toContain(2);
   });
 });
 
