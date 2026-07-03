@@ -17,6 +17,7 @@ const LINE: Record<DispatcherAction, Authority> = {
   'log-issue': 'needs-approval',
   merge: 'needs-approval',
   'abort-drain': 'needs-approval',
+  'discard-and-continue': 'needs-approval',
   'course-change': 'needs-approval',
 };
 
@@ -37,6 +38,7 @@ describe('dispatcher authority classifier (ADR-0007, full line)', () => {
       'log-issue',
       'merge',
       'abort-drain',
+      'discard-and-continue',
       'course-change',
     ];
     for (const action of scope) {
@@ -61,12 +63,19 @@ describe('dispatcher authority classifier (ADR-0007, full line)', () => {
     }
   });
 
-  it('returns exactly four auto actions and four needs-approval actions', () => {
+  it('discard-and-continue is approval-gated (issue 22 discard is destructive)', () => {
+    // Force-removing a worktree + deleting its branch is irreversible, so the
+    // Dispatcher proposes it (issue 37) rather than doing it on its own.
+    expect(classifyAuthority('discard-and-continue')).toBe('needs-approval');
+    expect(isAuto('discard-and-continue')).toBe(false);
+  });
+
+  it('returns exactly four auto actions and five needs-approval actions', () => {
     const actions = Object.keys(LINE) as DispatcherAction[];
     const auto = actions.filter((a) => classifyAuthority(a) === 'auto');
     const gated = actions.filter((a) => classifyAuthority(a) === 'needs-approval');
     expect(auto).toHaveLength(4);
-    expect(gated).toHaveLength(4);
+    expect(gated).toHaveLength(5);
   });
 
   it('isAuto agrees with classifyAuthority', () => {

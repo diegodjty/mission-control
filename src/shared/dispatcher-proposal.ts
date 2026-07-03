@@ -64,6 +64,7 @@ const LABELS: Record<DispatcherAction, string> = {
   'log-issue': 'Log a new issue',
   merge: 'Merge finished parallel Runs into main',
   'abort-drain': 'Abort the drain',
+  'discard-and-continue': 'Discard the stranded worktree and continue the drain',
   'course-change': 'Change course',
 };
 

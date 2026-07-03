@@ -21,6 +21,11 @@ import {
   type DispatcherActivity,
 } from '../../shared/dispatcher-proposal';
 import {
+  lifecycleKindForOutcome,
+  reactToLifecycleEvent,
+  type LifecycleEvent,
+} from '../../shared/dispatcher-lifecycle';
+import {
   deriveRunStatus,
   isTerminal,
   observedIssueStatus,
@@ -229,6 +234,15 @@ export function App(): JSX.Element {
   // branches stay mergeable (see the merge-proposal effect).
   const [dispatcherActivities, setDispatcherActivities] = useState<DispatcherActivity[]>([]);
   const mergeProposalSig = useRef<string | null>(null);
+  // Lifecycle-event reactions (issue 37): which lifecycle events (keyed
+  // `<kind>:<runId>`) the Dispatcher has already reacted to, so a re-render /
+  // re-scan doesn't re-notify or re-propose. `discardTargets` maps a
+  // discard-and-continue proposal's id to the worktree it would discard, so
+  // approving it executes the real issue-22 discard (when there is a worktree).
+  const lifecycleReacted = useRef<Set<string>>(new Set<string>());
+  // Keyed by proposal id (`Map` the component name shadows the global, so a plain
+  // record avoids the collision).
+  const discardTargets = useRef<Record<string, { issueId: number; slug: string }>>({});
 
   // --- Merge state (issue 08; issue 17) ------------------------------------
   // `mergeDisplay` is the pure selector's decision of what the Merge UI shows
@@ -312,6 +326,8 @@ export function App(): JSX.Element {
     dispatcherPumping.current = false;
     setDispatcherActivities([]);
     mergeProposalSig.current = null;
+    lifecycleReacted.current.clear();
+    discardTargets.current = {};
     setMerging(false);
     setAborting(false);
     setMergeDisplay(null);
@@ -994,6 +1010,90 @@ export function App(): JSX.Element {
     pumpDispatcherQueue(sessionId);
   }, [runLog, dispatcher, pumpDispatcherQueue]);
 
+  // --- React to lifecycle events mid-drain (issue 37, ADR-0007) -------------
+  // Beyond the Completion-block stream above, the Dispatcher reacts to lightweight
+  // terminal lifecycle events — blocked / stranded / needs-attention / hitl-
+  // waiting — so it can act (or proactively alert) MID-drain rather than the drain
+  // silently stalling. These are STRUCTURED signals derived from truth Mission
+  // Control already holds — the captured Completion records (blocked / needs-
+  // verification, with their `detail` body from issue 42) and the on-disk `afk/`
+  // scan's stranded classification (issue 22) — never raw Pane scroll. The pure
+  // `reactToLifecycleEvent` turns each into a plain-language notification (fed
+  // through the same submit queue) plus, for blocked/stranded, an approval-gated
+  // discard-and-continue proposal (issue 36's gate). CRUCIALLY, when the drain
+  // reaches a HITL issue parked awaiting the human (a `hitl: true` / `(HITL)` issue
+  // whose block is "Ready for manual verification"), it PROACTIVELY notifies the
+  // user, names the issue, and relays its manual-verification steps — so the user
+  // isn't left to notice the pause. Reacted-to once per event (guarded by
+  // `lifecycleReacted`).
+  useEffect(() => {
+    const sessionId = dispatcher?.sessionId ?? null;
+    if (sessionId === null) return;
+
+    const isHitlIssue = (issueId: number | null): boolean =>
+      issueId !== null && (backlog?.issues.find((i) => i.id === issueId)?.hitl ?? false);
+
+    const events: LifecycleEvent[] = [];
+
+    // Blocked / HITL-waiting / needs-attention, derived from the captured blocks.
+    // `finished` is already relayed via the Completion-block feed above, so it is
+    // skipped here to avoid a duplicate narration.
+    for (const rec of runLog) {
+      const kind = lifecycleKindForOutcome(rec.outcome, isHitlIssue(rec.issueId));
+      if (kind === null || kind === 'finished') continue;
+      events.push({
+        kind,
+        runId: rec.id,
+        issueId: rec.issueId,
+        slug: rec.slug,
+        title: rec.title,
+        detail: rec.detail,
+      });
+    }
+
+    // Stranded isolated Runs (issue 22): a worktree whose Run ended without a
+    // done commit. There is no Completion block for these — the on-disk scan is
+    // the only signal — so surfacing them here is what keeps a stranded Run from
+    // silently stalling the drain (and blocking its siblings' Merge).
+    for (const s of worktreeRunStates) {
+      if (s.kind !== 'stranded') continue;
+      events.push({
+        kind: 'stranded',
+        runId: `stranded-${s.issueId}`,
+        issueId: s.issueId,
+        slug: s.slug,
+        title: null,
+        detail: null,
+      });
+    }
+
+    let pumped = false;
+    for (const event of events) {
+      const key = `${event.kind}:${event.runId}`;
+      if (lifecycleReacted.current.has(key)) continue;
+      lifecycleReacted.current.add(key);
+      const reaction = reactToLifecycleEvent(event);
+      if (reaction.notification !== null) {
+        dispatcherQueue.current.push(reaction.notification);
+        pumped = true;
+      }
+      if (reaction.proposal !== null) {
+        const proposal = reaction.proposal;
+        // If this issue has a worktree on disk, wire the proposal to the real
+        // issue-22 discard; otherwise approving it just clears the gate (a
+        // blocked solo Run has no worktree to force-remove).
+        const wt = worktreeRunStates.find((s) => s.issueId === event.issueId);
+        if (wt) discardTargets.current[proposal.id] = { issueId: wt.issueId, slug: wt.slug };
+        setDispatcherActivities((prev) =>
+          prev.some((a) => a.id === proposal.id)
+            ? prev
+            : [...prev, recordActivity(proposal.id, proposal.action)],
+        );
+      }
+    }
+    if (pumped) pumpDispatcherQueue(sessionId);
+  }, [runLog, worktreeRunStates, dispatcher, backlog, pumpDispatcherQueue]);
+
   const startDrain = useCallback(
     (chosenCap: number): void => {
       // Refuse to drain onto a mid-merge main (issue 24) — resolve/abort first.
@@ -1047,6 +1147,8 @@ export function App(): JSX.Element {
     dispatcherPumping.current = false;
     setDispatcherActivities([]);
     mergeProposalSig.current = null;
+    lifecycleReacted.current.clear();
+    discardTargets.current = {};
   }, []);
 
   // Keep the App's backlog copy fresh from every Map load/live-change so the
@@ -1278,8 +1380,15 @@ export function App(): JSX.Element {
       );
       if (action === 'merge') runMerge();
       else if (action === 'abort-drain') stopDrain();
+      else if (action === 'discard-and-continue') {
+        // Execute issue 22's discard for the stranded/blocked Run's worktree, if
+        // it has one; a blocked solo Run has no worktree, so approving simply
+        // clears the gate and the drain continues.
+        const target = discardTargets.current[id];
+        if (target) discardRun(target.issueId, target.slug);
+      }
     },
-    [runMerge, stopDrain],
+    [runMerge, stopDrain, discardRun],
   );
 
   // Reject a pending proposal: drop it (mark rejected) and DO NOT execute — the

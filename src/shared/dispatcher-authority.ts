@@ -38,6 +38,13 @@ export type DispatcherAction =
   | 'merge'
   /** Abort the drain. */
   | 'abort-drain'
+  /**
+   * Discard a blocked/stranded Run's worktree + branch and continue the drain
+   * (issue 22's discard path). Destructive and irreversible — it force-removes a
+   * worktree and deletes its branch — so it is a scope-changing call the human
+   * must approve (issue 37), never something the Dispatcher does on its own.
+   */
+  | 'discard-and-continue'
   /** Change course (re-order, re-scope, skip). */
   | 'course-change';
 
