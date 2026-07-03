@@ -18,6 +18,13 @@ import {
 } from '../../shared/worktree-scan';
 import { gridShape } from '../../shared/pane-grid';
 import { decideWindowBootstrap } from '../../shared/window-bootstrap';
+import {
+  mergeResultDisplay,
+  pendingMergeDisplay,
+  emptyMergeDisplay,
+  mergeThrewDisplay,
+  type MergeDisplay,
+} from '../../shared/merge-display';
 
 /** The `NN-slug` for a Run, from its issue file name (`NN-slug.md`). */
 function slugOf(fileName: string): string {
@@ -153,9 +160,12 @@ export function App(): JSX.Element {
   const [cap, setCap] = useState(2);
   const [drainMessage, setDrainMessage] = useState('');
 
-  // --- Merge state (issue 08) ----------------------------------------------
+  // --- Merge state (issue 08; issue 17) ------------------------------------
+  // `mergeDisplay` is the pure selector's decision of what the Merge UI shows
+  // (headline + whether/what to put in the details panel). Surfacing the
+  // adapter's `output` here is what gives "see details below" an actual below.
   const [merging, setMerging] = useState(false);
-  const [mergeMessage, setMergeMessage] = useState('');
+  const [mergeDisplay, setMergeDisplay] = useState<MergeDisplay | null>(null);
 
   // --- Isolated-Run completion (issue 13) ----------------------------------
   // An isolated Run works in its own worktree on an `afk/NN-slug` branch and
@@ -446,16 +456,22 @@ export function App(): JSX.Element {
   const runMerge = useCallback((): void => {
     if (projectPath === null || merging) return;
     const candidates = mergePlan.mergeable;
-    if (candidates.length === 0) return;
+    if (candidates.length === 0) {
+      // Triggered with nothing mergeable on disk (e.g. stale in-memory
+      // readiness after the branches were removed): say so plainly rather than
+      // silently doing nothing or later showing "could not run".
+      setMergeDisplay(emptyMergeDisplay());
+      return;
+    }
     const slugs = candidates.map((c) => c.slug);
     const mergedIds = new Set(candidates.map((c) => c.issueId));
 
     setMerging(true);
-    setMergeMessage(`Merging ${slugs.length} finished Run(s) into main…`);
+    setMergeDisplay(pendingMergeDisplay(slugs.length));
     void window.mc
       .mergeRuns({ projectPath, slugs })
       .then((result) => {
-        setMergeMessage(result.message);
+        setMergeDisplay(mergeResultDisplay(result));
         if (result.ok) {
           // The merged Runs' worktrees are gone; drop them from tracking so the
           // Merge action clears. Unmerged (blocked/stopped) Runs stay put.
@@ -463,7 +479,9 @@ export function App(): JSX.Element {
         }
       })
       .catch((err: unknown) => {
-        setMergeMessage(`Merge failed: ${err instanceof Error ? err.message : String(err)}`);
+        setMergeDisplay(
+          mergeThrewDisplay(err instanceof Error ? err.message : String(err)),
+        );
       })
       .finally(() => setMerging(false));
   }, [projectPath, merging, mergePlan]);
@@ -548,7 +566,7 @@ export function App(): JSX.Element {
             mergeCount={mergePlan.mergeable.length}
             onMerge={runMerge}
             merging={merging}
-            mergeMessage={mergeMessage}
+            mergeDisplay={mergeDisplay}
           />
         </div>
 

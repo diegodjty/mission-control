@@ -13,6 +13,7 @@ import {
   describeRunGuidance,
   type RunGuidance,
 } from '../../shared/run-guidance';
+import type { MergeDisplay } from '../../shared/merge-display';
 
 interface MapProps {
   /**
@@ -63,8 +64,12 @@ interface MapProps {
   onMerge?: () => void;
   /** True while a Merge is running. */
   merging?: boolean;
-  /** The result/status of the last (or in-flight) Merge, shown by the button. */
-  mergeMessage?: string;
+  /**
+   * What to show for the last (or in-flight) Merge: a headline plus, on a
+   * failure/conflict, the script's verbatim `output` in a details panel (issue
+   * 17). Null when no Merge has been triggered yet.
+   */
+  mergeDisplay?: MergeDisplay | null;
 }
 
 /**
@@ -92,7 +97,7 @@ export function Map({
   mergeCount,
   onMerge,
   merging,
-  mergeMessage,
+  mergeDisplay,
 }: MapProps = {}): JSX.Element {
   const activeRunSet = new Set(activeRunIssueIds ?? []);
   const worktreeRunningSet = new Set(worktreeRunningIds ?? []);
@@ -247,21 +252,37 @@ export function Map({
       {/* Merge (issue 08, ADR-0002): appears once the parallel Runs have
           finished, integrates their branches into main, and is ALWAYS
           human-triggered — clicking it is the only thing that starts a merge. */}
-      {onMerge && resolvedPath !== null && (mergeReady || merging || mergeMessage) && (
+      {onMerge && resolvedPath !== null && (mergeReady || merging || mergeDisplay) && (
         <div className="map__mergebar">
-          {(mergeReady || merging) && (
-            <button
-              className="map__merge"
-              onClick={() => onMerge()}
-              disabled={merging || !mergeReady}
-              title="Merge finished parallel Runs into main"
-            >
-              {merging
-                ? 'Merging…'
-                : `⤵ Merge ${mergeCount ?? 0} finished Run${mergeCount === 1 ? '' : 's'} into main`}
-            </button>
+          <div className="map__mergebar-row">
+            {(mergeReady || merging) && (
+              <button
+                className="map__merge"
+                onClick={() => onMerge()}
+                disabled={merging || !mergeReady}
+                title="Merge finished parallel Runs into main"
+              >
+                {merging
+                  ? 'Merging…'
+                  : `⤵ Merge ${mergeCount ?? 0} finished Run${mergeCount === 1 ? '' : 's'} into main`}
+              </button>
+            )}
+            {mergeDisplay && (
+              <span className={`map__merge-state map__merge-state--${mergeDisplay.tone}`}>
+                {mergeDisplay.headline}
+              </span>
+            )}
+          </div>
+          {/* The "see details below" below (issue 17): the script's verbatim
+              output on a failure/conflict, in a scrollable, collapsible panel.
+              Open by default so the detail is visible without a click; the user
+              can fold it away once read. */}
+          {mergeDisplay?.showOutput && mergeDisplay.output && (
+            <details className="map__merge-details" open>
+              <summary className="map__merge-details-summary">Merge output</summary>
+              <pre className="map__merge-output">{mergeDisplay.output}</pre>
+            </details>
           )}
-          {mergeMessage && <span className="map__merge-state">{mergeMessage}</span>}
         </div>
       )}
 

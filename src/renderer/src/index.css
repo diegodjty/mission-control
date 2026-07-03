@@ -365,12 +365,18 @@ body {
 
 .map__mergebar {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  gap: 8px;
   padding: 7px 14px;
   border-bottom: 1px solid #1c2530;
   background: #0c1219;
   flex: 0 0 auto;
+}
+
+.map__mergebar-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .map__merge {
@@ -392,6 +398,51 @@ body {
   font-size: 11px;
   color: #9aa7b4;
   white-space: pre-wrap;
+}
+
+/* Tone-coded headline (issue 17): success/empty stay quiet, conflict/error
+   draw the eye to the details panel below. */
+.map__merge-state--success {
+  color: #7fd18c;
+}
+.map__merge-state--empty {
+  color: #9aa7b4;
+}
+.map__merge-state--conflict {
+  color: #e0b155;
+}
+.map__merge-state--error {
+  color: #e08585;
+}
+
+/* The "details below" panel (issue 17): scrollable + collapsible, verbatim
+   script output for a failed/conflicted Merge. */
+.map__merge-details {
+  border: 1px solid #2a3542;
+  border-radius: 6px;
+  background: #0a0f16;
+}
+
+.map__merge-details-summary {
+  cursor: pointer;
+  padding: 5px 10px;
+  font-size: 11px;
+  color: #9aa7b4;
+  user-select: none;
+}
+
+.map__merge-output {
+  margin: 0;
+  padding: 8px 12px;
+  border-top: 1px solid #1c2530;
+  max-height: 220px;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  color: #cdd6e0;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 /* ---- Tiled Run grid (issue 12) ---- */
