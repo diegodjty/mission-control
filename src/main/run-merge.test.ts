@@ -17,7 +17,8 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mergeRuns, defaultMergeScriptPath } from './run-merge';
+import { readFile } from 'node:fs/promises';
+import { mergeRuns, ensureMergeConf, defaultMergeScriptPath } from './run-merge';
 import { createWorktree, worktreePathFor } from './git-worktree-adapter';
 import { branchFor } from '../shared/isolation-policy';
 
@@ -120,6 +121,46 @@ describe('mergeRuns — the real afk-merge.sh against real parallel branches', (
     // and at least one worktree is left in place for the human to sort out.
     expect(await branchExists('04-b')).toBe(true);
     expect(existsSync(worktreePathFor(repo, '04-b'))).toBe(true);
+  });
+
+  it('unblocks a repo that already has an un-ignored .afk-parallel marker (issue 18)', async () => {
+    // A real project has committed issue files, so issues/ is tracked and the
+    // marker shows as its own untracked entry (not a collapsed `?? issues/`).
+    await writeFile(join(repo, 'issues', '00-placeholder.md'), '# placeholder\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-m', 'backlog');
+
+    // Simulate a repo that hit the bug before this fix: the parallel-mode marker
+    // was written but never git-ignored, so it dirties the tree.
+    await writeFile(join(repo, 'issues', '.afk-parallel'), 'parallel\n');
+    const before = (await git(repo, 'status', '--porcelain')).trim();
+    expect(before).toContain('issues/.afk-parallel'); // dirty: would block merge
+
+    // The merge preflight ignores the marker (and afk-merge.conf) — no manual git.
+    await ensureMergeConf(repo);
+    const after = (await git(repo, 'status', '--porcelain')).trim();
+    expect(after).toBe(''); // tree clean again
+
+    // Added to .git/info/exclude exactly once (idempotent).
+    const exclude = await readFile(join(repo, '.git', 'info', 'exclude'), 'utf8');
+    expect(exclude.split('\n').filter((l) => l.trim() === 'issues/.afk-parallel').length).toBe(1);
+
+    // A second call double-appends nothing.
+    await ensureMergeConf(repo);
+    const exclude2 = await readFile(join(repo, '.git', 'info', 'exclude'), 'utf8');
+    expect(exclude2.split('\n').filter((l) => l.trim() === 'issues/.afk-parallel').length).toBe(1);
+  });
+
+  it('merges cleanly even when the .afk-parallel marker is present in the repo', async () => {
+    // The marker's presence must not block the real merge.
+    await writeFile(join(repo, 'issues', '.afk-parallel'), 'parallel\n');
+    await finishedRun('03-a', 'a.txt', 'from run 3\n');
+
+    const result = await mergeRuns(repo, ['03-a'], { scriptPath: SCRIPT });
+
+    expect(result.ok).toBe(true);
+    expect(result.conflicted).toBe(false);
+    expect(result.merged).toEqual(['03-a']);
   });
 
   it('is a no-op with an empty slug list', async () => {

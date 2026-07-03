@@ -27,16 +27,20 @@
  */
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { removeWorktree } from './git-worktree-adapter';
+import { ensureLocallyIgnored } from './local-ignore';
 import { afkMergeConfContent } from '../shared/merge-plan';
 import { branchFor } from '../shared/isolation-policy';
 import type { MergeRunsResult } from '../shared/ipc-contract';
 
 const exec = promisify(execFile);
+
+/** The `issues/.afk-parallel` parallel-mode marker, relative to the project root. */
+const PARALLEL_MARKER_IGNORE = 'issues/.afk-parallel';
 
 /** Where afk-merge.sh lives (installed with the afk-issue-runner skill). */
 export function defaultMergeScriptPath(): string {
@@ -48,35 +52,15 @@ function confPath(projectPath: string): string {
 }
 
 /**
- * Locally git-ignore a path so it never shows as an uncommitted change — the
- * generated merge config is machine state, not something to commit to the
- * user's repo, and `afk-merge.sh`'s preflight refuses to run on a dirty repo.
- * Uses `.git/info/exclude` (via `--git-path`, so it is correct even from a
- * linked worktree). Best-effort: a failure here is not fatal to the merge.
- */
-async function ensureLocallyIgnored(projectPath: string, pattern: string): Promise<void> {
-  try {
-    const { stdout } = await exec('git', ['rev-parse', '--git-path', 'info/exclude'], {
-      cwd: projectPath,
-    });
-    const excludePath = join(projectPath, stdout.trim());
-    let current = '';
-    if (existsSync(excludePath)) current = await readFile(excludePath, 'utf8');
-    if (current.split('\n').some((line) => line.trim() === pattern)) return;
-    await mkdir(dirname(excludePath), { recursive: true });
-    const sep = current.length === 0 || current.endsWith('\n') ? '' : '\n';
-    await writeFile(excludePath, `${current}${sep}${pattern}\n`);
-  } catch {
-    // Not a git repo yet, or unusual layout — the caller handles the fallout.
-  }
-}
-
-/**
  * Write the single-repo merge config if the project has none yet, and make sure
- * it is locally ignored so it doesn't trip afk-merge.sh's clean-repo preflight.
+ * both it and the `issues/.afk-parallel` marker are locally ignored so neither
+ * trips afk-merge.sh's clean-repo preflight. Ignoring the marker here (the merge
+ * preflight, issue 18) also unblocks a repo that already had an un-ignored
+ * `.afk-parallel` written into it before this fix — no manual git surgery.
  */
 export async function ensureMergeConf(projectPath: string): Promise<void> {
   await ensureLocallyIgnored(projectPath, 'issues/afk-merge.conf');
+  await ensureLocallyIgnored(projectPath, PARALLEL_MARKER_IGNORE);
   const path = confPath(projectPath);
   if (existsSync(path)) return;
   await mkdir(join(projectPath, 'issues'), { recursive: true });

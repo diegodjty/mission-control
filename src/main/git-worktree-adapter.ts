@@ -26,6 +26,7 @@ import {
 import { buildBacklog, type IssueStatus } from '../shared/backlog-model';
 import { shouldCommitWorktree } from '../shared/run-state';
 import { issueIdFromSlug, type AfkBranchFacts } from '../shared/worktree-scan';
+import { ensureLocallyIgnored } from './local-ignore';
 import type {
   IsolationApplyResult,
   ResolvedPlacement,
@@ -62,9 +63,17 @@ export function isParallel(projectPath: string): boolean {
   return existsSync(parallelFlagPath(projectPath));
 }
 
-/** Turn parallel mode on by writing the `issues/.afk-parallel` flag. */
+/**
+ * Turn parallel mode on by writing the `issues/.afk-parallel` flag. The flag is
+ * Mission Control's own machine state, not something to commit, so it is locally
+ * git-ignored as it is written (issue 18) — otherwise it shows as an untracked
+ * change, dirties the working tree, and trips `afk-merge.sh`'s clean-repo
+ * preflight, blocking every parallel merge. The ignore is idempotent and
+ * worktree-safe (see `ensureLocallyIgnored`).
+ */
 export async function enableParallel(projectPath: string): Promise<void> {
   const flag = parallelFlagPath(projectPath);
+  await ensureLocallyIgnored(projectPath, 'issues/.afk-parallel');
   await mkdir(dirname(flag), { recursive: true });
   await writeFile(
     flag,

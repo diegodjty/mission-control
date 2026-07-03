@@ -13,11 +13,13 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { readFile } from 'node:fs/promises';
 import {
   applyIsolation,
   currentState,
   createWorktree,
   removeWorktree,
+  enableParallel,
   listWorktreeSlugs,
   isParallel,
   worktreePathFor,
@@ -83,6 +85,43 @@ describe('createWorktree / removeWorktree (real git)', () => {
     const path = await createWorktree(repo, slug, branchFor(slug));
     expect(existsSync(path)).toBe(true);
     await removeWorktree(repo, slug);
+  });
+});
+
+describe('enableParallel — the .afk-parallel marker never dirties the repo (issue 18)', () => {
+  async function porcelain(): Promise<string> {
+    return (await git(repo, 'status', '--porcelain')).trim();
+  }
+
+  it('writes the marker but leaves the working tree clean (locally ignored)', async () => {
+    await enableParallel(repo);
+
+    // The marker is on disk...
+    expect(isParallel(repo)).toBe(true);
+    // ...but git does not see it as a change — the tree is clean, so the merge
+    // preflight (afk-merge.sh) is not blocked by the marker's presence.
+    expect(await porcelain()).toBe('');
+
+    // And it landed in .git/info/exclude exactly once.
+    const excludePath = join(repo, '.git', 'info', 'exclude');
+    const exclude = await readFile(excludePath, 'utf8');
+    const hits = exclude
+      .split('\n')
+      .filter((line) => line.trim() === 'issues/.afk-parallel').length;
+    expect(hits).toBe(1);
+  });
+
+  it('is idempotent — re-enabling does not double-append the exclude entry', async () => {
+    await enableParallel(repo);
+    await enableParallel(repo);
+    await enableParallel(repo);
+
+    expect(await porcelain()).toBe(''); // still clean
+    const exclude = await readFile(join(repo, '.git', 'info', 'exclude'), 'utf8');
+    const hits = exclude
+      .split('\n')
+      .filter((line) => line.trim() === 'issues/.afk-parallel').length;
+    expect(hits).toBe(1); // added once, never duplicated
   });
 });
 
