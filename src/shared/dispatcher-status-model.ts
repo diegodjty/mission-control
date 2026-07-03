@@ -31,7 +31,7 @@
  */
 import type { Backlog } from './backlog-model';
 import type { WorktreeRunState } from './worktree-scan';
-import type { RunLogRecord } from './ipc-contract';
+import type { RunLogRecord, RunOutcome } from './ipc-contract';
 
 /**
  * The grounded status of one issue. A superset of the backlog's `IssueStatus`
@@ -391,13 +391,126 @@ export function renderStatusModel(model: DispatcherStatusModel): string {
  * message wraps `renderStatusModel`'s authoritative body in a short framing that
  * tells the session this is the CURRENT ground truth injected because the user
  * just asked, so it answers from reality rather than the drain-start seed.
+ *
+ * `runDigest` (issue 61) is the Completion-block digest from `buildRunDigest`,
+ * appended AFTER the status body — qualitative substance riding the same
+ * injection, never a second chat message. Status stays first because it is the
+ * authoritative part; the digest only tells the session what each Run said.
+ * With no model there is no injection at all, digest or not — a hollow message
+ * carrying blocks but no ground truth would invite seed-based status answers.
  */
-export function buildStatusSnapshotMessage(model: DispatcherStatusModel | null): string | null {
+export function buildStatusSnapshotMessage(
+  model: DispatcherStatusModel | null,
+  runDigest: string | null = null,
+): string | null {
   if (model === null) return null;
   if (model.issues.length === 0 && model.needsLook.length === 0) return null;
-  return (
+  const status =
     '[Current status — injected on your query so your answer reflects reality right now, ' +
     'not the drain-start seed. Answer from THIS snapshot, not any earlier one.]\n' +
-    renderStatusModel(model)
+    renderStatusModel(model);
+  return runDigest === null ? status : `${status}\n\n${runDigest}`;
+}
+
+// --- Completion-block digest for the on-ask injection (issue 61) ------------
+//
+// The ADR-0012 recalibration routed completed-issue reports to the ambient LOG
+// (UI-only), so they stopped reaching the Dispatcher *session's* context at all
+// — mid-drain it honestly answered "nothing has reported in yet", violating
+// ADR-0009's "the Dispatcher holds the summaries". The user-approved middle
+// path: the chat stays quiet; the session's knowledge catches up WHEN THE USER
+// ASKS. This builder is the pure half: given the Run log and the set of record
+// ids the session has already been given, produce a compact digest of the NEW
+// Completion blocks — per Run: issue + slug, declared outcome, and a one-to-
+// two-line What-changed / park-reason extract — to ride the issue-52 status
+// injection. Bounded by ADR-0009: newest `DIGEST_MAX_RUNS` are listed, the rest
+// acknowledged as a count (and counted as given, so a long drain's history is
+// never replayed into the session's context on a later ask).
+
+/** Newest Runs listed per digest; older new ones are elided as a count. */
+export const DIGEST_MAX_RUNS = 8;
+
+/** Max characters of a digest entry's substance extract (~one-to-two lines). */
+const DIGEST_SUBSTANCE_CHARS = 240;
+
+/** One built digest: the text to inject + the record ids it accounts for. */
+export interface RunDigest {
+  /** The digest section, or null when nothing new has reported since last ask. */
+  text: string | null;
+  /**
+   * Ids of every record this digest accounts for — listed AND elided (the
+   * count line acknowledges the elided in aggregate; the Run log keeps their
+   * full blocks). The caller marks these as given ONLY once the injection is
+   * actually enqueued, so a skipped injection (no status model yet) does not
+   * swallow the blocks.
+   */
+  digestedIds: string[];
+}
+
+/** `issue NN — slug` when the issue is known, else the Run id. */
+function runLabel(rec: RunLogRecord): string {
+  if (rec.issueId !== null) {
+    return `issue ${idLabel(rec.issueId)}${rec.slug ? ` — ${rec.slug}` : ''}`;
+  }
+  return `run ${rec.id}`;
+}
+
+/** The declared outcome, worded for the session (HITL park names the human). */
+function outcomeLabel(outcome: RunOutcome): string {
+  switch (outcome) {
+    case 'completed':
+      return 'completed';
+    case 'needs-verification':
+      return 'parked — waiting on your manual verification (HITL)';
+    default:
+      return 'blocked';
+  }
+}
+
+/** The entry's substance: What-changed for a completion, park/blocked reason otherwise. */
+function substanceOf(rec: RunLogRecord): string | null {
+  const primary = rec.outcome === 'completed' ? rec.whatChanged : rec.detail;
+  return primary ?? rec.whatChanged ?? rec.detail;
+}
+
+/**
+ * Build the Completion-block digest of the Runs captured since the session was
+ * last given one (`alreadyDigested` — tracked by the caller the same way
+ * `dispatcherFed` guards the ambient-log feed). `runLog` arrives newest first,
+ * exactly as the app holds it; the digest keeps that order. `unknown` captures
+ * are excluded AND left unmarked — they have no reliable qualitative content
+ * (the status snapshot already conveys them as "needs a look"), and leaving
+ * them unmarked lets a still-streaming capture digest normally once it
+ * resolves under the same record id. Pure: no I/O, no mutation of inputs.
+ */
+export function buildRunDigest(
+  runLog: readonly RunLogRecord[],
+  alreadyDigested: ReadonlySet<string>,
+  maxRuns: number = DIGEST_MAX_RUNS,
+): RunDigest {
+  const fresh = runLog.filter(
+    (rec) => rec.outcome !== 'unknown' && !alreadyDigested.has(rec.id),
   );
+  if (fresh.length === 0) return { text: null, digestedIds: [] };
+
+  const listed = fresh.slice(0, maxRuns);
+  const elided = fresh.length - listed.length;
+
+  const lines: string[] = [
+    'Completion-block digest — Runs that have reported since your last update (newest ' +
+      'first; qualitative detail only — the status above stays authoritative for ' +
+      'done/left):',
+  ];
+  for (const rec of listed) {
+    const substance = substanceOf(rec);
+    const extract = substance ? ` — ${truncate(substance, DIGEST_SUBSTANCE_CHARS)}` : '';
+    lines.push(`- ${runLabel(rec)}: ${outcomeLabel(rec.outcome)}${extract}`);
+  }
+  if (elided > 0) {
+    lines.push(
+      `…and ${elided} earlier Run(s) not repeated here — the Run log holds their full blocks.`,
+    );
+  }
+
+  return { text: lines.join('\n'), digestedIds: fresh.map((rec) => rec.id) };
 }

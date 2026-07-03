@@ -52,6 +52,7 @@ import {
   debounceStatusModel,
   initialStatusDebounceState,
   buildStatusSnapshotMessage,
+  buildRunDigest,
   type DispatcherStatusModel,
   type StatusDebounceState,
 } from '../../shared/dispatcher-status-model';
@@ -312,6 +313,14 @@ export function App(): JSX.Element {
     sessionId: string | null;
   } | null>(null);
   const dispatcherFed = useRef<Set<string>>(new Set<string>());
+  // Which Runs' Completion blocks the Dispatcher SESSION has been given via the
+  // on-ask digest (issue 61) — distinct from `dispatcherFed`, which guards the
+  // ambient-LOG cards the session never sees. Baselined at Dispatcher creation
+  // to the records already in the Run log (they predate the session's seed), so
+  // the digest carries only what reported in since; ids are added only once a
+  // digest actually rides an injection, so nothing is swallowed by a skipped
+  // ask. Cleared wherever `dispatcherFed` is.
+  const dispatcherDigested = useRef<Set<string>>(new Set<string>());
   // The Dispatcher rail's width (issue 44): user-adjustable by dragging the
   // divider between the Map and the panel, within a sensible min/max, persisted
   // app-wide so it survives closing/reopening the panel and the app. Changing it
@@ -487,6 +496,7 @@ export function App(): JSX.Element {
     // panel kills the session.
     setDispatcher(null);
     dispatcherFed.current.clear();
+    dispatcherDigested.current.clear();
     dispatcherPumpRef.current?.reset();
     dispatcherTyping.current = INITIAL_TYPING_STATE;
     setDispatcherActivities([]);
@@ -1203,8 +1213,17 @@ export function App(): JSX.Element {
     (data: string): void => {
       const prev = dispatcherTyping.current;
       if (isStatusInjectionTrigger(prev, data)) {
-        const snapshot = buildStatusSnapshotMessage(debouncedStatusModelRef.current);
+        // The Completion-block digest (issue 61) rides the SAME injection: the
+        // status snapshot re-grounds "what's done/left", the digest catches the
+        // session up on WHAT EACH RUN SAID (issue + outcome + a What-changed /
+        // park-reason line) — the qualitative substance ADR-0012's log routing
+        // took out of the session's reach. Ids are marked as given only once
+        // the injection is actually enqueued; when there is no status model yet
+        // nothing injects and the blocks stay pending for the next ask.
+        const digest = buildRunDigest(runLogRef.current, dispatcherDigested.current);
+        const snapshot = buildStatusSnapshotMessage(debouncedStatusModelRef.current, digest.text);
         if (snapshot !== null) {
+          for (const id of digest.digestedIds) dispatcherDigested.current.add(id);
           statusInjectionSeq.current += 1;
           dispatcherPump.enqueue({
             key: `status-snapshot:${statusInjectionSeq.current}`,
@@ -1541,6 +1560,14 @@ export function App(): JSX.Element {
       // NOT do this — it stays a bare Pane. Idempotent: one Dispatcher per
       // Project, so re-draining the same Project reuses the live one.
       if (projectPath !== null) {
+        // Baseline the on-ask digest (issue 61) when a FRESH Dispatcher is
+        // created: records already in the Run log predate this session's seed
+        // (a previous drain's persisted blocks), so they are "already given" —
+        // the digest carries only what reports in from here on. A re-drain
+        // that reuses the live Dispatcher keeps its digest bookkeeping intact.
+        if (dispatcher === null || dispatcher.target.projectPath !== projectPath) {
+          dispatcherDigested.current = new Set(runLogRef.current.map((rec) => rec.id));
+        }
         setDispatcher((cur) =>
           cur && cur.target.projectPath === projectPath
             ? cur
@@ -1552,7 +1579,7 @@ export function App(): JSX.Element {
       }
       setView('pane');
     },
-    [midMerge, projectPath, backlog],
+    [midMerge, projectPath, backlog, dispatcher],
   );
 
   const stopDrain = useCallback((): void => {
@@ -1592,6 +1619,7 @@ export function App(): JSX.Element {
   const dismissDispatcher = useCallback((): void => {
     setDispatcher(null);
     dispatcherFed.current.clear();
+    dispatcherDigested.current.clear();
     // Dropping the queue here is safe for blocking items: the fed/reacted sets
     // clear too, so a fresh Dispatcher re-derives and re-enqueues anything (e.g.
     // a still-parked HITL gate) that is still true from the Run log.

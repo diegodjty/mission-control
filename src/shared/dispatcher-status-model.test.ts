@@ -12,6 +12,8 @@ import {
   reconcileStatusModel,
   renderStatusModel,
   buildStatusSnapshotMessage,
+  buildRunDigest,
+  DIGEST_MAX_RUNS,
   debounceStatusModel,
   initialStatusDebounceState,
   REGRESSION_CHECKPOINTS,
@@ -367,5 +369,139 @@ describe('buildStatusSnapshotMessage — on-demand injection (issue 52)', () => 
     const msg = buildStatusSnapshotMessage(model);
     expect(msg).not.toBeNull();
     expect(msg).toContain('Needs a look');
+  });
+});
+
+describe('buildRunDigest — Completion-block digest for the on-ask injection (issue 61)', () => {
+  const completed = (id: string, issueId: number, whatChanged: string): RunLogRecord =>
+    record({
+      id,
+      issueId,
+      slug: `${String(issueId).padStart(2, '0')}-thing`,
+      outcome: 'completed',
+      whatChanged,
+    });
+
+  it('names each new Run: issue id + slug, declared outcome, a What-changed extract', () => {
+    const log = [
+      completed('r4', 4, 'The Map now draws dependency edges.'),
+      completed('r3', 3, 'Runs open in a fresh Pane.'),
+    ];
+    const digest = buildRunDigest(log, new Set());
+    expect(digest.text).not.toBeNull();
+    expect(digest.text).toContain('issue 04 — 04-thing');
+    expect(digest.text).toContain('completed');
+    expect(digest.text).toContain('The Map now draws dependency edges.');
+    expect(digest.text).toContain('issue 03 — 03-thing');
+    expect(digest.text).toContain('Runs open in a fresh Pane.');
+    expect(digest.digestedIds).toEqual(expect.arrayContaining(['r3', 'r4']));
+  });
+
+  it('words an HITL park as waiting on the user, carrying the park reason', () => {
+    const log = [
+      record({
+        id: 'r5',
+        issueId: 5,
+        slug: '05-manual-check',
+        outcome: 'needs-verification',
+        detail: 'Ready for manual verification: open the app and click the thing.',
+      }),
+    ];
+    const digest = buildRunDigest(log, new Set());
+    expect(digest.text).toContain('issue 05 — 05-manual-check');
+    expect(digest.text).toContain('parked — waiting on your manual verification (HITL)');
+    expect(digest.text).toContain('open the app and click the thing');
+  });
+
+  it('carries a blocked Run with its reason', () => {
+    const log = [
+      record({ id: 'r7', issueId: 7, outcome: 'blocked', detail: 'Issue 06 is wip and overlaps.' }),
+    ];
+    const digest = buildRunDigest(log, new Set());
+    expect(digest.text).toContain('blocked');
+    expect(digest.text).toContain('Issue 06 is wip and overlaps.');
+  });
+
+  it('does not repeat already-digested blocks; new Runs since the last ask still appear', () => {
+    const log = [
+      completed('r4', 4, 'Edges drawn.'),
+      completed('r3', 3, 'Pane runs.'),
+    ];
+    const first = buildRunDigest(log, new Set());
+    const fed = new Set(first.digestedIds);
+    // Nothing new → no digest at all (the ask injects status only).
+    const second = buildRunDigest(log, fed);
+    expect(second.text).toBeNull();
+    expect(second.digestedIds).toEqual([]);
+    // A Run that finished after the last ask appears; the old ones do not.
+    const grown = [completed('r6', 6, 'Drain caps at N.'), ...log];
+    const third = buildRunDigest(grown, fed);
+    expect(third.text).toContain('issue 06');
+    expect(third.text).not.toContain('issue 04');
+    expect(third.text).not.toContain('issue 03');
+    expect(third.digestedIds).toEqual(['r6']);
+  });
+
+  it('excludes unknown-outcome captures and never marks them digested', () => {
+    const log = [
+      record({ id: 'r9', issueId: 9, outcome: 'unknown', detail: 'still streaming' }),
+      completed('r3', 3, 'Pane runs.'),
+    ];
+    const digest = buildRunDigest(log, new Set());
+    expect(digest.text).not.toContain('still streaming');
+    expect(digest.digestedIds).toEqual(['r3']);
+  });
+
+  it('caps at the newest N and counts the elided so a 50-Run drain stays bounded', () => {
+    const log = Array.from({ length: 50 }, (_, i) =>
+      completed(`r${50 - i}`, 50 - i, `Change ${50 - i}.`),
+    );
+    const digest = buildRunDigest(log, new Set());
+    expect(digest.text).not.toBeNull();
+    const listed = (digest.text as string).match(/- issue \d\d/g) ?? [];
+    expect(listed.length).toBe(DIGEST_MAX_RUNS);
+    expect(digest.text).toContain('issue 50');
+    expect(digest.text).not.toContain(`issue ${50 - DIGEST_MAX_RUNS}`);
+    expect(digest.text).toContain(`${50 - DIGEST_MAX_RUNS} earlier Run(s)`);
+    // The elided are acknowledged in aggregate — they count as given, so a later
+    // ask does not replay a long drain's history into the session's context.
+    expect(digest.digestedIds).toHaveLength(50);
+  });
+
+  it('truncates a long What-changed so an entry stays one-to-two lines', () => {
+    const digest = buildRunDigest([completed('r1', 1, 'y'.repeat(600))], new Set());
+    expect(digest.text).toContain('…');
+    expect(digest.text).not.toContain('y'.repeat(600));
+  });
+});
+
+describe('buildStatusSnapshotMessage — with the Completion-block digest (issue 61)', () => {
+  const model = (): DispatcherStatusModel =>
+    reconcileStatusModel(input({ backlog: backlog([issue(1, 'done'), issue(2, 'open')]) }));
+
+  it('appends the digest after the authoritative status body', () => {
+    const digest = buildRunDigest(
+      [record({ id: 'r1', issueId: 1, slug: '01-thing', outcome: 'completed', whatChanged: 'It works now.' })],
+      new Set(),
+    );
+    const msg = buildStatusSnapshotMessage(model(), digest.text);
+    expect(msg).not.toBeNull();
+    expect(msg).toContain('Done (merged): 01');
+    expect(msg).toContain('issue 01 — 01-thing');
+    expect(msg).toContain('It works now.');
+    // Status first, digest second — the digest is qualitative, never authoritative.
+    expect((msg as string).indexOf('Ground-truth status')).toBeLessThan(
+      (msg as string).indexOf('Completion-block digest'),
+    );
+  });
+
+  it('injects status alone when there is no digest (nothing new since the last ask)', () => {
+    const msg = buildStatusSnapshotMessage(model(), null);
+    expect(msg).toBe(buildStatusSnapshotMessage(model()));
+    expect(msg).not.toContain('Completion-block digest');
+  });
+
+  it('still returns null with a digest when there is no status model (no hollow injection)', () => {
+    expect(buildStatusSnapshotMessage(null, 'anything')).toBeNull();
   });
 });
