@@ -4,6 +4,7 @@ import {
   isActionable,
   isAutonomous,
   isProposal,
+  partitionActivities,
   recordActivity,
   resolveActivity,
   type DispatcherActivity,
@@ -112,5 +113,33 @@ describe('autonomous vs proposed partition', () => {
       const a: DispatcherActivity = recordActivity(`x:${action}`, action);
       expect(isAutonomous(a)).toBe(!isProposal(a));
     }
+  });
+});
+
+describe('partitionActivities (pending vs resolved for display)', () => {
+  it('puts pending proposals in `pending` and everything else in `resolved`', () => {
+    const acts: DispatcherActivity[] = [
+      recordActivity('synth:1', 'synthesize'), // auto → taken → resolved
+      recordActivity('merge:1', 'merge'), // pending
+      resolveActivity(recordActivity('merge:2', 'merge'), 'approved'), // approved → resolved
+      recordActivity('abort:1', 'abort-drain'), // pending
+      resolveActivity(recordActivity('merge:3', 'merge'), 'rejected'), // rejected → resolved
+    ];
+    const { pending, resolved } = partitionActivities(acts);
+    expect(pending.map((a) => a.id)).toEqual(['merge:1', 'abort:1']);
+    expect(resolved.map((a) => a.id)).toEqual(['synth:1', 'merge:2', 'merge:3']);
+  });
+
+  it('preserves arrival order within each group', () => {
+    const acts: DispatcherActivity[] = [
+      recordActivity('m:a', 'merge'),
+      recordActivity('m:b', 'merge'),
+      recordActivity('m:c', 'merge'),
+    ];
+    expect(partitionActivities(acts).pending.map((a) => a.id)).toEqual(['m:a', 'm:b', 'm:c']);
+  });
+
+  it('handles an empty list', () => {
+    expect(partitionActivities([])).toEqual({ pending: [], resolved: [] });
   });
 });

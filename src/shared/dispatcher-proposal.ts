@@ -122,3 +122,28 @@ export function isAutonomous(activity: DispatcherActivity): boolean {
 export function isActionable(activity: DispatcherActivity): boolean {
   return activity.status === 'pending';
 }
+
+/**
+ * The two display groups the panel renders separately (issue 44): `pending`
+ * proposals still awaiting the human's approve/reject verdict, and everything
+ * else (`resolved` — autonomous notes the Dispatcher took on its own, plus
+ * already-approved/rejected proposals). Splitting them lets the UI keep pending
+ * action items prominent and always reachable while the resolved log scrolls
+ * within a small bounded height, so a new autonomous note can't progressively
+ * shrink the chat. Order within each group is preserved (arrival order).
+ */
+export interface ActivityGroups {
+  pending: DispatcherActivity[];
+  resolved: DispatcherActivity[];
+}
+
+/** Partition activities into pending proposals vs everything already resolved. */
+export function partitionActivities(activities: DispatcherActivity[]): ActivityGroups {
+  const pending: DispatcherActivity[] = [];
+  const resolved: DispatcherActivity[] = [];
+  for (const a of activities) {
+    if (a.status === 'pending') pending.push(a);
+    else resolved.push(a);
+  }
+  return { pending, resolved };
+}

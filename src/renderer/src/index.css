@@ -155,13 +155,47 @@ body {
 }
 
 .dispatcher {
-  flex: 0 0 360px;
+  /* Default flex-basis when no persisted width is applied; the inline style set
+     by the draggable divider (issue 44) overrides this with the chosen width. */
+  flex: 0 0 380px;
   min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  border-left: 1px solid #1c2530;
   background: #0b0f14;
+}
+
+/* The draggable divider between the Map and the Dispatcher rail (issue 44). A
+   thin bar with a col-resize cursor and a wider invisible hit area, so it's easy
+   to grab without stealing much width from the Map. */
+.dispatcher-resizer {
+  flex: 0 0 6px;
+  align-self: stretch;
+  cursor: col-resize;
+  background: #1c2530;
+  position: relative;
+  touch-action: none;
+}
+
+.dispatcher-resizer::before {
+  /* Widen the hit target beyond the visible 6px bar. */
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  right: -3px;
+}
+
+.dispatcher-resizer:hover {
+  background: #2b6cb0;
+}
+
+/* While dragging the divider, suppress text selection and force the resize
+   cursor everywhere so the drag reads cleanly even off the thin handle. */
+body.is-col-resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .dispatcher__head {
@@ -215,12 +249,35 @@ body {
 
 /* ---- Dispatcher activity + approval strip (issue 36, ADR-0007) ---- */
 
+/* The activity/approval strip (issue 44): bounded to a small, FIXED height so a
+   new note/proposal scrolls within its own area instead of growing toward ~half
+   the panel and shrinking the chat each time. The chat stays the dominant,
+   stable region. Pending proposals and the resolved log are each bounded and
+   scroll independently. */
 .dispatcher__activities {
   flex: 0 0 auto;
-  max-height: 45%;
-  overflow-y: auto;
   border-bottom: 1px solid #1c2530;
   padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Pending proposals (action items): kept prominent and reachable, bounded to a
+   few rows that scroll — the "N awaiting approval" head above stays visible so
+   they're never lost below a fold with no indicator. */
+.dispatcher__pending {
+  flex: 0 0 auto;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+/* The resolved log (autonomous notes + approved/rejected proposals): a small
+   scrollable window, so accumulating history never eats the chat. */
+.dispatcher__activity-log {
+  flex: 0 0 auto;
+  max-height: 96px;
+  overflow-y: auto;
 }
 
 .dispatcher__activities-head {

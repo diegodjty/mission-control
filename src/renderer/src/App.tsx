@@ -71,6 +71,24 @@ import {
   mergeThrewDisplay,
   type MergeDisplay,
 } from '../../shared/merge-display';
+import {
+  clampDispatcherWidth,
+  dispatcherWidthFromPointer,
+  DEFAULT_DISPATCHER_WIDTH,
+} from '../../shared/dispatcher-width';
+
+/** localStorage key for the app-wide persisted Dispatcher rail width (issue 44). */
+const DISPATCHER_WIDTH_KEY = 'mc.dispatcherWidth';
+
+/** Read the persisted rail width, clamped; falls back to the default when unset. */
+function loadDispatcherWidth(): number {
+  try {
+    const raw = window.localStorage.getItem(DISPATCHER_WIDTH_KEY);
+    return raw === null ? DEFAULT_DISPATCHER_WIDTH : clampDispatcherWidth(Number.parseFloat(raw));
+  } catch {
+    return DEFAULT_DISPATCHER_WIDTH;
+  }
+}
 
 /** The `NN-slug` for a Run, from its issue file name (`NN-slug.md`). */
 function slugOf(fileName: string): string {
@@ -229,6 +247,11 @@ export function App(): JSX.Element {
     sessionId: string | null;
   } | null>(null);
   const dispatcherFed = useRef<Set<string>>(new Set<string>());
+  // The Dispatcher rail's width (issue 44): user-adjustable by dragging the
+  // divider between the Map and the panel, within a sensible min/max, persisted
+  // app-wide so it survives closing/reopening the panel and the app. Changing it
+  // resizes the chat Pane, whose ResizeObserver (issue 12) reflows the terminal.
+  const [dispatcherWidth, setDispatcherWidth] = useState<number>(loadDispatcherWidth);
   // Serialized submit queue for the Dispatcher feed (issue 41). Each Completion
   // block is TYPED then SUBMITTED with a separate Enter write; the queue drains
   // one block fully (type → settle → submit → settle) before starting the next,
@@ -1240,6 +1263,46 @@ export function App(): JSX.Element {
     statusRefreshSig.current = null;
   }, []);
 
+  // Drag the divider between the Map and the Dispatcher rail to resize it (issue
+  // 44). We capture the width and pointer x at drag start, then follow the
+  // pointer via window listeners (so the drag keeps tracking even if the cursor
+  // leaves the thin handle). The pure `dispatcherWidthFromPointer` does the math
+  // and clamps to the min/max; the chosen width is persisted app-wide on release
+  // so it survives closing/reopening the panel and restarts. The chat Pane
+  // reflows automatically — its ResizeObserver (issue 12) refits the terminal as
+  // the rail's width changes.
+  const startDispatcherResize = useCallback(
+    (e: React.PointerEvent): void => {
+      e.preventDefault();
+      const startClientX = e.clientX;
+      const startWidth = dispatcherWidth;
+      const onMove = (ev: PointerEvent): void => {
+        setDispatcherWidth(
+          dispatcherWidthFromPointer({ startWidth, startClientX, clientX: ev.clientX }),
+        );
+      };
+      const onUp = (ev: PointerEvent): void => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        document.body.classList.remove('is-col-resizing');
+        const finalWidth = dispatcherWidthFromPointer({
+          startWidth,
+          startClientX,
+          clientX: ev.clientX,
+        });
+        try {
+          window.localStorage.setItem(DISPATCHER_WIDTH_KEY, String(finalWidth));
+        } catch {
+          // Persistence is best-effort; the live width still applies this session.
+        }
+      };
+      document.body.classList.add('is-col-resizing');
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+    },
+    [dispatcherWidth],
+  );
+
   // Keep the App's backlog copy fresh from every Map load/live-change so the
   // Coordinator plans against current disk truth.
   const handleBacklogLoaded = useCallback(
@@ -1617,15 +1680,28 @@ export function App(): JSX.Element {
               instead of watching every worker Pane; ask "what's left?" and it
               answers from the Completion blocks / Run log. Dismissable. */}
           {dispatcher && (
-            <DispatcherPanel
-              target={dispatcher.target}
-              onSession={handleDispatcherSession}
-              onDismiss={dismissDispatcher}
-              ingestedCount={runLog.filter((r) => r.outcome !== 'unknown').length}
-              activities={dispatcherActivities}
-              onApprove={approveProposal}
-              onReject={rejectProposal}
-            />
+            <>
+              {/* Draggable divider between the Map and the Dispatcher rail
+                  (issue 44): drag to resize; the chat Pane reflows to fit. */}
+              <div
+                className="dispatcher-resizer"
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="Resize the Dispatcher panel"
+                title="Drag to resize the Dispatcher panel"
+                onPointerDown={startDispatcherResize}
+              />
+              <DispatcherPanel
+                target={dispatcher.target}
+                onSession={handleDispatcherSession}
+                onDismiss={dismissDispatcher}
+                ingestedCount={runLog.filter((r) => r.outcome !== 'unknown').length}
+                activities={dispatcherActivities}
+                onApprove={approveProposal}
+                onReject={rejectProposal}
+                width={dispatcherWidth}
+              />
+            </>
           )}
         </div>
 

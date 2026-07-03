@@ -1,6 +1,9 @@
 import { Pane } from './Pane';
 import type { DispatcherTarget } from '../../shared/ipc-contract';
-import type { DispatcherActivity } from '../../shared/dispatcher-proposal';
+import {
+  partitionActivities,
+  type DispatcherActivity,
+} from '../../shared/dispatcher-proposal';
 
 interface DispatcherPanelProps {
   /** The Project this Dispatcher orchestrates a drain for. */
@@ -22,6 +25,13 @@ interface DispatcherPanelProps {
   onApprove?: (id: string) => void;
   /** Reject a pending proposal — it's dropped and the Dispatcher continues. */
   onReject?: (id: string) => void;
+  /**
+   * The panel's current width in pixels (issue 44), driven by the draggable
+   * divider in the parent and persisted there. Applied as the flex-basis of the
+   * rail; changing it resizes the chat Pane, whose ResizeObserver (issue 12)
+   * reflows the terminal to fit. Falls back to the CSS default when unset.
+   */
+  width?: number;
 }
 
 /**
@@ -118,12 +128,21 @@ export function DispatcherPanel({
   activities,
   onApprove,
   onReject,
+  width,
 }: DispatcherPanelProps): JSX.Element {
   const acts = activities ?? [];
-  const pendingCount = acts.filter((a) => a.status === 'pending').length;
+  // Split pending proposals (action items) from everything already resolved
+  // (issue 44): pending stay prominent and reachable, while the resolved log
+  // scrolls within a small bounded height so a new autonomous note can never
+  // progressively shrink the chat terminal.
+  const { pending, resolved } = partitionActivities(acts);
+  const pendingCount = pending.length;
 
   return (
-    <div className="dispatcher">
+    <div
+      className="dispatcher"
+      style={width !== undefined ? { flex: `0 0 ${width}px`, width } : undefined}
+    >
       <div className="dispatcher__head">
         <span className="dispatcher__title">Dispatcher</span>
         <span className="dispatcher__meta">
@@ -144,20 +163,36 @@ export function DispatcherPanel({
       {acts.length > 0 && (
         <div className="dispatcher__activities" role="log" aria-label="Dispatcher actions">
           {pendingCount > 0 && (
-            <div className="dispatcher__activities-head">
-              {pendingCount} action{pendingCount === 1 ? '' : 's'} awaiting your approval
+            <div className="dispatcher__pending">
+              {/* Always-visible count so pending actions aren't missed even when
+                  the proposals list scrolls within its bounded area. */}
+              <div className="dispatcher__activities-head">
+                {pendingCount} action{pendingCount === 1 ? '' : 's'} awaiting your approval
+              </div>
+              <ul className="dispatcher__activity-list dispatcher__activity-list--pending">
+                {pending.map((a) => (
+                  <ActivityRow
+                    key={a.id}
+                    activity={a}
+                    onApprove={onApprove}
+                    onReject={onReject}
+                  />
+                ))}
+              </ul>
             </div>
           )}
-          <ul className="dispatcher__activity-list">
-            {acts.map((a) => (
-              <ActivityRow
-                key={a.id}
-                activity={a}
-                onApprove={onApprove}
-                onReject={onReject}
-              />
-            ))}
-          </ul>
+          {resolved.length > 0 && (
+            <ul className="dispatcher__activity-list dispatcher__activity-log">
+              {resolved.map((a) => (
+                <ActivityRow
+                  key={a.id}
+                  activity={a}
+                  onApprove={onApprove}
+                  onReject={onReject}
+                />
+              ))}
+            </ul>
+          )}
         </div>
       )}
       <div className="dispatcher__body">
