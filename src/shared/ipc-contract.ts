@@ -33,6 +33,13 @@ export const IpcChannel = {
    * Pane. Resolves to an AfkScanResult.
    */
   AfkScan: 'afk:scan',
+  /**
+   * renderer → main (invoke): discard a STRANDED isolated Run (issue 22) —
+   * force-remove its worktree and delete its `afk/NN-slug` branch — so a
+   * blocked/stopped/commit-failed Run that can never merge stops blocking the
+   * batch. Resolves to an AfkDiscardResult.
+   */
+  AfkDiscard: 'afk:discard',
   /** renderer → main (invoke): spawn a PTY, resolves to a SpawnResult. */
   PtySpawn: 'pty:spawn',
   /** renderer → main (send): write user keystrokes into a PTY. */
@@ -207,6 +214,12 @@ export interface IssueStatusObserveRequest {
 export interface IssueStatusObserveResult {
   /** The issue's status as observed in the Run's worktree/branch, or null. */
   status: IssueStatus | null;
+  /**
+   * The auto-commit failure message when a finished Run's commit could not be
+   * made (issue 22, corr-5), else null. Surfaced so the UI can show a distinct
+   * "commit failed" state instead of the Run reading "running" forever.
+   */
+  commitError: string | null;
 }
 
 export interface AfkScanRequest {
@@ -217,6 +230,20 @@ export interface AfkScanRequest {
 export interface AfkScanResult {
   /** On-disk facts per `afk/NN-slug` branch, ascending by issue id (issue 16). */
   branches: AfkBranchFacts[];
+}
+
+export interface AfkDiscardRequest {
+  /** The Project repo path (`main` checkout); the worktree base derives from it. */
+  projectPath: string;
+  /** The `NN-slug` of the stranded Run whose worktree + `afk/` branch to discard. */
+  slug: string;
+}
+
+export interface AfkDiscardResult {
+  /** True when the worktree + branch were discarded (or were already gone). */
+  ok: boolean;
+  /** A human-readable error when the discard failed, else null. */
+  error: string | null;
 }
 
 export interface IsolationApplyRequest {
@@ -361,6 +388,11 @@ export interface MissionControlApi {
    * closing every Pane.
    */
   scanAfkRuns(req: AfkScanRequest): Promise<AfkScanResult>;
+  /**
+   * Discard a stranded isolated Run (issue 22): force-remove its worktree and
+   * delete its `afk/NN-slug` branch so it stops blocking the batch.
+   */
+  discardAfkRun(req: AfkDiscardRequest): Promise<AfkDiscardResult>;
   /**
    * Reconcile isolation for the current active Run set and get each Run's
    * resolved cwd (worktree in parallel mode, `main` when solo).

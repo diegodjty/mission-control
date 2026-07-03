@@ -240,6 +240,37 @@ body {
   background: #1c1528;
 }
 
+/* Stranded / commit-failed isolated Runs (issue 22): amber-red "needs
+   attention", distinct from the plain terminal states and from mergeable work. */
+.run-status--stranded,
+.run-badge--stranded {
+  color: #e0b155;
+  border-color: #7a5a23;
+  background: #241c0f;
+}
+
+.run-status--commit-failed,
+.run-badge--commit-failed {
+  color: #f0a0a0;
+  border-color: #7a3a3a;
+  background: #2a1518;
+}
+
+.run-discard {
+  background: #241c0f;
+  color: #e0b155;
+  border: 1px solid #7a5a23;
+  border-radius: 6px;
+  padding: 3px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.run-discard--tile {
+  padding: 1px 8px;
+  font-size: 11px;
+}
+
 .pane {
   flex: 1 1 auto;
   min-height: 0;
@@ -372,6 +403,44 @@ body {
   border-bottom: 1px solid #1c2530;
   background: #0c1219;
   flex: 0 0 auto;
+}
+
+/* Stranded-Runs cleanup bar (issue 22): lists blocked/stopped/commit-failed
+   Runs that can't merge, each with a Discard action, so the batch can proceed. */
+.map__strandedbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 7px 14px;
+  border-bottom: 1px solid #241c0f;
+  background: #14100a;
+  flex: 0 0 auto;
+}
+
+.map__stranded-label {
+  font-size: 11px;
+  color: #e0b155;
+}
+
+.map__stranded-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.map__discard {
+  background: #241c0f;
+  color: #e0b155;
+  border: 1px solid #7a5a23;
+  border-radius: 6px;
+  padding: 3px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.map__discard--detail {
+  margin-left: 6px;
 }
 
 .map__mergebar-row {

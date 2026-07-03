@@ -96,9 +96,21 @@ describe('hasInFlightRun', () => {
     expect(hasInFlightRun(7, { finishedUnmergedIds: [7] })).toBe(true);
   });
 
-  it('is false for an id not in either on-disk set', () => {
+  it('is true when the id is stranded or commit-failed on disk (issue 22)', () => {
+    // A stranded/commit-failed Run still has a worktree + branch on disk, so a
+    // fresh Run would collide — it must block a new Run just like a live one.
+    expect(hasInFlightRun(8, { strandedIds: [8] })).toBe(true);
+    expect(hasInFlightRun(9, { commitFailedIds: [9] })).toBe(true);
+  });
+
+  it('is false for an id not in any on-disk set', () => {
     expect(
-      hasInFlightRun(3, { worktreeRunningIds: [4], finishedUnmergedIds: [7] }),
+      hasInFlightRun(3, {
+        worktreeRunningIds: [4],
+        finishedUnmergedIds: [7],
+        strandedIds: [8],
+        commitFailedIds: [9],
+      }),
     ).toBe(false);
   });
 });

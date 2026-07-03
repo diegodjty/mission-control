@@ -71,7 +71,7 @@ describe('readIsolatedIssueStatus — completion observed from the worktree/bran
     expect(mainBacklog.issues.find((i) => i.id === 4)?.status).toBe('wip');
 
     // But observing the worktree/branch sees the flip.
-    expect(await readIsolatedIssueStatus(repo, SLUG)).toBe('done');
+    expect((await readIsolatedIssueStatus(repo, SLUG)).status).toBe('done');
   });
 
   it('falls back to the committed branch copy when the worktree dir is gone', async () => {
@@ -82,11 +82,11 @@ describe('readIsolatedIssueStatus — completion observed from the worktree/bran
     // Remove the worktree dir (keeps the afk/ branch) — the branch still holds done.
     await git(repo, 'worktree', 'remove', wt);
 
-    expect(await readIsolatedIssueStatus(repo, SLUG)).toBe('done');
+    expect((await readIsolatedIssueStatus(repo, SLUG)).status).toBe('done');
   });
 
   it('returns null when nothing about the slug is observable', async () => {
-    expect(await readIsolatedIssueStatus(repo, 'no-such-99-slug')).toBeNull();
+    expect((await readIsolatedIssueStatus(repo, 'no-such-99-slug')).status).toBeNull();
   });
 
   it('the observed done makes the Run finished and thus mergeable (full seam)', async () => {
@@ -94,7 +94,7 @@ describe('readIsolatedIssueStatus — completion observed from the worktree/bran
     await writeFile(join(wt, ISSUE_PATH), issueFile('done'));
 
     // 1. Observe from the worktree, choosing the isolated source (pure selector).
-    const worktreeStatus = await readIsolatedIssueStatus(repo, SLUG);
+    const worktreeStatus = (await readIsolatedIssueStatus(repo, SLUG)).status;
     const issueStatus = observedIssueStatus({
       isolated: true,
       mainStatus: 'wip', // main-checkout watcher never saw the flip

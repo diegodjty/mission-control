@@ -58,12 +58,22 @@ export function eligibleForRun(
 export interface InFlightRuns {
   worktreeRunningIds?: readonly number[];
   finishedUnmergedIds?: readonly number[];
+  /**
+   * Issue ids whose isolated Run has ended without merging but whose worktree +
+   * `afk/` branch are still ON DISK (issue 22): `stranded` (blocked/stopped/
+   * exited) or `commit-failed`. A fresh Run on these would collide with the
+   * existing worktree dir / branch, so they block a new Run exactly as a live
+   * one does — the user discards or resolves them first.
+   */
+  strandedIds?: readonly number[];
+  commitFailedIds?: readonly number[];
 }
 
 /**
- * True when `issueId` already has a live or finished-unmerged isolated Run on an
- * `afk/` branch. Starting a second Run on it would re-attach a worktree to the
- * committed branch (clobbering finished work) or push commits onto a branch a
+ * True when `issueId` already has an isolated Run whose worktree/branch is still
+ * on disk — live (`worktreeRunningIds`), finished-unmerged, stranded, or
+ * commit-failed. Starting a second Run on any of these would re-attach a worktree
+ * to the existing branch (clobbering its work) or push commits onto a branch a
  * pending Merge is about to integrate — so this is the guard the guidance
  * banner, the Run button, and `startRun` all consult.
  */
@@ -73,7 +83,9 @@ export function hasInFlightRun(
 ): boolean {
   return (
     (inFlight.worktreeRunningIds ?? []).includes(issueId) ||
-    (inFlight.finishedUnmergedIds ?? []).includes(issueId)
+    (inFlight.finishedUnmergedIds ?? []).includes(issueId) ||
+    (inFlight.strandedIds ?? []).includes(issueId) ||
+    (inFlight.commitFailedIds ?? []).includes(issueId)
   );
 }
 

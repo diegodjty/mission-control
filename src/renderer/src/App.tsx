@@ -189,6 +189,14 @@ export function App(): JSX.Element {
     Record<number, IssueStatus | null>
   >({});
 
+  // The auto-commit failure (if any) observed for each isolated Run, keyed by
+  // issue id (issue 22, corr-5). A finished Run whose commit failed shows a
+  // distinct "commit failed" state carrying this message — the failure is
+  // surfaced, not swallowed. Null/absent means no failure seen.
+  const [worktreeCommitErrors, setWorktreeCommitErrors] = useState<
+    Record<number, string | null>
+  >({});
+
   // --- On-disk afk/ scan (issue 16) ----------------------------------------
   // The ground truth for which issues have an in-flight or finished-but-unmerged
   // isolated Run lives in the Project's `afk/NN-slug` worktrees + committed
@@ -248,6 +256,11 @@ export function App(): JSX.Element {
             setWorktreeStatuses((prev) =>
               prev[issueId] === res.status ? prev : { ...prev, [issueId]: res.status },
             );
+            setWorktreeCommitErrors((prev) =>
+              prev[issueId] === res.commitError
+                ? prev
+                : { ...prev, [issueId]: res.commitError },
+            );
           })
           .catch(() => {
             // A transient read/git error just means "not observed this tick";
@@ -289,19 +302,40 @@ export function App(): JSX.Element {
     };
   }, [projectPath]);
 
-  // Pure derivations from the on-disk scan: which issues show `running` /
-  // `finished (unmerged)` on the Map, and whether the Merge is offered (from
-  // disk, so it survives closing Panes).
-  // Memoized so their identity only changes when the on-disk scan does — this
-  // keeps `startRun` (which now consults them to refuse a duplicate) from being
+  // The issue ids whose Run session is currently LIVE (still `running`) in this
+  // Window. This is the fact the on-disk scan can't supply on its own and the
+  // reason a blocked/stopped Run used to read `running` forever (issue 22): a
+  // worktree with no `done` commit is only `running` while a live session drives
+  // it — otherwise it is `stranded`. Fed to the pure scan derivations below.
+  const liveRunIssueIds = useMemo(
+    () => runs.filter((r) => runStatusOf(r) === 'running').map((r) => r.target.issueId),
+    [runs, runStatusOf],
+  );
+
+  // Pure derivations from the on-disk scan + the live-Run set: which issues show
+  // `running` / `stranded` / `commit failed` / `finished (unmerged)` on the Map,
+  // and whether the Merge is offered (from disk, so it survives closing Panes).
+  // Memoized so their identity only changes when the scan or live set does — this
+  // keeps `startRun` (which consults them to refuse a duplicate) from being
   // rebuilt on every unrelated render.
-  const worktreeRunStates = useMemo(() => deriveWorktreeRunStates(afkScan), [afkScan]);
+  const worktreeRunStates = useMemo(
+    () => deriveWorktreeRunStates(afkScan, liveRunIssueIds),
+    [afkScan, liveRunIssueIds],
+  );
   const worktreeRunningIds = useMemo(
     () => worktreeRunStates.filter((s) => s.kind === 'running').map((s) => s.issueId),
     [worktreeRunStates],
   );
   const finishedUnmergedIds = useMemo(
     () => worktreeRunStates.filter((s) => s.kind === 'finished-unmerged').map((s) => s.issueId),
+    [worktreeRunStates],
+  );
+  const strandedIds = useMemo(
+    () => worktreeRunStates.filter((s) => s.kind === 'stranded').map((s) => s.issueId),
+    [worktreeRunStates],
+  );
+  const commitFailedIds = useMemo(
+    () => worktreeRunStates.filter((s) => s.kind === 'commit-failed').map((s) => s.issueId),
     [worktreeRunStates],
   );
 
@@ -339,7 +373,12 @@ export function App(): JSX.Element {
       // for any other caller. (A still-tracked Run just gets surfaced below.)
       if (
         !tracked &&
-        hasInFlightRun(target.issueId, { worktreeRunningIds, finishedUnmergedIds })
+        hasInFlightRun(target.issueId, {
+          worktreeRunningIds,
+          finishedUnmergedIds,
+          strandedIds,
+          commitFailedIds,
+        })
       ) {
         return;
       }
@@ -354,6 +393,12 @@ export function App(): JSX.Element {
       // a previous Run of the same id, so this Run isn't shown `finished` until
       // its own work actually reaches `done` on disk (issue 21).
       setWorktreeStatuses((prev) => {
+        if (!(target.issueId in prev)) return prev;
+        const next = { ...prev };
+        delete next[target.issueId];
+        return next;
+      });
+      setWorktreeCommitErrors((prev) => {
         if (!(target.issueId in prev)) return prev;
         const next = { ...prev };
         delete next[target.issueId];
@@ -420,7 +465,15 @@ export function App(): JSX.Element {
           );
         });
     },
-    [runs, projectPath, needsIsolation, worktreeRunningIds, finishedUnmergedIds],
+    [
+      runs,
+      projectPath,
+      needsIsolation,
+      worktreeRunningIds,
+      finishedUnmergedIds,
+      strandedIds,
+      commitFailedIds,
+    ],
   );
 
   const stopRun = useCallback((issueId: number): void => {
@@ -446,15 +499,71 @@ export function App(): JSX.Element {
     setRuns((prev) => prev.filter((r) => r.target.issueId !== issueId));
     setMaximizedId((cur) => (cur === issueId ? null : cur));
     setFocusedId((cur) => (cur === issueId ? null : cur));
-    // Drop this Run's observed worktree status so a later Run of the same id
-    // doesn't inherit a stale `finished` (issue 21).
+    // Drop this Run's observed worktree status + commit error so a later Run of
+    // the same id doesn't inherit a stale `finished`/`commit failed` (issue 21/22).
     setWorktreeStatuses((prev) => {
       if (!(issueId in prev)) return prev;
       const next = { ...prev };
       delete next[issueId];
       return next;
     });
+    setWorktreeCommitErrors((prev) => {
+      if (!(issueId in prev)) return prev;
+      const next = { ...prev };
+      delete next[issueId];
+      return next;
+    });
   }, []);
+
+  // Discard a STRANDED / commit-failed isolated Run (issue 22): force-remove its
+  // worktree and delete its `afk/` branch so it stops blocking the batch. Drops
+  // it from tracking and refreshes the on-disk scan so the Map/Merge update at
+  // once (rather than waiting for the next poll tick). Human-triggered only.
+  const discardRun = useCallback(
+    (issueId: number, slug: string): void => {
+      if (projectPath === null) return;
+      const label = String(issueId).padStart(2, '0');
+      void window.mc
+        .discardAfkRun({ projectPath, slug })
+        .then((res) => {
+          if (!res.ok) {
+            window.alert(
+              `Could not discard the worktree for issue ${label}: ${res.error ?? 'unknown error'}`,
+            );
+            return;
+          }
+          setRuns((prev) => prev.filter((r) => r.target.issueId !== issueId));
+          setMaximizedId((cur) => (cur === issueId ? null : cur));
+          setFocusedId((cur) => (cur === issueId ? null : cur));
+          setWorktreeStatuses((prev) => {
+            if (!(issueId in prev)) return prev;
+            const next = { ...prev };
+            delete next[issueId];
+            return next;
+          });
+          setWorktreeCommitErrors((prev) => {
+            if (!(issueId in prev)) return prev;
+            const next = { ...prev };
+            delete next[issueId];
+            return next;
+          });
+          // Refresh the scan immediately so the discarded Run's row/Merge clears.
+          void window.mc
+            .scanAfkRuns({ projectPath })
+            .then((r) => setAfkScan(r.branches))
+            .catch(() => {
+              // The 1.5s poll will pick it up regardless.
+            });
+        })
+        .catch((err: unknown) => {
+          window.alert(
+            `Could not discard the worktree for issue ${label}: ` +
+              (err instanceof Error ? err.message : String(err)),
+          );
+        });
+    },
+    [projectPath],
+  );
 
   const handleRunExit = useCallback((issueId: number): void => {
     setRuns((prev) =>
@@ -580,7 +689,7 @@ export function App(): JSX.Element {
   // the affordance survives closing every Pane (issue 16). It appears once every
   // isolated Run's branch is committed-done (issue 15) and none is still in
   // flight, and never triggers on its own (ADR-0002).
-  const mergePlan = mergeReadinessOnDisk(afkScan);
+  const mergePlan = mergeReadinessOnDisk(afkScan, liveRunIssueIds);
 
   const runMerge = useCallback((): void => {
     if (projectPath === null || merging) return;
@@ -609,6 +718,12 @@ export function App(): JSX.Element {
           // of those ids for a later Run doesn't inherit a stale `finished`
           // (issue 21).
           setWorktreeStatuses((prev) => {
+            if (![...mergedIds].some((id) => id in prev)) return prev;
+            const next = { ...prev };
+            for (const id of mergedIds) delete next[id];
+            return next;
+          });
+          setWorktreeCommitErrors((prev) => {
             if (![...mergedIds].some((id) => id in prev)) return prev;
             const next = { ...prev };
             for (const id of mergedIds) delete next[id];
@@ -695,6 +810,9 @@ export function App(): JSX.Element {
             activeRunIssueIds={activeRunIssueIds}
             worktreeRunningIds={worktreeRunningIds}
             finishedUnmergedIds={finishedUnmergedIds}
+            strandedIds={strandedIds}
+            commitFailedIds={commitFailedIds}
+            onDiscard={(slug, issueId) => discardRun(issueId, slug)}
             onDrain={startDrain}
             onStopDrain={stopDrain}
             draining={draining}
@@ -730,26 +848,45 @@ export function App(): JSX.Element {
           >
             {runs.map((r) => {
               const status = runStatusOf(r);
-              // A finished isolated Run whose branch is committed but not yet
-              // merged (issue 15/16): dismissing it hides mergeable work, so warn
-              // first. Cross-check the on-disk scan as well as the in-memory
-              // status so a Run committed off-screen still triggers the warning.
-              const unmergedWork =
-                (status === 'finished' && isIsolated(r)) ||
-                finishedUnmergedIds.includes(r.target.issueId);
+              const id = r.target.issueId;
+              const slug = slugOf(r.target.issueFileName);
+              const isStranded = strandedIds.includes(id);
+              const isCommitFailed = commitFailedIds.includes(id);
+              const isFinishedUnmerged =
+                (status === 'finished' && isIsolated(r)) || finishedUnmergedIds.includes(id);
+              // Any isolated Run whose worktree/branch still holds work — finished-
+              // but-unmerged (committed), stranded, or commit-failed (uncommitted) —
+              // has work that dismissing would hide, so warn first (issue 22, corr).
+              // Previously only `finished` warned. Cross-checks the on-disk scan so a
+              // Run whose state landed off-screen still triggers it.
+              const worktreeWork = isFinishedUnmerged || isStranded || isCommitFailed;
+              // Stranded / commit-failed Runs can never merge as-is: offer to
+              // discard (force-remove the worktree + delete the branch) so the
+              // batch can proceed (issue 22).
+              const discardable = isStranded || isCommitFailed;
+              const commitError = worktreeCommitErrors[id] ?? null;
               const requestDismiss = (): void => {
+                const message = isFinishedUnmerged
+                  ? `Issue ${String(id).padStart(2, '0')} has finished work on branch afk/${slug} ` +
+                    `that hasn't been merged into main yet.\n\nDismiss it anyway? The branch stays ` +
+                    `on disk and you can still Merge it from the Map.`
+                  : `Issue ${String(id).padStart(2, '0')} has unmerged work in its worktree on ` +
+                    `branch afk/${slug}.\n\nDismiss it anyway? Dismissing only hides it here — the ` +
+                    `worktree stays on disk. Use Discard to remove the worktree and branch.`;
+                if (worktreeWork && !window.confirm(message)) return;
+                dismissRun(id);
+              };
+              const requestDiscard = (): void => {
                 if (
-                  unmergedWork &&
-                  !window.confirm(
-                    `Issue ${String(r.target.issueId).padStart(2, '0')} has finished work on ` +
-                      `branch afk/${slugOf(r.target.issueFileName)} that hasn't been merged into ` +
-                      `main yet.\n\nDismiss it anyway? The branch stays on disk and you can still ` +
-                      `Merge it from the Map.`,
+                  window.confirm(
+                    `Discard issue ${String(id).padStart(2, '0')}'s worktree and branch afk/${slug}?` +
+                      `\n\nThis force-removes the worktree (uncommitted work is lost) and deletes ` +
+                      `the branch. Use this to clear a blocked/stopped/commit-failed Run so the ` +
+                      `batch can proceed.`,
                   )
                 ) {
-                  return;
+                  discardRun(id, slug);
                 }
-                dismissRun(r.target.issueId);
               };
               const isMax = maximizedRun?.target.issueId === r.target.issueId;
               const hidden = maximizedRun !== null && !isMax;
@@ -765,6 +902,26 @@ export function App(): JSX.Element {
                     title={isMax ? 'Click to restore the grid' : 'Click to maximize'}
                   >
                     <span className={`run-status run-status--${status}`}>{status}</span>
+                    {isCommitFailed && (
+                      <span
+                        className="run-status run-status--commit-failed"
+                        title={
+                          commitError
+                            ? `Auto-commit failed: ${commitError}`
+                            : 'The Run finished but its work could not be committed to the afk/ branch'
+                        }
+                      >
+                        commit failed
+                      </span>
+                    )}
+                    {isStranded && (
+                      <span
+                        className="run-status run-status--stranded"
+                        title="This Run ended without committing done; its worktree is stranded"
+                      >
+                        stranded
+                      </span>
+                    )}
                     <span className="app__tile-id">
                       {String(r.target.issueId).padStart(2, '0')}
                     </span>
@@ -781,20 +938,34 @@ export function App(): JSX.Element {
                           Stop
                         </button>
                       ) : (
-                        <button
-                          className="app__tile-dismiss"
-                          title={
-                            unmergedWork
-                              ? 'Dismiss this Run (its branch has unmerged work)'
-                              : 'Dismiss this finished Run'
-                          }
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            requestDismiss();
-                          }}
-                        >
-                          ✕
-                        </button>
+                        <>
+                          {discardable && (
+                            <button
+                              className="run-discard run-discard--tile"
+                              title="Discard this Run's worktree and afk/ branch (force remove)"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                requestDiscard();
+                              }}
+                            >
+                              Discard
+                            </button>
+                          )}
+                          <button
+                            className="app__tile-dismiss"
+                            title={
+                              worktreeWork
+                                ? 'Dismiss this Run (its worktree/branch still has unmerged work)'
+                                : 'Dismiss this finished Run'
+                            }
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              requestDismiss();
+                            }}
+                          >
+                            ✕
+                          </button>
+                        </>
                       )}
                     </span>
                   </div>

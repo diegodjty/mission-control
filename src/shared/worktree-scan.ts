@@ -40,6 +40,16 @@ export interface AfkBranchFacts {
    */
   committedStatus: IssueStatus | null;
   /**
+   * The issue's status as seen in the worktree's WORKING TREE — where the agent's
+   * `done` flip lands BEFORE Mission Control auto-commits it (issue 15) — or null
+   * when there is no worktree / the file isn't readable. This is what tells a
+   * commit-FAILURE (the agent finished, `worktreeStatus === 'done'`, yet the
+   * `done` never reached `committedStatus`) apart from a Run still in progress
+   * (issue 22, corr-5): without it a finished-but-uncommitted Run is
+   * indistinguishable from a live one and reads `running` forever.
+   */
+  worktreeStatus: IssueStatus | null;
+  /**
    * True when the branch's tip is already an ancestor of `main` — its work is
    * integrated, so it is neither in flight nor awaiting merge. (A clean Merge
    * deletes the branch, so this mainly guards a leftover already-merged branch.)
@@ -47,8 +57,19 @@ export interface AfkBranchFacts {
   mergedIntoMain: boolean;
 }
 
-/** The Map-facing state of an isolated Run derived from its on-disk `afk/` branch. */
-export type WorktreeRunKind = 'running' | 'finished-unmerged';
+/**
+ * The Map-facing state of an isolated Run derived from its on-disk `afk/` branch:
+ *   - `running`          — a worktree with a Run session still LIVE driving it.
+ *   - `stranded`         — a worktree whose Run has ENDED (blocked/stopped/exited)
+ *                          without a `done` commit; it must be discarded or kept,
+ *                          but must NOT read `running` forever nor block Merge
+ *                          (issue 22, corr-1 / state-M3).
+ *   - `commit-failed`    — the agent finished (`done` in the worktree) but the
+ *                          auto-commit never landed on the branch (issue 22,
+ *                          corr-5); distinct from perpetual `running`.
+ *   - `finished-unmerged`— a committed `done` branch not yet merged (mergeable).
+ */
+export type WorktreeRunKind = 'running' | 'stranded' | 'commit-failed' | 'finished-unmerged';
 
 export interface WorktreeRunState {
   issueId: number;
@@ -72,32 +93,57 @@ function isFinishedUnmerged(f: AfkBranchFacts): boolean {
 }
 
 /**
- * Whether an `afk/` branch represents a live, in-flight Run: it has a worktree
- * and hasn't committed a `done` yet (the agent is still working, or stopped
- * before finishing). `mergedIntoMain` is deliberately NOT consulted here — a
- * freshly-created worktree branch has no new commits, so its tip trivially IS an
- * ancestor of `main`, which must not be mistaken for "already integrated"; that
- * flag only distinguishes a committed-`done` branch's merge state.
+ * Whether the agent FINISHED in the worktree (`worktreeStatus === 'done'`) but
+ * that `done` never reached the branch tip — i.e. the auto-commit failed or is
+ * still pending (issue 22, corr-5). Distinct from a Run in progress: the work is
+ * done, only the commit is missing, so it is neither mergeable nor "running".
  */
-function isRunning(f: AfkBranchFacts): boolean {
-  return f.hasWorktree && f.committedStatus !== 'done';
+function isCommitFailed(f: AfkBranchFacts): boolean {
+  return f.hasWorktree && f.worktreeStatus === 'done' && f.committedStatus !== 'done';
 }
 
 /**
- * Derive the per-issue Map indicator from the on-disk `afk/` branch facts:
- * `running` while a Run is live in its worktree, `finished-unmerged` once its
- * branch carries a committed `done` that isn't merged. Branches whose work is
- * already on `main` contribute nothing (the Map row shows plain on-disk status).
- * Sorted ascending by issue id for a stable render order.
+ * Classify one `afk/` branch's Map-facing state from its on-disk facts plus the
+ * set of issue ids whose Run session is currently LIVE in Mission Control.
+ *
+ * Liveness is the fact the disk alone cannot supply and the reason a
+ * blocked/stopped Run used to read `running` forever (issue 22, corr-1): a
+ * worktree with no `done` commit is `running` ONLY while a live session drives
+ * it; once that session has ended it is `stranded` — recoverable, and no longer
+ * blocking the batch Merge. `mergedIntoMain` is consulted only for a
+ * committed-`done` branch (a fresh worktree branch is trivially an ancestor of
+ * `main`, which must not read as "already integrated"). Returns null for a
+ * branch that contributes no Map indicator (already merged, or a bare branch
+ * with no worktree and nothing committed-done).
  */
-export function deriveWorktreeRunStates(facts: AfkBranchFacts[]): WorktreeRunState[] {
+export function classifyBranch(
+  f: AfkBranchFacts,
+  liveRunIssueIds: readonly number[] = [],
+): WorktreeRunKind | null {
+  if (isFinishedUnmerged(f)) return 'finished-unmerged';
+  if (f.committedStatus === 'done') return null; // committed done AND merged → integrated
+  if (isCommitFailed(f)) return 'commit-failed';
+  if (!f.hasWorktree) return null; // bare branch, nothing to show
+  return liveRunIssueIds.includes(f.issueId) ? 'running' : 'stranded';
+}
+
+/**
+ * Derive the per-issue Map indicator from the on-disk `afk/` branch facts and
+ * the live-Run set: `running` while a session is live in its worktree,
+ * `stranded` once that session has ended without a `done` commit, `commit-failed`
+ * when a finished worktree never committed, and `finished-unmerged` once its
+ * branch carries a committed `done` that isn't merged. Branches whose work is
+ * already on `main` contribute nothing. Sorted ascending by issue id for a
+ * stable render order.
+ */
+export function deriveWorktreeRunStates(
+  facts: AfkBranchFacts[],
+  liveRunIssueIds: readonly number[] = [],
+): WorktreeRunState[] {
   const states: WorktreeRunState[] = [];
   for (const f of facts) {
-    if (isFinishedUnmerged(f)) {
-      states.push({ issueId: f.issueId, slug: f.slug, kind: 'finished-unmerged' });
-    } else if (isRunning(f)) {
-      states.push({ issueId: f.issueId, slug: f.slug, kind: 'running' });
-    }
+    const kind = classifyBranch(f, liveRunIssueIds);
+    if (kind !== null) states.push({ issueId: f.issueId, slug: f.slug, kind });
   }
   return states.sort((a, b) => a.issueId - b.issueId);
 }
@@ -107,18 +153,26 @@ export function deriveWorktreeRunStates(facts: AfkBranchFacts[]): WorktreeRunSta
  * offered and which branches it would integrate — the same shape and rule as the
  * in-memory `mergeReadiness` (merge-plan), but sourced from disk so the Merge
  * affordance survives closing every Pane (issue 16). A Merge is offered once at
- * least one branch is finished-unmerged AND no isolated Run is still in flight
- * (the batch is done). Deterministic and idempotent — safe to recompute on every
- * scan.
+ * least one branch is finished-unmerged AND no isolated Run is still LIVE (the
+ * batch is done).
+ *
+ * Crucially (issue 22, corr-1 / state-M3), only genuinely-`running` branches
+ * gate the Merge: a `stranded` (blocked/stopped) or `commit-failed` branch does
+ * NOT count as "pending running", so it can no longer suppress Merge for its
+ * finished siblings indefinitely. Its work simply isn't in the mergeable set —
+ * the user discards or resolves it separately. Deterministic and idempotent.
  */
-export function mergeReadinessOnDisk(facts: AfkBranchFacts[]): MergePlan {
+export function mergeReadinessOnDisk(
+  facts: AfkBranchFacts[],
+  liveRunIssueIds: readonly number[] = [],
+): MergePlan {
   const mergeable: MergeCandidate[] = facts
     .filter(isFinishedUnmerged)
     .sort((a, b) => a.issueId - b.issueId)
     .map((f) => ({ issueId: f.issueId, slug: f.slug }));
 
   const pendingRunning = facts
-    .filter(isRunning)
+    .filter((f) => classifyBranch(f, liveRunIssueIds) === 'running')
     .map((f) => f.issueId)
     .sort((a, b) => a - b);
 

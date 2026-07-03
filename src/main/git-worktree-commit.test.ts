@@ -93,8 +93,9 @@ describe('commitFinishedWorktree — auto-commit on the done transition', () => 
     // The work is present in the working tree but not yet on the branch.
     expect(await readCommittedIssueStatus(repo, SLUG)).toBe('wip');
 
-    const committed = await commitFinishedWorktree(repo, SLUG);
-    expect(committed).toBe(true);
+    const outcome = await commitFinishedWorktree(repo, SLUG);
+    expect(outcome.committed).toBe(true);
+    expect(outcome.error).toBeNull();
 
     // The branch now carries a new commit with both the file and the done flip.
     expect(await commitCount(SLUG)).toBe(2);
@@ -108,11 +109,11 @@ describe('commitFinishedWorktree — auto-commit on the done transition', () => 
   it('is idempotent — a Run already committed is not committed again', async () => {
     const wt = await createWorktree(repo, SLUG, branchFor(SLUG));
     await simulateAgent(wt, 'done');
-    expect(await commitFinishedWorktree(repo, SLUG)).toBe(true);
+    expect((await commitFinishedWorktree(repo, SLUG)).committed).toBe(true);
     expect(await commitCount(SLUG)).toBe(2);
 
     // A second observation finds nothing to commit.
-    expect(await commitFinishedWorktree(repo, SLUG)).toBe(false);
+    expect((await commitFinishedWorktree(repo, SLUG)).committed).toBe(false);
     expect(await commitCount(SLUG)).toBe(2);
   });
 
@@ -120,7 +121,7 @@ describe('commitFinishedWorktree — auto-commit on the done transition', () => 
     const wt = await createWorktree(repo, SLUG, branchFor(SLUG));
     // The agent created a file but never reached done (blocked/stopped).
     await simulateAgent(wt, 'wip');
-    expect(await commitFinishedWorktree(repo, SLUG)).toBe(false);
+    expect((await commitFinishedWorktree(repo, SLUG)).committed).toBe(false);
     expect(await commitCount(SLUG)).toBe(1);
     expect(await readCommittedIssueStatus(repo, SLUG)).toBe('wip');
   });
@@ -133,8 +134,11 @@ describe('finished reflects the committed branch state (issue 15)', () => {
 
     // readIsolatedIssueStatus auto-commits, then reports from the committed
     // branch — so the observed status is the mergeable, committed one.
-    const worktreeStatus = await readIsolatedIssueStatus(repo, SLUG);
+    const observation = await readIsolatedIssueStatus(repo, SLUG);
+    const worktreeStatus = observation.status;
     expect(worktreeStatus).toBe('done');
+    // A clean auto-commit surfaces no error (issue 22).
+    expect(observation.commitError).toBeNull();
     // The commit really happened (detection and Merge now agree).
     expect(await commitCount(SLUG)).toBe(2);
 

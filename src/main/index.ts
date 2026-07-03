@@ -11,12 +11,19 @@ import { join } from 'node:path';
 import { PtySessionManager } from './pty-session-manager';
 import { readBacklog } from './backlog-reader';
 import { BacklogWatcher } from './backlog-watcher';
-import { applyIsolation, readIsolatedIssueStatus, scanAfkBranches } from './git-worktree-adapter';
+import {
+  applyIsolation,
+  discardWorktree,
+  readIsolatedIssueStatus,
+  scanAfkBranches,
+} from './git-worktree-adapter';
 import { mergeRuns } from './run-merge';
 import {
   IpcChannel,
   type AfkScanRequest,
   type AfkScanResult,
+  type AfkDiscardRequest,
+  type AfkDiscardResult,
   type BacklogLoadRequest,
   type BacklogLoadResult,
   type BacklogWatchRequest,
@@ -204,9 +211,8 @@ function registerIpc(): void {
   // worktree-observed status into the pure run-state selector for isolated Runs.
   ipcMain.handle(
     IpcChannel.IssueStatusObserve,
-    async (_event, req: IssueStatusObserveRequest): Promise<IssueStatusObserveResult> => ({
-      status: await readIsolatedIssueStatus(req.projectPath, req.slug),
-    }),
+    async (_event, req: IssueStatusObserveRequest): Promise<IssueStatusObserveResult> =>
+      readIsolatedIssueStatus(req.projectPath, req.slug),
   );
 
   // On-disk `afk/` scan (issue 16): the ground truth for which issues have an
@@ -218,6 +224,23 @@ function registerIpc(): void {
     async (_event, req: AfkScanRequest): Promise<AfkScanResult> => ({
       branches: await scanAfkBranches(req.projectPath),
     }),
+  );
+
+  // Discard a stranded isolated Run (issue 22): force-remove its worktree and
+  // delete its `afk/NN-slug` branch. Human-triggered only (the user clicks
+  // Discard on a stranded/commit-failed Run), so a blocked/stopped Run that can
+  // never merge stops suppressing the batch. Errors are returned, not thrown, so
+  // the renderer can show them without crashing the poll.
+  ipcMain.handle(
+    IpcChannel.AfkDiscard,
+    async (_event, req: AfkDiscardRequest): Promise<AfkDiscardResult> => {
+      try {
+        await discardWorktree(req.projectPath, req.slug);
+        return { ok: true, error: null };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    },
   );
 
   // Isolation lifecycle (ADR-0002): the Git/Worktree Adapter reconciles the

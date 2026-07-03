@@ -85,21 +85,28 @@ describe('scanAfkBranches — on-disk afk/ state (issue 16)', () => {
         slug: ALPHA,
         hasWorktree: true,
         committedStatus: 'open',
+        worktreeStatus: 'open',
         mergedIntoMain: expect.any(Boolean),
       },
     ]);
-    // A fresh worktree with no committed `done` is an in-flight Run.
-    expect(deriveWorktreeRunStates(scan)).toEqual([
+    // A fresh worktree with no committed `done` and a LIVE Run session is
+    // in-flight (issue 22: liveness, not the worktree alone, makes it running).
+    expect(deriveWorktreeRunStates(scan, [2])).toEqual([
       { issueId: 2, slug: ALPHA, kind: 'running' },
     ]);
     // No Merge while it's still in flight.
-    expect(mergeReadinessOnDisk(scan).ready).toBe(false);
+    expect(mergeReadinessOnDisk(scan, [2]).ready).toBe(false);
+    // With no live session the very same worktree reads STRANDED, not running
+    // forever (corr-1 / state-M3).
+    expect(deriveWorktreeRunStates(scan)).toEqual([
+      { issueId: 2, slug: ALPHA, kind: 'stranded' },
+    ]);
   });
 
   it('reports a committed-done, unmerged branch as finished-unmerged and mergeable', async () => {
     const wt = await createWorktree(repo, ALPHA, branchFor(ALPHA));
     await simulateFinished(wt, ALPHA, '02');
-    expect(await commitFinishedWorktree(repo, ALPHA)).toBe(true);
+    expect((await commitFinishedWorktree(repo, ALPHA)).committed).toBe(true);
 
     const scan = await scanAfkBranches(repo);
     const alpha = scan.find((b) => b.slug === ALPHA);
@@ -140,18 +147,64 @@ describe('scanAfkBranches — on-disk afk/ state (issue 16)', () => {
     const alphaWt = await createWorktree(repo, ALPHA, branchFor(ALPHA));
     await simulateFinished(alphaWt, ALPHA, '02');
     await commitFinishedWorktree(repo, ALPHA);
-    // Beta is still in flight (worktree open, nothing committed done).
+    // Beta is still in flight (worktree open, nothing committed done) and its
+    // Run session is live (issue 3).
     await createWorktree(repo, BETA, branchFor(BETA));
 
     const scan = await scanAfkBranches(repo);
-    expect(deriveWorktreeRunStates(scan)).toEqual([
+    expect(deriveWorktreeRunStates(scan, [3])).toEqual([
       { issueId: 2, slug: ALPHA, kind: 'finished-unmerged' },
       { issueId: 3, slug: BETA, kind: 'running' },
     ]);
-    const plan = mergeReadinessOnDisk(scan);
+    const plan = mergeReadinessOnDisk(scan, [3]);
     expect(plan.ready).toBe(false);
     expect(plan.mergeable.map((m) => m.issueId)).toEqual([2]);
     expect(plan.pendingRunning).toEqual([3]);
+  });
+
+  it('a stranded worktree (ended, uncommitted) does not block a finished sibling Merge (issue 22)', async () => {
+    // Alpha finished and committed → mergeable.
+    const alphaWt = await createWorktree(repo, ALPHA, branchFor(ALPHA));
+    await simulateFinished(alphaWt, ALPHA, '02');
+    await commitFinishedWorktree(repo, ALPHA);
+    // Beta has a worktree with uncommitted work but its Run has ENDED (no live
+    // session id passed) — the exact case that used to suppress Merge forever.
+    const betaWt = await createWorktree(repo, BETA, branchFor(BETA));
+    await writeFile(join(betaWt, `issues/${BETA}.md`), issueFile('03', 'beta', 'wip'));
+
+    const scan = await scanAfkBranches(repo);
+    const beta = scan.find((b) => b.slug === BETA);
+    expect(beta?.hasWorktree).toBe(true);
+    expect(beta?.committedStatus).toBe('open'); // nothing committed on the branch tip
+    expect(beta?.worktreeStatus).toBe('wip'); // working-tree edit, uncommitted
+
+    // With no live session, beta is stranded (not running) and does NOT gate Merge.
+    expect(deriveWorktreeRunStates(scan)).toEqual([
+      { issueId: 2, slug: ALPHA, kind: 'finished-unmerged' },
+      { issueId: 3, slug: BETA, kind: 'stranded' },
+    ]);
+    const plan = mergeReadinessOnDisk(scan);
+    expect(plan.ready).toBe(true);
+    expect(plan.mergeable.map((m) => m.issueId)).toEqual([2]);
+    expect(plan.pendingRunning).toEqual([]);
+  });
+
+  it('detects a commit-failed Run: worktree done, branch tip not (issue 22)', async () => {
+    // The agent finished in the worktree (done in the working tree) but the
+    // auto-commit never landed — so the branch tip still reads the pre-Run status.
+    const wt = await createWorktree(repo, ALPHA, branchFor(ALPHA));
+    await simulateFinished(wt, ALPHA, '02'); // writes done into the WORKING tree only
+
+    const scan = await scanAfkBranches(repo);
+    const alpha = scan.find((b) => b.slug === ALPHA);
+    expect(alpha?.worktreeStatus).toBe('done');
+    expect(alpha?.committedStatus).toBe('open'); // never committed
+
+    expect(deriveWorktreeRunStates(scan)).toEqual([
+      { issueId: 2, slug: ALPHA, kind: 'commit-failed' },
+    ]);
+    // A commit-failed Run isn't mergeable and doesn't block a sibling either.
+    expect(mergeReadinessOnDisk(scan).pendingRunning).toEqual([]);
   });
 
   it('excludes an afk branch already merged into main', async () => {

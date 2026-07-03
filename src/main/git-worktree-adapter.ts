@@ -154,13 +154,22 @@ export async function scanAfkBranches(projectPath: string): Promise<AfkBranchFac
   const slugs = await listAfkBranchSlugs(projectPath);
   const worktreeSlugs = new Set(await listWorktreeSlugs(projectPath));
   const facts = await Promise.all(
-    slugs.map(async (slug) => ({
-      issueId: issueIdFromSlug(slug),
-      slug,
-      hasWorktree: worktreeSlugs.has(slug),
-      committedStatus: await readCommittedIssueStatus(projectPath, slug),
-      mergedIntoMain: await isMergedIntoMain(projectPath, slug),
-    })),
+    slugs.map(async (slug) => {
+      const hasWorktree = worktreeSlugs.has(slug);
+      return {
+        issueId: issueIdFromSlug(slug),
+        slug,
+        hasWorktree,
+        committedStatus: await readCommittedIssueStatus(projectPath, slug),
+        // Only meaningful while a worktree exists — the working-tree `done` flip
+        // vs. the committed tip is what distinguishes a commit-failure from a
+        // Run in progress (issue 22). No worktree ⇒ no working tree to read.
+        worktreeStatus: hasWorktree
+          ? await readWorktreeIssueStatus(projectPath, slug)
+          : null,
+        mergedIntoMain: await isMergedIntoMain(projectPath, slug),
+      };
+    }),
   );
   return facts.sort((a, b) => a.issueId - b.issueId);
 }
@@ -210,6 +219,38 @@ export async function createWorktree(
 export async function removeWorktree(projectPath: string, slug: string): Promise<void> {
   const path = worktreePathFor(projectPath, slug);
   await git(projectPath, ['worktree', 'remove', path]);
+}
+
+/**
+ * Discard a STRANDED isolated Run (issue 22): FORCE-remove its worktree AND
+ * delete its `afk/<slug>` branch, so a blocked/stopped/commit-failed Run that
+ * can never merge stops cluttering the Map and, in solo terms, frees the batch
+ * to proceed. Unlike `removeWorktree` (a deliberate non-force keep-the-branch
+ * remove for finished work heading to Merge), this is the explicit "throw it
+ * away" the user asks for — force is required precisely because the worktree has
+ * uncommitted work and the branch is unmerged.
+ *
+ * Best-effort and idempotent per step: a missing worktree or branch is not an
+ * error (the state may have been partially cleaned already), so re-invoking is
+ * safe. `worktree prune` clears any stale admin entry left after a force remove.
+ */
+export async function discardWorktree(projectPath: string, slug: string): Promise<void> {
+  const path = worktreePathFor(projectPath, slug);
+  try {
+    await git(projectPath, ['worktree', 'remove', '--force', path]);
+  } catch {
+    // No worktree registered (already removed / never created) — carry on.
+  }
+  try {
+    await git(projectPath, ['worktree', 'prune']);
+  } catch {
+    // Pruning is housekeeping; a failure here must not block the branch delete.
+  }
+  try {
+    await git(projectPath, ['branch', '-D', branchFor(slug)]);
+  } catch {
+    // Branch already gone — the discard is still complete.
+  }
 }
 
 /** Execute a list of Isolation Policy commands against real git, in order. */
@@ -327,30 +368,47 @@ export async function readCommittedIssueStatus(
  * decides that from the worktree's working-tree status; a still-`wip`, blocked,
  * or stopped Run is left uncommitted (nothing to merge). Idempotent: a clean
  * worktree (nothing staged/untracked vs. its branch tip — e.g. a Run already
- * committed) is skipped, so re-observing never double-commits. Returns whether a
- * new commit was made. Best-effort: git failures are swallowed (the committed
- * state simply stays behind, so the Run is not yet reported finished).
+ * committed) is skipped, so re-observing never double-commits.
+ *
+ * Returns a structured outcome (issue 22, corr-5): `committed` says whether a new
+ * commit landed, and `error` carries the git failure message when the commit was
+ * ATTEMPTED and failed — instead of the old silent `false`, which made a finished
+ * Run whose commit failed indistinguishable from one still running. A caller
+ * (the isolated-status observe) surfaces that error so the UI can show a distinct
+ * "commit failed" state; the committed state genuinely stays behind either way.
  */
+export interface WorktreeCommitOutcome {
+  /** True when a new commit was made on the `afk/<slug>` branch this call. */
+  committed: boolean;
+  /** The git error when the commit was attempted and failed, else null. */
+  error: string | null;
+}
+
 export async function commitFinishedWorktree(
   projectPath: string,
   slug: string,
-): Promise<boolean> {
+): Promise<WorktreeCommitOutcome> {
   const worktreePath = worktreePathFor(projectPath, slug);
-  if (!existsSync(worktreePath)) return false;
+  if (!existsSync(worktreePath)) return { committed: false, error: null };
 
   const worktreeStatus = await readWorktreeIssueStatus(projectPath, slug);
-  if (!shouldCommitWorktree({ isolated: true, worktreeStatus })) return false;
+  if (!shouldCommitWorktree({ isolated: true, worktreeStatus })) {
+    return { committed: false, error: null };
+  }
 
   try {
     // Idempotency guard: with nothing changed vs. the branch tip there is
     // nothing to commit (a Run already committed, by MC or by hand).
     const porcelain = await git(worktreePath, ['status', '--porcelain']);
-    if (porcelain.trim().length === 0) return false;
+    if (porcelain.trim().length === 0) return { committed: false, error: null };
     await git(worktreePath, ['add', '-A']);
     await git(worktreePath, ['commit', '-m', commitMessageForRun(slug)]);
-    return true;
-  } catch {
-    return false;
+    return { committed: true, error: null };
+  } catch (err) {
+    // No longer swallowed: the finished work stays uncommitted (so the branch
+    // is not yet mergeable), and we report WHY so the Run reads "commit failed"
+    // rather than perpetually "running".
+    return { committed: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -363,14 +421,26 @@ export async function commitFinishedWorktree(
  * Merge agree: first auto-commit the worktree if the agent has finished it
  * (idempotent — see `commitFinishedWorktree`), then read the status from the
  * committed `afk/<slug>` branch. A Run therefore only shows finished once its
- * work is actually committed and thus mergeable. Returns null when the branch
- * isn't readable (nothing observed yet) — `deriveRunStatus` treats that as
- * not-done, exactly as for an unobserved main-backlog status.
+ * work is actually committed and thus mergeable. `status` is null when the
+ * branch isn't readable (nothing observed yet) — `deriveRunStatus` treats that
+ * as not-done, exactly as for an unobserved main-backlog status.
+ *
+ * `commitError` (issue 22, corr-5) carries any auto-commit failure so the
+ * renderer can surface a distinct "commit failed" state instead of the failure
+ * being swallowed and the Run reading "running" forever.
  */
+export interface IsolatedIssueObservation {
+  status: IssueStatus | null;
+  commitError: string | null;
+}
+
 export async function readIsolatedIssueStatus(
   projectPath: string,
   slug: string,
-): Promise<IssueStatus | null> {
-  await commitFinishedWorktree(projectPath, slug);
-  return readCommittedIssueStatus(projectPath, slug);
+): Promise<IsolatedIssueObservation> {
+  const { error } = await commitFinishedWorktree(projectPath, slug);
+  return {
+    status: await readCommittedIssueStatus(projectPath, slug),
+    commitError: error,
+  };
 }

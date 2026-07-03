@@ -19,6 +19,7 @@ import {
   currentState,
   createWorktree,
   removeWorktree,
+  discardWorktree,
   enableParallel,
   listWorktreeSlugs,
   isParallel,
@@ -90,6 +91,38 @@ describe('createWorktree / removeWorktree (real git)', () => {
     const path = await createWorktree(repo, slug, branchFor(slug));
     expect(existsSync(path)).toBe(true);
     await removeWorktree(repo, slug);
+  });
+});
+
+describe('discardWorktree — recover a stranded Run (issue 22, real git)', () => {
+  it('force-removes a worktree with uncommitted work AND deletes its branch', async () => {
+    const slug = '05-stranded';
+    const path = await createWorktree(repo, slug, branchFor(slug));
+    // Simulate a stranded Run: uncommitted work in the worktree, and a plain
+    // (non-force) remove would REFUSE — which is exactly why discard force-removes.
+    await writeFile(join(path, 'README.md'), '# scratch repo\n\npartial, never committed\n');
+    await expect(removeWorktree(repo, slug)).rejects.toThrow();
+
+    await discardWorktree(repo, slug);
+
+    // The worktree dir is gone, git no longer lists it, and the branch is deleted
+    // so it stops cluttering the Map / blocking the batch.
+    expect(existsSync(path)).toBe(false);
+    expect(await listWorktreeSlugs(repo)).not.toContain(slug);
+    const branches = await git(repo, 'branch', '--list', branchFor(slug));
+    expect(branches.trim()).toBe('');
+  });
+
+  it('is idempotent — discarding an already-gone Run does not throw', async () => {
+    const slug = '06-none';
+    // Never created — discard must be a clean no-op, not an error.
+    await expect(discardWorktree(repo, slug)).resolves.toBeUndefined();
+
+    // And a second discard after a real one is also safe.
+    await createWorktree(repo, slug, branchFor(slug));
+    await discardWorktree(repo, slug);
+    await expect(discardWorktree(repo, slug)).resolves.toBeUndefined();
+    expect(await listWorktreeSlugs(repo)).not.toContain(slug);
   });
 });
 

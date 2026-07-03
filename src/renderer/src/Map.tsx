@@ -44,6 +44,23 @@ interface MapProps {
    * `open` and merged-`done`. Derived from disk, so it survives closing Panes.
    */
   finishedUnmergedIds?: number[];
+  /**
+   * Issue ids whose isolated Run ended without a `done` commit and no live
+   * session drives it (issue 22) — shown as `stranded`, with a Discard action so
+   * it stops blocking the batch. Derived from disk, so it survives closing Panes.
+   */
+  strandedIds?: number[];
+  /**
+   * Issue ids whose isolated Run finished in its worktree but the auto-commit
+   * never landed on the branch (issue 22) — shown as `commit failed`, also with a
+   * Discard action.
+   */
+  commitFailedIds?: number[];
+  /**
+   * Discard a stranded / commit-failed Run: force-remove its worktree and delete
+   * its `afk/NN-slug` branch (issue 22). Given the slug and issue id.
+   */
+  onDiscard?: (slug: string, issueId: number) => void;
   /** Start draining the backlog with the given max-concurrent cap (issue 06). */
   onDrain?: (cap: number) => void;
   /** Stop an in-progress drain (start no further Runs). */
@@ -87,6 +104,9 @@ export function Map({
   activeRunIssueIds,
   worktreeRunningIds,
   finishedUnmergedIds,
+  strandedIds,
+  commitFailedIds,
+  onDiscard,
   onDrain,
   onStopDrain,
   draining,
@@ -102,12 +122,19 @@ export function Map({
   const activeRunSet = new Set(activeRunIssueIds ?? []);
   const worktreeRunningSet = new Set(worktreeRunningIds ?? []);
   const finishedUnmergedSet = new Set(finishedUnmergedIds ?? []);
+  const strandedSet = new Set(strandedIds ?? []);
+  const commitFailedSet = new Set(commitFailedIds ?? []);
   // The on-disk worktree scan (issue 16) that gates "can I Run this?" on truth
   // the main checkout can't see (issue 21): an issue live in a worktree or
   // finished-but-unmerged on its `afk/` branch is not runnable even while `main`
   // still reads it `open`. Fed to the guidance banner and the detail Run button
   // so both agree with the per-row indicators.
-  const inFlight: InFlightRuns = { worktreeRunningIds, finishedUnmergedIds };
+  const inFlight: InFlightRuns = {
+    worktreeRunningIds,
+    finishedUnmergedIds,
+    strandedIds,
+    commitFailedIds,
+  };
   const [path, setPath] = useState('');
   const [lastRequest, setLastRequest] = useState('');
   const [resolvedPath, setResolvedPath] = useState<string | null>(null);
@@ -292,6 +319,44 @@ export function Map({
         </div>
       )}
 
+      {/* Stranded / commit-failed Runs (issue 22): a blocked/stopped/commit-failed
+          isolated Run can never merge as-is and, before this, its worktree read
+          `running` forever and suppressed the batch Merge. This bar is derived
+          from the on-disk scan (so it survives closing every Pane) and offers a
+          Discard — force-remove the worktree + delete the branch — so the batch
+          can proceed. */}
+      {onDiscard &&
+        resolvedPath !== null &&
+        backlog &&
+        (strandedSet.size > 0 || commitFailedSet.size > 0) && (
+          <div className="map__strandedbar">
+            <span className="map__stranded-label">
+              Stranded Runs — these can’t merge; discard to unblock the batch:
+            </span>
+            {backlog.issues
+              .filter((i) => strandedSet.has(i.id) || commitFailedSet.has(i.id))
+              .map((i) => {
+                const failed = commitFailedSet.has(i.id);
+                return (
+                  <span key={i.id} className="map__stranded-item">
+                    <span
+                      className={`run-badge run-badge--${failed ? 'commit-failed' : 'stranded'}`}
+                    >
+                      {String(i.id).padStart(2, '0')} {failed ? 'commit failed' : 'stranded'}
+                    </span>
+                    <button
+                      className="map__discard"
+                      title="Force-remove this Run's worktree and afk/ branch"
+                      onClick={() => onDiscard(i.fileName.replace(/\.md$/, ''), i.id)}
+                    >
+                      Discard
+                    </button>
+                  </span>
+                );
+              })}
+          </div>
+        )}
+
       {/* Empty state (issue 14): a Window driven by the Project Registry with no
           active Project opens NOTHING — it does not silently claim the backend
           cwd. Prompt the user to open or choose a Project via the ProjectBar. */}
@@ -329,9 +394,13 @@ export function Map({
               worktreeRun={
                 finishedUnmergedSet.has(issue.id)
                   ? 'finished-unmerged'
-                  : worktreeRunningSet.has(issue.id)
-                    ? 'running'
-                    : null
+                  : commitFailedSet.has(issue.id)
+                    ? 'commit-failed'
+                    : strandedSet.has(issue.id)
+                      ? 'stranded'
+                      : worktreeRunningSet.has(issue.id)
+                        ? 'running'
+                        : null
               }
               state={deriveIssueState(issue, backlog!.issues)}
               onSelect={() => setSelectedId(issue.id)}
@@ -371,6 +440,10 @@ export function Map({
                   <span className="run-badge run-badge--finished-unmerged">
                     finished (unmerged)
                   </span>
+                ) : commitFailedSet.has(selected.id) ? (
+                  <span className="run-badge run-badge--commit-failed">commit failed</span>
+                ) : strandedSet.has(selected.id) ? (
+                  <span className="run-badge run-badge--stranded">stranded</span>
                 ) : (
                   backlog &&
                   onRun &&
@@ -390,6 +463,16 @@ export function Map({
                     </button>
                   )
                 )}
+                {(strandedSet.has(selected.id) || commitFailedSet.has(selected.id)) &&
+                  onDiscard && (
+                    <button
+                      className="map__discard map__discard--detail"
+                      title="Force-remove this Run's worktree and afk/ branch"
+                      onClick={() => onDiscard(selected.fileName.replace(/\.md$/, ''), selected.id)}
+                    >
+                      Discard
+                    </button>
+                  )}
               </div>
               {backlog && (
                 <DependencySection issue={selected} issues={backlog.issues} />
@@ -457,13 +540,15 @@ function IssueRow({
   selected: boolean;
   running: boolean;
   /**
-   * The issue's isolated-Run state derived from the on-disk `afk/` scan (issue
-   * 16): `running` (live in its worktree) or `finished-unmerged` (committed but
-   * not merged). Null when it has no active/finished worktree Run. Takes
-   * precedence over the main-checkout status/eligibility for the row indicator,
-   * so a Run in flight or awaiting merge never looks like plain `open`.
+   * The issue's isolated-Run state derived from the on-disk `afk/` scan: `running`
+   * (live in its worktree), `stranded` (Run ended without a done commit, issue
+   * 22), `commit-failed` (finished but the commit never landed, issue 22), or
+   * `finished-unmerged` (committed but not merged, issue 16). Null when it has no
+   * worktree Run. Takes precedence over the main-checkout status/eligibility for
+   * the row indicator, so a Run in flight, stranded, or awaiting merge never
+   * looks like plain `open`.
    */
-  worktreeRun: 'running' | 'finished-unmerged' | null;
+  worktreeRun: 'running' | 'stranded' | 'commit-failed' | 'finished-unmerged' | null;
   state: IssueMapState;
   onSelect: () => void;
   onRun?: () => void;
@@ -497,6 +582,20 @@ function IssueRow({
             title="This Run's work is committed on its afk/ branch but not yet merged into main"
           >
             finished (unmerged)
+          </span>
+        ) : worktreeRun === 'commit-failed' ? (
+          <span
+            className="run-badge run-badge--commit-failed"
+            title="This Run finished but its work could not be committed to the afk/ branch — discard it from the bar above"
+          >
+            commit failed
+          </span>
+        ) : worktreeRun === 'stranded' ? (
+          <span
+            className="run-badge run-badge--stranded"
+            title="This Run ended without committing done; its worktree is stranded — discard it from the bar above"
+          >
+            stranded
           </span>
         ) : worktreeRun === 'running' || running ? (
           <span
