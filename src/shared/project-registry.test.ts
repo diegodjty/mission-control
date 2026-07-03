@@ -10,6 +10,8 @@ import {
   transitionStage,
   canTransition,
   closeWindow,
+  ownsRepo,
+  checkRepoOwnership,
   PIPELINE_STAGES,
   type ProjectRegistry,
 } from './project-registry';
@@ -252,5 +254,86 @@ describe('immutability — operations never mutate the input registry', () => {
     const res = claimProject(reg, '/repo/a', 'win-1');
     expect(res.registry).not.toBe(reg);
     expect(reg.projects[0]?.ownerWindowId).toBeNull();
+  });
+});
+
+describe('ownsRepo — does a Window own a repo right now', () => {
+  it('true only for the exact owning Window', () => {
+    const reg = claimProject(withProjects('/repo/a'), '/repo/a', 'win-1').registry;
+    expect(ownsRepo(reg, '/repo/a', 'win-1')).toBe(true);
+    expect(ownsRepo(reg, '/repo/a', 'win-2')).toBe(false);
+  });
+
+  it('false for an unowned repo', () => {
+    const reg = withProjects('/repo/a');
+    expect(ownsRepo(reg, '/repo/a', 'win-1')).toBe(false);
+  });
+
+  it('false for an unregistered repo', () => {
+    expect(ownsRepo(emptyRegistry(), '/repo/missing', 'win-1')).toBe(false);
+  });
+
+  it('matches on normalized path (trailing slash / whitespace)', () => {
+    const reg = claimProject(withProjects('/repo/a'), '/repo/a', 'win-1').registry;
+    expect(ownsRepo(reg, '  /repo/a/  ', 'win-1')).toBe(true);
+  });
+
+  it('goes false the instant the owner releases (the mid-release case)', () => {
+    let reg = claimProject(withProjects('/repo/a'), '/repo/a', 'win-1').registry;
+    reg = releaseProject(reg, '/repo/a', 'win-1').registry;
+    expect(ownsRepo(reg, '/repo/a', 'win-1')).toBe(false);
+  });
+});
+
+describe('checkRepoOwnership — the action-time ownership guard', () => {
+  it('allows the owning Window', () => {
+    const reg = claimProject(withProjects('/repo/a'), '/repo/a', 'win-1').registry;
+    const res = checkRepoOwnership(reg, '/repo/a', 'win-1');
+    expect(res.ok).toBe(true);
+    expect(res.error).toBeNull();
+  });
+
+  it('rejects a Window that does not own the repo, with a reason', () => {
+    const reg = claimProject(withProjects('/repo/a'), '/repo/a', 'win-1').registry;
+    const res = checkRepoOwnership(reg, '/repo/a', 'win-2');
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/another Window/);
+  });
+
+  it('rejects an unowned (registered but not open) repo', () => {
+    const reg = withProjects('/repo/a');
+    const res = checkRepoOwnership(reg, '/repo/a', 'win-1');
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/not open in any Window/);
+  });
+
+  it('rejects an unregistered repo', () => {
+    const res = checkRepoOwnership(emptyRegistry(), '/repo/missing', 'win-1');
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/No Project is registered/);
+  });
+
+  it('a Window mid-release cannot act on the repo it just released', () => {
+    let reg = claimProject(withProjects('/repo/a'), '/repo/a', 'win-1').registry;
+    // The releasing Window still holds a stale projectPath in its renderer...
+    reg = releaseProject(reg, '/repo/a', 'win-1').registry;
+    // ...but the live registry now rejects it acting on that repo.
+    expect(checkRepoOwnership(reg, '/repo/a', 'win-1').ok).toBe(false);
+  });
+
+  it('after a switch, only the new owner passes for the target repo', () => {
+    let reg = withProjects('/repo/a', '/repo/b');
+    reg = claimProject(reg, '/repo/a', 'win-1').registry;
+    reg = switchActiveProject(reg, 'win-1', '/repo/b').registry;
+    // win-1 released /repo/a during the switch, so it can no longer act on it.
+    expect(checkRepoOwnership(reg, '/repo/a', 'win-1').ok).toBe(false);
+    expect(checkRepoOwnership(reg, '/repo/b', 'win-1').ok).toBe(true);
+  });
+
+  it('two different Windows can never both pass for the same repo', () => {
+    const reg = claimProject(withProjects('/repo/a'), '/repo/a', 'win-1').registry;
+    const a = checkRepoOwnership(reg, '/repo/a', 'win-1').ok;
+    const b = checkRepoOwnership(reg, '/repo/a', 'win-2').ok;
+    expect([a, b]).toEqual([true, false]);
   });
 });

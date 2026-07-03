@@ -255,6 +255,77 @@ export function transitionStage(
 }
 
 /**
+ * Does `windowId` currently own the Project at `repoPath`? True iff a Project is
+ * registered for that (normalized) path AND its `ownerWindowId` is exactly this
+ * Window. A repo that isn't registered, or is unowned, or is owned by a
+ * different Window, all return false.
+ */
+export function ownsRepo(
+  registry: ProjectRegistry,
+  repoPath: string,
+  windowId: WindowId,
+): boolean {
+  const project = findProject(registry, repoPath);
+  return project !== undefined && project.ownerWindowId === windowId;
+}
+
+/** The verdict of an ownership check: allowed, or rejected with a reason. */
+export interface OwnershipCheck {
+  /** True when the calling Window may act on the target repo. */
+  ok: boolean;
+  /** A clear, user-facing rejection reason when `ok` is false; null otherwise. */
+  error: string | null;
+}
+
+/**
+ * Guard a repo-mutating/observing action: may `windowId` act on `repoPath`?
+ *
+ * This is the decision behind ADR-0004's "one Window owns a repo" rule applied
+ * at the point of ACTION, not just at open/switch. The worktree/merge/observe
+ * IPC handlers all act on a `projectPath` the renderer supplied; a renderer bug
+ * with a stale path, or a Window caught mid-release (its `activeRepoPath` not
+ * yet cleared while the registry has already moved on), could otherwise drive a
+ * worktree mutation or a Merge on a repo it no longer owns — concurrently with
+ * the real owner. Checking the LIVE registry at action time closes that window:
+ *
+ *   - unregistered path → reject (nobody manages it);
+ *   - unowned path → reject (no Window is driving it right now);
+ *   - owned by a different Window → reject (that Window is the one driving it);
+ *   - owned by this Window → allow.
+ *
+ * Because a repo has at most one owner, two *different* Windows can never both
+ * pass this check for the same repo — so it also prevents cross-Window
+ * concurrent git-worktree mutations, not just tidies up error messages.
+ */
+export function checkRepoOwnership(
+  registry: ProjectRegistry,
+  repoPath: string,
+  windowId: WindowId,
+): OwnershipCheck {
+  const key = normalizeRepoPath(repoPath);
+  const project = registry.projects.find((p) => p.repoPath === key);
+  if (!project) {
+    return {
+      ok: false,
+      error: `No Project is registered for ${key} — this Window does not manage that repo.`,
+    };
+  }
+  if (project.ownerWindowId === null) {
+    return {
+      ok: false,
+      error: `${key} is not open in any Window — refusing to act on an unowned repo.`,
+    };
+  }
+  if (project.ownerWindowId !== windowId) {
+    return {
+      ok: false,
+      error: `${key} is managed by another Window — refusing to act on a repo this Window does not own.`,
+    };
+  }
+  return { ok: true, error: null };
+}
+
+/**
  * Release every Project a Window owns — called when a Window closes so its
  * repos are freed for another Window to open. Always succeeds.
  */

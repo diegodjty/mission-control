@@ -5,7 +5,7 @@
  * Contract to the PTY Session Manager so keystrokes and output round-trip
  * between xterm.js (renderer) and node-pty (here in main).
  */
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent } from 'electron';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { PtySessionManager } from './pty-session-manager';
@@ -31,6 +31,7 @@ import {
   type BacklogLoadResult,
   type BacklogWatchRequest,
   type IsolationApplyRequest,
+  type IsolationApplyResult,
   type IssueStatusObserveRequest,
   type IssueStatusObserveResult,
   type MainCommitRequest,
@@ -38,6 +39,7 @@ import {
   type WorktreeCommitRequest,
   type WorktreeCommitResult,
   type MergeRunsRequest,
+  type MergeRunsResult,
   type MergeAbortRequest,
   type MergeAbortResult,
   type ProjectActionResult,
@@ -67,9 +69,11 @@ import {
   closeWindow,
   findProject,
   normalizeRepoPath,
+  checkRepoOwnership,
   type ProjectRegistry,
   type RegistryResult,
 } from '../shared/project-registry';
+import { createRepoSerializer } from '../shared/repo-serializer';
 
 // electron-vite injects ELECTRON_RENDERER_URL in dev; load the built file otherwise.
 function loadRenderer(win: BrowserWindow): void {
@@ -93,6 +97,30 @@ function loadRenderer(win: BrowserWindow): void {
 // or the Window closes.
 let registry: ProjectRegistry = emptyRegistry();
 const pendingOpen = new Map<number, string>();
+
+// Per-repo serializer (issue 31): even the single owning Window can fire
+// overlapping repo-mutating IPC calls (a drain applying isolation while a
+// finished Run auto-commits, a Merge racing a scan-driven commit). Git
+// worktree/branch mutations on one repo aren't concurrency-safe, so every
+// mutating handler runs its git work through this — same-repo work serializes,
+// different repos still run in parallel.
+const repoSerializer = createRepoSerializer();
+
+/**
+ * Action-time ownership guard (issue 31): the worktree/merge/observe handlers
+ * all act on a renderer-supplied `projectPath`. Before acting, confirm the
+ * CALLING Window (its webContents id) currently owns that repo in the live
+ * registry — a stale renderer path, or a Window caught mid-release, must not
+ * drive a worktree mutation or Merge on a repo it no longer owns. Returns the
+ * rejection message, or null when the Window may proceed.
+ */
+function ownershipError(
+  event: IpcMainInvokeEvent,
+  projectPath: string,
+): string | null {
+  const check = checkRepoOwnership(registry, projectPath, String(event.sender.id));
+  return check.ok ? null : check.error;
+}
 
 // The last folder chosen through the native Browse… chooser (issue 19), so the
 // next open of the picker starts where the user last was instead of at $HOME
@@ -220,8 +248,11 @@ function registerIpc(): void {
   // worktree-observed status into the pure run-state selector for isolated Runs.
   ipcMain.handle(
     IpcChannel.IssueStatusObserve,
-    async (_event, req: IssueStatusObserveRequest): Promise<IssueStatusObserveResult> =>
-      readIsolatedIssueStatus(req.projectPath, req.slug),
+    async (event, req: IssueStatusObserveRequest): Promise<IssueStatusObserveResult> => {
+      const denied = ownershipError(event, req.projectPath);
+      if (denied) return { status: null, commitError: denied };
+      return readIsolatedIssueStatus(req.projectPath, req.slug);
+    },
   );
 
   // Auto-commit a finished SOLO Run's work on `main` (issue 25): the symmetric
@@ -232,8 +263,13 @@ function registerIpc(): void {
   // idempotent — so "finished" uniformly means "committed".
   ipcMain.handle(
     IpcChannel.MainCommit,
-    async (_event, req: MainCommitRequest): Promise<MainCommitResult> =>
-      commitFinishedMain(req.projectPath, req.slug),
+    async (event, req: MainCommitRequest): Promise<MainCommitResult> => {
+      const denied = ownershipError(event, req.projectPath);
+      if (denied) return { committed: false, error: denied };
+      return repoSerializer.run(normalizeRepoPath(req.projectPath), () =>
+        commitFinishedMain(req.projectPath, req.slug),
+      );
+    },
   );
 
   // Auto-commit a finished ISOLATED Run's worktree onto its `afk/` branch (issue
@@ -244,8 +280,13 @@ function registerIpc(): void {
   // stray re-fire is a no-op; a genuine failure is returned for the UI to surface.
   ipcMain.handle(
     IpcChannel.WorktreeCommit,
-    async (_event, req: WorktreeCommitRequest): Promise<WorktreeCommitResult> =>
-      commitFinishedWorktree(req.projectPath, req.slug),
+    async (event, req: WorktreeCommitRequest): Promise<WorktreeCommitResult> => {
+      const denied = ownershipError(event, req.projectPath);
+      if (denied) return { committed: false, error: denied };
+      return repoSerializer.run(normalizeRepoPath(req.projectPath), () =>
+        commitFinishedWorktree(req.projectPath, req.slug),
+      );
+    },
   );
 
   // On-disk `afk/` scan (issue 16): the ground truth for which issues have an
@@ -254,12 +295,17 @@ function registerIpc(): void {
   // Merge affordance survive closing every Pane.
   ipcMain.handle(
     IpcChannel.AfkScan,
-    async (_event, req: AfkScanRequest): Promise<AfkScanResult> => ({
-      branches: await scanAfkBranches(req.projectPath),
-      // Also report whether `main` is left mid-merge by a partial merge conflict
-      // (issue 24) so the renderer can block a new drain/Run and offer an Abort.
-      midMerge: await isMidMerge(req.projectPath),
-    }),
+    async (event, req: AfkScanRequest): Promise<AfkScanResult> => {
+      // A Window that doesn't own this repo gets an empty scan — it must not
+      // derive a Merge affordance or block drains off a repo it doesn't drive.
+      if (ownershipError(event, req.projectPath)) return { branches: [], midMerge: false };
+      return {
+        branches: await scanAfkBranches(req.projectPath),
+        // Also report whether `main` is left mid-merge by a partial merge conflict
+        // (issue 24) so the renderer can block a new drain/Run and offer an Abort.
+        midMerge: await isMidMerge(req.projectPath),
+      };
+    },
   );
 
   // Discard a stranded isolated Run (issue 22): force-remove its worktree and
@@ -269,29 +315,58 @@ function registerIpc(): void {
   // the renderer can show them without crashing the poll.
   ipcMain.handle(
     IpcChannel.AfkDiscard,
-    async (_event, req: AfkDiscardRequest): Promise<AfkDiscardResult> => {
-      try {
-        await discardWorktree(req.projectPath, req.slug);
-        return { ok: true, error: null };
-      } catch (err) {
-        return { ok: false, error: err instanceof Error ? err.message : String(err) };
-      }
+    async (event, req: AfkDiscardRequest): Promise<AfkDiscardResult> => {
+      const denied = ownershipError(event, req.projectPath);
+      if (denied) return { ok: false, error: denied };
+      return repoSerializer.run(normalizeRepoPath(req.projectPath), async () => {
+        try {
+          await discardWorktree(req.projectPath, req.slug);
+          return { ok: true, error: null };
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) };
+        }
+      });
     },
   );
 
   // Isolation lifecycle (ADR-0002): the Git/Worktree Adapter reconciles the
   // active Run set to solo-on-main or a worktree-per-Run, and hands back each
   // Run's cwd for the PTY spawn below.
-  ipcMain.handle(IpcChannel.IsolationApply, (_event, req: IsolationApplyRequest) =>
-    applyIsolation(req.projectPath, req.runs),
+  ipcMain.handle(
+    IpcChannel.IsolationApply,
+    (event, req: IsolationApplyRequest): Promise<IsolationApplyResult> => {
+      // Reject a non-owner: a stale renderer must not create/tear down worktrees
+      // on a repo the real owner is driving. Empty placements ⇒ no mutation.
+      if (ownershipError(event, req.projectPath)) {
+        return Promise.resolve({ parallel: false, placements: [] });
+      }
+      return repoSerializer.run(normalizeRepoPath(req.projectPath), () =>
+        applyIsolation(req.projectPath, req.runs),
+      );
+    },
   );
 
   // Merge (ADR-0002): human-triggered only. Integrates the finished parallel
   // Runs' `afk/NN-slug` branches into main via afk-merge.sh, then cleans up the
   // worktrees. Never invoked automatically — the renderer calls this in direct
   // response to the user clicking Merge.
-  ipcMain.handle(IpcChannel.MergeRuns, (_event, req: MergeRunsRequest) =>
-    mergeRuns(req.projectPath, req.slugs),
+  ipcMain.handle(
+    IpcChannel.MergeRuns,
+    (event, req: MergeRunsRequest): Promise<MergeRunsResult> => {
+      const denied = ownershipError(event, req.projectPath);
+      if (denied) {
+        return Promise.resolve({
+          ok: false,
+          conflicted: false,
+          merged: [],
+          message: denied,
+          output: '',
+        });
+      }
+      return repoSerializer.run(normalizeRepoPath(req.projectPath), () =>
+        mergeRuns(req.projectPath, req.slugs),
+      );
+    },
   );
 
   // Abort an in-progress merge left on `main` by a partial conflict (issue 24):
@@ -299,8 +374,13 @@ function registerIpc(): void {
   // isn't stranded and a new drain/Run is unblocked. Human-triggered only.
   ipcMain.handle(
     IpcChannel.MergeAbort,
-    (_event, req: MergeAbortRequest): Promise<MergeAbortResult> =>
-      abortMerge(req.projectPath),
+    (event, req: MergeAbortRequest): Promise<MergeAbortResult> => {
+      const denied = ownershipError(event, req.projectPath);
+      if (denied) return Promise.resolve({ ok: false, error: denied });
+      return repoSerializer.run(normalizeRepoPath(req.projectPath), () =>
+        abortMerge(req.projectPath),
+      );
+    },
   );
 
   ipcMain.handle(IpcChannel.PtySpawn, (_event, req: PtySpawnRequest) =>
