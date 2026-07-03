@@ -145,6 +145,74 @@ body {
   min-width: 0;
 }
 
+/* The Map column and the Dispatcher chat panel sit side by side in the Map
+   view slot (ADR-0010): the Map takes the room, the Dispatcher a fixed rail. */
+.app__map-col {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+}
+
+.dispatcher {
+  flex: 0 0 360px;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid #1c2530;
+  background: #0b0f14;
+}
+
+.dispatcher__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #1c2530;
+  flex: 0 0 auto;
+}
+
+.dispatcher__title {
+  font-weight: 600;
+  color: #e6edf3;
+}
+
+.dispatcher__meta {
+  color: #9aa7b4;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dispatcher__dismiss {
+  margin-left: auto;
+  flex: 0 0 auto;
+  background: #1c2530;
+  color: #e6edf3;
+  border: 1px solid #2a3644;
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.dispatcher__dismiss:hover {
+  background: #24303d;
+}
+
+.dispatcher__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+
+.dispatcher__body .pane {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 /* ---- Run controls ---- */
 
 .app__run {

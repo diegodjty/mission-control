@@ -2,8 +2,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Pane } from './Pane';
 import { Map } from './Map';
 import { ProjectBar } from './ProjectBar';
+import { DispatcherPanel } from './DispatcherPanel';
 import type { Backlog, IssueStatus } from '../../shared/backlog-model';
-import type { ProjectView, RunLogRecord, RunTarget } from '../../shared/ipc-contract';
+import type {
+  DispatcherTarget,
+  ProjectView,
+  RunLogRecord,
+  RunTarget,
+} from '../../shared/ipc-contract';
+import {
+  renderCompletionEvent,
+  toCompletionEvent,
+} from '../../shared/dispatcher-input-contract';
 import {
   deriveRunStatus,
   isTerminal,
@@ -186,6 +196,19 @@ export function App(): JSX.Element {
   const [cap, setCap] = useState(2);
   const [drainMessage, setDrainMessage] = useState('');
 
+  // --- Dispatcher state (issue 35, ADR-0010) -------------------------------
+  // The conversational orchestrator for a drain: spun up WHEN A DRAIN STARTS
+  // (a single manual Run stays a bare Pane), one per Project, dismissable. Null
+  // when no drain has started this Project session. `sessionId` is set once its
+  // chat Pane spawns, so we can feed it each Run's Completion block (structured
+  // summary — never raw Pane scroll). `dispatcherFed` tracks which Runs' blocks
+  // we've already fed, so a re-capture/re-render doesn't double-feed.
+  const [dispatcher, setDispatcher] = useState<{
+    target: DispatcherTarget;
+    sessionId: string | null;
+  } | null>(null);
+  const dispatcherFed = useRef<Set<string>>(new Set<string>());
+
   // --- Merge state (issue 08; issue 17) ------------------------------------
   // `mergeDisplay` is the pure selector's decision of what the Merge UI shows
   // (headline + whether/what to put in the details panel). Surfacing the
@@ -259,6 +282,11 @@ export function App(): JSX.Element {
     setMaximizedId(null);
     setDraining(false);
     setDrainMessage('');
+    // The Dispatcher is per-Project (ADR-0010): drop it on a switch so the new
+    // Project never inherits the previous one's orchestrator. Unmounting its
+    // panel kills the session.
+    setDispatcher(null);
+    dispatcherFed.current.clear();
     setMerging(false);
     setAborting(false);
     setMergeDisplay(null);
@@ -879,6 +907,28 @@ export function App(): JSX.Element {
     };
   }, [projectPath]);
 
+  // --- Feed Completion blocks to the Dispatcher (issue 35) -----------------
+  // As each Run finishes and its Completion block is captured into the Run log,
+  // hand that STRUCTURED block to the Dispatcher session — this is the input
+  // contract's stream (ADR-0009). It is built from the parsed record via the
+  // pure assembler, so it can NEVER carry raw Pane scroll. Fed once per Run
+  // (guarded by `dispatcherFed`), and only once the block parsed to something
+  // real (outcome !== 'unknown'), so a still-streaming capture isn't fed as
+  // noise. The message is flattened to one line + Enter so it submits cleanly
+  // into the orchestrator's chat.
+  useEffect(() => {
+    const sessionId = dispatcher?.sessionId ?? null;
+    if (sessionId === null) return;
+    for (const rec of runLog) {
+      if (rec.outcome === 'unknown') continue;
+      if (dispatcherFed.current.has(rec.id)) continue;
+      dispatcherFed.current.add(rec.id);
+      const text = renderCompletionEvent(toCompletionEvent({ id: rec.id, record: rec }));
+      const oneLine = text.replace(/\s*\n\s*/g, ' · ');
+      window.mc.writePty({ sessionId, data: `${oneLine}\r` });
+    }
+  }, [runLog, dispatcher]);
+
   const startDrain = useCallback(
     (chosenCap: number): void => {
       // Refuse to drain onto a mid-merge main (issue 24) — resolve/abort first.
@@ -891,14 +941,43 @@ export function App(): JSX.Element {
       setCap(Math.max(1, Math.floor(chosenCap) || 1));
       setDrainMessage('');
       setDraining(true);
+      // Starting a drain spins up the Dispatcher for this Project (ADR-0010):
+      // the conversational orchestrator that drives the drain and that you talk
+      // to instead of watching every Pane. A single manual Run (startRun) does
+      // NOT do this — it stays a bare Pane. Idempotent: one Dispatcher per
+      // Project, so re-draining the same Project reuses the live one.
+      if (projectPath !== null) {
+        setDispatcher((cur) =>
+          cur && cur.target.projectPath === projectPath
+            ? cur
+            : {
+                target: { projectPath, activePrd: backlog?.activePrd ?? null },
+                sessionId: null,
+              },
+        );
+      }
       setView('pane');
     },
-    [midMerge],
+    [midMerge, projectPath, backlog],
   );
 
   const stopDrain = useCallback((): void => {
     setDraining(false);
     setDrainMessage('Drain stopped by you — in-flight Runs keep going.');
+  }, []);
+
+  // Record the Dispatcher session's PTY id once its chat Pane spawns (issue 35),
+  // so the ingest effect below can feed each Run's Completion block into it.
+  const handleDispatcherSession = useCallback((sessionId: string): void => {
+    setDispatcher((cur) => (cur ? { ...cur, sessionId } : cur));
+  }, []);
+
+  // Dismiss the Dispatcher (ADR-0010): end the orchestrator session and close
+  // its chat panel. Unmounting the panel kills the PTY; clearing the fed-set lets
+  // a fresh Dispatcher for this Project start ingesting from scratch.
+  const dismissDispatcher = useCallback((): void => {
+    setDispatcher(null);
+    dispatcherFed.current.clear();
   }, []);
 
   // Keep the App's backlog copy fresh from every Map load/live-change so the
@@ -1185,6 +1264,7 @@ export function App(): JSX.Element {
             backlog — and therefore every Run's status and the drain plan —
             current even while you watch a Pane. */}
         <div className="app__slot" style={{ display: view === 'map' ? 'flex' : 'none' }}>
+          <div className="app__map-col">
           <Map
             projectPath={activeRepoPath}
             onRun={startRun}
@@ -1211,6 +1291,19 @@ export function App(): JSX.Element {
             onAbortMerge={runAbortMerge}
             aborting={aborting}
           />
+          </div>
+          {/* The Dispatcher chat panel beside the Map (ADR-0010): present once a
+              drain has started this Project. Talk to the orchestrator here
+              instead of watching every worker Pane; ask "what's left?" and it
+              answers from the Completion blocks / Run log. Dismissable. */}
+          {dispatcher && (
+            <DispatcherPanel
+              target={dispatcher.target}
+              onSession={handleDispatcherSession}
+              onDismiss={dismissDispatcher}
+              ingestedCount={runLog.filter((r) => r.outcome !== 'unknown').length}
+            />
+          )}
         </div>
 
         {/* Every tracked Run's Pane stays mounted so its session persists; the

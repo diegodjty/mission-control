@@ -175,6 +175,19 @@ export interface RunTarget {
   projectPath: string;
 }
 
+/**
+ * A Dispatcher target: the one Project a conversational orchestrator `claude`
+ * session drives a drain for (issue 35, ADR-0010). Spawned WHEN A DRAIN STARTS
+ * (a single manual Run stays a bare Pane), one per Project, in the Project repo
+ * (cwd). Absent for a Run or a plain shell Pane.
+ */
+export interface DispatcherTarget {
+  /** The Project repo path the orchestrator session runs in (its cwd). */
+  projectPath: string;
+  /** The active PRD path (seed context), or null when none is set. */
+  activePrd: string | null;
+}
+
 export interface PtySpawnRequest {
   cols: number;
   rows: number;
@@ -183,6 +196,12 @@ export interface PtySpawnRequest {
    * issue (in `projectPath`) instead of a plain shell. This is a Run (issue 03).
    */
   run?: RunTarget;
+  /**
+   * When present, spawn the Dispatcher orchestrator `claude` session for this
+   * Project (issue 35) instead of a Run or a plain shell. Mutually exclusive
+   * with `run`.
+   */
+  dispatcher?: DispatcherTarget;
 }
 
 export interface PtySpawnResult {

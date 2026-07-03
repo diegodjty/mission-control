@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import * as pty from 'node-pty';
 import { resolveShell } from './resolve-shell';
 import { resolveRunCommand } from './resolve-run-command';
+import { resolveDispatcherCommand } from './dispatcher-session';
 import type {
   PtyDataMessage,
   PtyExitMessage,
@@ -43,16 +44,27 @@ export class PtySessionManager {
 
   spawn(req: PtySpawnRequest): PtySpawnResult {
     // A Run spawns a fresh interactive `claude` scoped to one issue, in the
-    // Project repo (solo mode → directly on `main`, no worktree). A plain Pane
-    // spawns the walking-skeleton shell in $HOME (issue 01).
+    // Project repo (solo mode → directly on `main`, no worktree). A Dispatcher
+    // spawns the conversational orchestrator `claude` for a drain, in the
+    // Project repo (issue 35). A plain Pane spawns the walking-skeleton shell in
+    // $HOME (issue 01).
     const { file, args } = req.run
       ? resolveRunCommand(process.env, {
           id: req.run.issueId,
           fileName: req.run.issueFileName,
           title: req.run.issueTitle,
         })
-      : resolveShell(process.env, process.platform);
-    const cwd = req.run?.projectPath || process.env.HOME || process.cwd();
+      : req.dispatcher
+        ? resolveDispatcherCommand(process.env, {
+            projectPath: req.dispatcher.projectPath,
+            activePrd: req.dispatcher.activePrd,
+          })
+        : resolveShell(process.env, process.platform);
+    const cwd =
+      req.run?.projectPath ||
+      req.dispatcher?.projectPath ||
+      process.env.HOME ||
+      process.cwd();
     const sessionId = randomUUID();
     const isRun = Boolean(req.run);
     if (isRun) this.runOutput.set(sessionId, '');

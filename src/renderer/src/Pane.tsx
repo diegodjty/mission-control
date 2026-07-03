@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
-import type { RunTarget } from '../../shared/ipc-contract';
+import type { DispatcherTarget, RunTarget } from '../../shared/ipc-contract';
 
 interface PaneProps {
   /**
@@ -11,6 +11,11 @@ interface PaneProps {
    * unset, it hosts a plain walking-skeleton shell (issue 01).
    */
   run?: RunTarget;
+  /**
+   * When set, this Pane hosts the Dispatcher orchestrator `claude` session for a
+   * drain (issue 35) instead of a Run or a shell. Mutually exclusive with `run`.
+   */
+  dispatcher?: DispatcherTarget;
   onStatusChange?: (status: string) => void;
   /** Fired when the underlying session exits (with its exit code). */
   onExit?: (exitCode: number) => void;
@@ -33,7 +38,7 @@ interface PaneProps {
  * output comes back via onPtyData. A Run passes `run` so main spawns `claude`
  * scoped to the issue instead of a shell.
  */
-export function Pane({ run, onStatusChange, onExit, onSession, stopSignal }: PaneProps): JSX.Element {
+export function Pane({ run, dispatcher, onStatusChange, onExit, onSession, stopSignal }: PaneProps): JSX.Element {
   const hostRef = useRef<HTMLDivElement>(null);
   const sessionIdRef = useRef<string | null>(null);
   // Keep the latest onSession in a ref so the spawn effect (keyed on the Run
@@ -41,10 +46,12 @@ export function Pane({ run, onStatusChange, onExit, onSession, stopSignal }: Pan
   const onSessionRef = useRef(onSession);
   onSessionRef.current = onSession;
 
-  // Primitive deps so the effect only re-runs when the actual Run target
-  // changes, not on every parent render (run is a fresh object each time).
+  // Primitive deps so the effect only re-runs when the actual Run/Dispatcher
+  // target changes, not on every parent render (the target is a fresh object
+  // each render). A Dispatcher Pane keys on its Project path.
   const runId = run?.issueId ?? null;
   const runPath = run?.projectPath ?? null;
+  const dispatcherPath = dispatcher?.projectPath ?? null;
 
   useEffect(() => {
     const host = hostRef.current;
@@ -89,7 +96,7 @@ export function Pane({ run, onStatusChange, onExit, onSession, stopSignal }: Pan
     });
 
     void window.mc
-      .spawnPty({ cols: term.cols, rows: term.rows, run })
+      .spawnPty({ cols: term.cols, rows: term.rows, run, dispatcher })
       .then((res) => {
         if (disposed) {
           window.mc.killPty({ sessionId: res.sessionId });
@@ -97,9 +104,13 @@ export function Pane({ run, onStatusChange, onExit, onSession, stopSignal }: Pan
         }
         sessionId = res.sessionId;
         sessionIdRef.current = res.sessionId;
-        // Only Run sessions have a Completion block worth capturing (issue 34).
-        if (run) onSessionRef.current?.(res.sessionId);
-        onStatusChange?.(run ? `running (${res.file})` : `live (${res.file})`);
+        // A Run session's id is needed to capture its Completion block (issue
+        // 34); a Dispatcher session's id is needed to feed it Completion blocks
+        // (issue 35). A plain shell Pane needs neither.
+        if (run || dispatcher) onSessionRef.current?.(res.sessionId);
+        onStatusChange?.(
+          run ? `running (${res.file})` : dispatcher ? `dispatcher (${res.file})` : `live (${res.file})`,
+        );
         term.focus();
       })
       .catch((err: unknown) => {
@@ -129,7 +140,7 @@ export function Pane({ run, onStatusChange, onExit, onSession, stopSignal }: Pan
       term.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runId, runPath]);
+  }, [runId, runPath, dispatcherPath]);
 
   // Stop the Run on demand: kill the live session but keep the Pane mounted so
   // its final output (e.g. the agent's blocked reason) stays on screen.
