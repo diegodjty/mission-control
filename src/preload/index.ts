@@ -33,6 +33,10 @@ import {
   type ProjectSwitchRequest,
   type ProjectTransitionRequest,
   type ProjectPickFolderResult,
+  type RunLogCaptureRequest,
+  type RunLogCaptureResult,
+  type RunLogLoadRequest,
+  type RunLogLoadResult,
   type WindowOpenRequest,
   type WindowOpenResult,
   type PtyDataMessage,
@@ -109,6 +113,12 @@ const api: MissionControlApi = {
     ipcRenderer.on(IpcChannel.ProjectRegistryChanged, handler);
     return () => ipcRenderer.removeListener(IpcChannel.ProjectRegistryChanged, handler);
   },
+
+  captureRunLog: (req: RunLogCaptureRequest): Promise<RunLogCaptureResult> =>
+    ipcRenderer.invoke(IpcChannel.RunLogCapture, req),
+
+  loadRunLog: (req: RunLogLoadRequest): Promise<RunLogLoadResult> =>
+    ipcRenderer.invoke(IpcChannel.RunLogLoad, req),
 
   spawnPty: (req: PtySpawnRequest): Promise<PtySpawnResult> =>
     ipcRenderer.invoke(IpcChannel.PtySpawn, req),

@@ -15,6 +15,12 @@ interface PaneProps {
   /** Fired when the underlying session exits (with its exit code). */
   onExit?: (exitCode: number) => void;
   /**
+   * Fired with the PTY session id once this Pane's session is spawned (issue
+   * 34), so the parent can capture the Run's Completion block from that session's
+   * buffered output when the Run ends.
+   */
+  onSession?: (sessionId: string) => void;
+  /**
    * Bump this number to stop the Run: the underlying session is killed. The
    * Pane stays mounted so its final output remains visible.
    */
@@ -27,9 +33,13 @@ interface PaneProps {
  * output comes back via onPtyData. A Run passes `run` so main spawns `claude`
  * scoped to the issue instead of a shell.
  */
-export function Pane({ run, onStatusChange, onExit, stopSignal }: PaneProps): JSX.Element {
+export function Pane({ run, onStatusChange, onExit, onSession, stopSignal }: PaneProps): JSX.Element {
   const hostRef = useRef<HTMLDivElement>(null);
   const sessionIdRef = useRef<string | null>(null);
+  // Keep the latest onSession in a ref so the spawn effect (keyed on the Run
+  // target) doesn't need it as a dependency and re-run when the parent re-renders.
+  const onSessionRef = useRef(onSession);
+  onSessionRef.current = onSession;
 
   // Primitive deps so the effect only re-runs when the actual Run target
   // changes, not on every parent render (run is a fresh object each time).
@@ -87,6 +97,8 @@ export function Pane({ run, onStatusChange, onExit, stopSignal }: PaneProps): JS
         }
         sessionId = res.sessionId;
         sessionIdRef.current = res.sessionId;
+        // Only Run sessions have a Completion block worth capturing (issue 34).
+        if (run) onSessionRef.current?.(res.sessionId);
         onStatusChange?.(run ? `running (${res.file})` : `live (${res.file})`);
         term.focus();
       })

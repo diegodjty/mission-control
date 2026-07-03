@@ -26,8 +26,18 @@ export interface PtySessionManagerCallbacks {
   onExit: (msg: PtyExitMessage) => void;
 }
 
+// Keep at most this many trailing chars of a Run's output. The Completion block
+// is the FINAL thing a Worker emits, so tail-truncating (drop from the front)
+// always preserves it while bounding memory over a long session.
+const MAX_RUN_OUTPUT = 500_000;
+
 export class PtySessionManager {
   private readonly sessions = new Map<SessionId, Session>();
+  // Buffered output for Run sessions only (issue 34), so a finished Run's
+  // Completion block can be parsed on demand. Kept after the session exits (the
+  // block is captured just after the issue flips `done`), and only ever cleared
+  // when the session is superseded — a plain shell Pane never buffers.
+  private readonly runOutput = new Map<SessionId, string>();
 
   constructor(private readonly callbacks: PtySessionManagerCallbacks) {}
 
@@ -44,6 +54,8 @@ export class PtySessionManager {
       : resolveShell(process.env, process.platform);
     const cwd = req.run?.projectPath || process.env.HOME || process.cwd();
     const sessionId = randomUUID();
+    const isRun = Boolean(req.run);
+    if (isRun) this.runOutput.set(sessionId, '');
 
     const proc = pty.spawn(file, args, {
       name: 'xterm-color',
@@ -54,6 +66,13 @@ export class PtySessionManager {
     });
 
     proc.onData((data) => {
+      if (isRun) {
+        const next = (this.runOutput.get(sessionId) ?? '') + data;
+        this.runOutput.set(
+          sessionId,
+          next.length > MAX_RUN_OUTPUT ? next.slice(next.length - MAX_RUN_OUTPUT) : next,
+        );
+      }
       this.callbacks.onData({ sessionId, data });
     });
 
@@ -64,6 +83,16 @@ export class PtySessionManager {
 
     this.sessions.set(sessionId, { proc });
     return { sessionId, file };
+  }
+
+  /**
+   * The buffered output of a Run session (issue 34), for parsing its Completion
+   * block. Empty string for an unknown/non-Run session. The session may already
+   * have exited — the buffer outlives it so the block can be captured just after
+   * the issue flips `done`.
+   */
+  getRunOutput(sessionId: SessionId): string {
+    return this.runOutput.get(sessionId) ?? '';
   }
 
   write(sessionId: SessionId, data: string): void {

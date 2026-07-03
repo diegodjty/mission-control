@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Backlog, BacklogIssue } from '../../shared/backlog-model';
-import type { RunTarget } from '../../shared/ipc-contract';
+import type { RunLogRecord, RunTarget } from '../../shared/ipc-contract';
 import { runnableNow, type InFlightRuns } from '../../shared/run-eligibility';
 import {
   deriveIssueState,
@@ -97,6 +97,12 @@ interface MapProps {
   onAbortMerge?: () => void;
   /** True while an Abort is running. */
   aborting?: boolean;
+  /**
+   * The active Project's captured Completion blocks, newest first (issue 34).
+   * Rendered as the Run-log feed — one card per Run — which survives closing the
+   * Run's Pane (it is App state loaded from disk, not tied to any live Pane).
+   */
+  runLog?: RunLogRecord[];
 }
 
 /**
@@ -131,6 +137,7 @@ export function Map({
   midMerge,
   onAbortMerge,
   aborting,
+  runLog,
 }: MapProps = {}): JSX.Element {
   const activeRunSet = new Set(activeRunIssueIds ?? []);
   const worktreeRunningSet = new Set(worktreeRunningIds ?? []);
@@ -430,6 +437,13 @@ export function Map({
         />
       )}
 
+      {/* Run-log feed (issue 34): a scannable card per finished Run, parsed from
+          its Completion block and loaded from the per-Project on-disk Run log —
+          so it survives closing the Run's Pane, and persists across restarts. */}
+      {resolvedPath !== null && runLog && runLog.length > 0 && (
+        <RunLogFeed records={runLog} onSelect={(id) => id !== null && setSelectedId(id)} />
+      )}
+
       <div className="map__split">
         <ul className="map__list">
           {backlog?.issues.map((issue) => (
@@ -533,6 +547,95 @@ export function Map({
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * The Run-log feed (issue 34): the durable, per-Project history of finished
+ * Runs, one card each, parsed from their Completion blocks. Collapsible so it
+ * doesn't crowd the backlog; open by default when there are records to show.
+ */
+function RunLogFeed({
+  records,
+  onSelect,
+}: {
+  records: RunLogRecord[];
+  onSelect: (issueId: number | null) => void;
+}): JSX.Element {
+  return (
+    <details className="map__runlog" open>
+      <summary className="map__runlog-summary">
+        Run log — {records.length} Run{records.length === 1 ? '' : 's'} captured
+      </summary>
+      <ul className="map__runlog-list">
+        {records.map((r) => (
+          <RunLogCard key={r.id} record={r} onSelect={() => onSelect(r.issueId)} />
+        ))}
+      </ul>
+    </details>
+  );
+}
+
+/** A short, human label for a Run outcome (drives the badge text + colour). */
+function outcomeLabel(outcome: RunLogRecord['outcome']): string {
+  switch (outcome) {
+    case 'completed':
+      return 'completed';
+    case 'needs-verification':
+      return 'needs verification';
+    case 'blocked':
+      return 'blocked';
+    default:
+      return 'unparsed';
+  }
+}
+
+/** One captured Completion block as a card, showing only its present fields. */
+function RunLogCard({
+  record,
+  onSelect,
+}: {
+  record: RunLogRecord;
+  onSelect: () => void;
+}): JSX.Element {
+  const idLabel = record.issueId !== null ? String(record.issueId).padStart(2, '0') : '—';
+  const heading = record.title ? stripId(record.title) : (record.issue ?? record.slug ?? 'Run');
+  const fields: [string, string | null][] = [
+    ['What changed', record.whatChanged],
+    ['Try it yourself', record.tryIt],
+    ['Verified', record.verified],
+    ['Bookkeeping', record.bookkeeping],
+    ['Doc drift', record.docDrift],
+  ];
+  const shown = fields.filter(([, v]) => v !== null && v !== '');
+  return (
+    <li className="runlog-card" onClick={onSelect} title="Show this issue in the backlog">
+      <div className="runlog-card__head">
+        <span className={`runlog-badge runlog-badge--${record.outcome}`}>
+          {outcomeLabel(record.outcome)}
+        </span>
+        <span className="runlog-card__id">{idLabel}</span>
+        <span className="runlog-card__title">{heading}</span>
+        <span className="runlog-card__time">
+          {new Date(record.capturedAt).toLocaleString()}
+        </span>
+      </div>
+      {shown.length > 0 ? (
+        <dl className="runlog-card__fields">
+          {shown.map(([label, value]) => (
+            <div key={label} className="runlog-card__field">
+              <dt className="runlog-card__label">{label}</dt>
+              <dd className="runlog-card__value">{value}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : (
+        <div className="runlog-card__empty">
+          No Completion block was captured for this Run (it may have ended without
+          emitting one).
+        </div>
+      )}
+    </li>
   );
 }
 

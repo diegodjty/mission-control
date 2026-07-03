@@ -3,9 +3,10 @@ import { Pane } from './Pane';
 import { Map } from './Map';
 import { ProjectBar } from './ProjectBar';
 import type { Backlog, IssueStatus } from '../../shared/backlog-model';
-import type { ProjectView, RunTarget } from '../../shared/ipc-contract';
+import type { ProjectView, RunLogRecord, RunTarget } from '../../shared/ipc-contract';
 import {
   deriveRunStatus,
+  isTerminal,
   observedIssueStatus,
   runningIssueIds,
   type RunStatus,
@@ -57,10 +58,12 @@ interface TrackedRun {
   sessionAlive: boolean;
   stoppedByUser: boolean;
   stopSignal: number;
+  /** The PTY session id, set once the Pane spawns (issue 34, for capture). */
+  sessionId: string | null;
 }
 
 function newRun(target: RunTarget): TrackedRun {
-  return { target, sessionAlive: true, stoppedByUser: false, stopSignal: 0 };
+  return { target, sessionAlive: true, stoppedByUser: false, stopSignal: 0, sessionId: null };
 }
 
 /**
@@ -165,6 +168,19 @@ export function App(): JSX.Element {
   // Which tile (if any) is maximized to fill the Pane area; null = tiled grid.
   const [maximizedId, setMaximizedId] = useState<number | null>(null);
 
+  // --- Run log (issue 34) --------------------------------------------------
+  // The captured Completion blocks for the active Project, newest first. Loaded
+  // from disk when a Project opens (so the feed survives closing Panes / the app
+  // / restarts) and upserted as Runs finish. `capturedSessions` tracks which
+  // sessions we've already begun capturing so the terminal-status effect fires
+  // capture once per Run, not on every re-render.
+  const [runLog, setRunLog] = useState<RunLogRecord[]>([]);
+  const capturedSessions = useRef<Set<string>>(new Set<string>());
+  // Live mirror of `projectPath` so a capture that resolves after a Project
+  // switch can tell it belongs to the previous Project and skip the feed upsert
+  // (it is still persisted to that Project's on-disk log, correctly).
+  const projectPathRef = useRef<string | null>(null);
+
   // --- Drain state ---------------------------------------------------------
   const [draining, setDraining] = useState(false);
   const [cap, setCap] = useState(2);
@@ -250,6 +266,10 @@ export function App(): JSX.Element {
     setWorktreeCommitErrors({});
     committedSoloIds.current.clear();
     committedWorktreeIds.current.clear();
+    // The Run-log feed is per-Project (issue 34): clear it and the capture
+    // bookkeeping so the new Project starts blank and loads its own log.
+    setRunLog([]);
+    capturedSessions.current.clear();
     setBacklog(null);
     setProjectPath(null);
   }, []);
@@ -756,6 +776,109 @@ export function App(): JSX.Element {
     );
   }, []);
 
+  // Record a Run's PTY session id once its Pane spawns (issue 34), so the
+  // capture effect can pull that session's buffered output when the Run ends.
+  const handleRunSession = useCallback((issueId: number, sessionId: string): void => {
+    setRuns((prev) =>
+      prev.map((r) =>
+        r.target.issueId === issueId ? { ...r, sessionId } : r,
+      ),
+    );
+  }, []);
+
+  // Upsert a captured record into the feed, keyed by its Run (session) id, so a
+  // re-capture as a streaming block finishes replaces the earlier version rather
+  // than adding a duplicate card. Newest first.
+  const upsertRunLog = useCallback((record: RunLogRecord): void => {
+    setRunLog((prev) => {
+      const others = prev.filter((r) => r.id !== record.id);
+      return [record, ...others].sort((a, b) =>
+        a.capturedAt < b.capturedAt ? 1 : a.capturedAt > b.capturedAt ? -1 : 0,
+      );
+    });
+  }, []);
+
+  // --- Completion-block capture (issue 34) ---------------------------------
+  // When a Run reaches a terminal status, capture its Completion block into the
+  // per-Project Run log. The block is the Worker's FINAL output, emitted just
+  // after it flips the issue `done`, so we capture shortly AFTER the terminal
+  // transition (a short debounce) and — because the block may still be streaming
+  // — retry a few times while the parse comes back `unknown`. Main de-dupes by
+  // session id, so the retries and the optimistic feed upsert can't create
+  // duplicate cards. Fires once per session (guarded by `capturedSessions`).
+  useEffect(() => {
+    if (projectPath === null) return;
+
+    for (const run of runs) {
+      const sessionId = run.sessionId;
+      if (sessionId === null) continue;
+      if (capturedSessions.current.has(sessionId)) continue;
+      if (!isTerminal(runStatusOf(run))) continue;
+
+      // Claim this session so a re-render doesn't schedule a second capture chain.
+      // The chain isn't cancelled on re-render (unlike the scan poll): captures
+      // are de-duped by session id and idempotent, so letting the retries run to
+      // completion is safe and avoids truncating them when a sibling Run's event
+      // re-fires this effect mid-capture.
+      capturedSessions.current.add(sessionId);
+      const capturePath = projectPath;
+      const { issueId, issueFileName, issueTitle } = run.target;
+      const MAX_ATTEMPTS = 4;
+
+      const attempt = (n: number): void => {
+        setTimeout(
+          () => {
+            void window.mc
+              .captureRunLog({ projectPath: capturePath, sessionId, issueId, issueFileName, issueTitle })
+              .then((res) => {
+                // Skip the feed upsert if the Project changed while we captured —
+                // the record still belongs to (and was persisted for) capturePath.
+                if (res.record && projectPathRef.current === capturePath) {
+                  upsertRunLog(res.record);
+                }
+                // A still-streaming block parses as `unknown`; retry so the final
+                // block is what sticks. Persisted every attempt, but de-duped by
+                // session id, so the last (best) capture wins.
+                if ((!res.record || res.record.outcome === 'unknown') && n + 1 < MAX_ATTEMPTS) {
+                  attempt(n + 1);
+                }
+              })
+              .catch(() => {
+                // Transient IPC error: allow a later attempt within the budget.
+                if (n + 1 < MAX_ATTEMPTS) attempt(n + 1);
+              });
+          },
+          n === 0 ? 1800 : 1500,
+        );
+      };
+      attempt(0);
+    }
+  }, [runs, projectPath, runStatusOf, upsertRunLog]);
+
+  // Load the active Project's persisted Run log when it opens/changes (issue 34),
+  // so the feed is populated from disk and survives closing Panes, the app, and
+  // restarts. Cleared when no Project is open.
+  useEffect(() => {
+    projectPathRef.current = projectPath;
+    if (projectPath === null) {
+      setRunLog([]);
+      return;
+    }
+    let cancelled = false;
+    void window.mc
+      .loadRunLog({ projectPath })
+      .then((res) => {
+        if (!cancelled) setRunLog(res.records);
+      })
+      .catch(() => {
+        // A transient read error just leaves the feed as-is; a later capture or
+        // Project reopen reloads it.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectPath]);
+
   const startDrain = useCallback(
     (chosenCap: number): void => {
       // Refuse to drain onto a mid-merge main (issue 24) — resolve/abort first.
@@ -1066,6 +1189,7 @@ export function App(): JSX.Element {
             projectPath={activeRepoPath}
             onRun={startRun}
             onBacklogLoaded={handleBacklogLoaded}
+            runLog={runLog}
             activeRunIssueIds={activeRunIssueIds}
             worktreeRunningIds={worktreeRunningIds}
             finishedUnmergedIds={finishedUnmergedIds}
@@ -1236,6 +1360,7 @@ export function App(): JSX.Element {
                     stopSignal={r.stopSignal}
                     onStatusChange={r.target.issueId === focusedId ? setPaneStatus : undefined}
                     onExit={() => handleRunExit(r.target.issueId)}
+                    onSession={(sid) => handleRunSession(r.target.issueId, sid)}
                   />
                 </div>
               );

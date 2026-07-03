@@ -21,6 +21,8 @@ import {
   scanAfkBranches,
 } from './git-worktree-adapter';
 import { mergeRuns, abortMerge } from './run-merge';
+import { RunLogStore } from './run-log-store';
+import { parseCompletionBlock } from '../shared/completion-parser';
 import {
   IpcChannel,
   type AfkScanRequest,
@@ -49,6 +51,11 @@ import {
   type ProjectTransitionRequest,
   type ProjectPickFolderResult,
   type ProjectView,
+  type RunLogCaptureRequest,
+  type RunLogCaptureResult,
+  type RunLogLoadRequest,
+  type RunLogLoadResult,
+  type RunLogRecord,
   type PtyKillMessage,
   type PtyResizeMessage,
   type PtySpawnRequest,
@@ -212,6 +219,16 @@ const ptyManager = new PtySessionManager({
 // One Backlog Watcher for the app; keyed per renderer WebContents so a Window
 // that closes (or re-points at another Project) never leaks a watcher.
 const backlogWatcher = new BacklogWatcher();
+
+// The durable Run log (issue 34, ADR-0009): per-Project Completion-block records
+// under the app's userData dir, so the Execution view's feed survives closing
+// Panes and app restarts. Instantiated in `whenReady` (needs `app.getPath`).
+let runLogStore: RunLogStore;
+
+/** The `NN-slug` for a Run's issue file name (`NN-slug.md`). */
+function slugOfFile(fileName: string): string {
+  return fileName.replace(/\.md$/, '');
+}
 
 function registerIpc(): void {
   ipcMain.handle(
@@ -499,9 +516,46 @@ function registerIpc(): void {
       return { ok: true };
     },
   );
+
+  // Capture a finished Run's Completion block into the per-Project Run log (issue
+  // 34). The renderer fires this once a Run reaches a terminal status; main reads
+  // that session's buffered PTY output, parses it with the pure completion-parser,
+  // and persists the record keyed by the Run's session id (a re-capture as a
+  // streaming block finishes supersedes the earlier version). Non-owners get a
+  // null record — a stale Window must not write another repo's Run log.
+  ipcMain.handle(
+    IpcChannel.RunLogCapture,
+    async (event, req: RunLogCaptureRequest): Promise<RunLogCaptureResult> => {
+      if (ownershipError(event, req.projectPath)) return { record: null };
+      const parsed = parseCompletionBlock(ptyManager.getRunOutput(req.sessionId));
+      const record: RunLogRecord = {
+        ...parsed,
+        // Prefer the block's own id, but fall back to the Run's known issue id
+        // so a malformed block still lands on the right card.
+        issueId: parsed.issueId ?? req.issueId,
+        id: req.sessionId,
+        capturedAt: new Date().toISOString(),
+        slug: slugOfFile(req.issueFileName),
+        title: req.issueTitle,
+      };
+      await runLogStore.append(req.projectPath, record);
+      return { record };
+    },
+  );
+
+  // Load a Project's persisted Run log for the Execution view feed (issue 34).
+  // A non-owner gets an empty log rather than another Window's history.
+  ipcMain.handle(
+    IpcChannel.RunLogLoad,
+    async (event, req: RunLogLoadRequest): Promise<RunLogLoadResult> => {
+      if (ownershipError(event, req.projectPath)) return { records: [] };
+      return { records: await runLogStore.read(req.projectPath) };
+    },
+  );
 }
 
 app.whenReady().then(() => {
+  runLogStore = new RunLogStore(app.getPath('userData'));
   registerIpc();
   createWindow();
 

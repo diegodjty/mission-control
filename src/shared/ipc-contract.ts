@@ -7,6 +7,7 @@
  * runtime imports (types only).
  */
 import type { Backlog, IssueStatus } from './backlog-model';
+import type { CompletionRecord, RunOutcome } from './completion-parser';
 import type { IsolationRun } from './isolation-policy';
 import type { PipelineStage } from './project-registry';
 import type { AfkBranchFacts } from './worktree-scan';
@@ -137,6 +138,20 @@ export const IpcChannel = {
    * ProjectList so each Window's switcher reflects live ownership.
    */
   ProjectRegistryChanged: 'project:registry-changed',
+  /**
+   * renderer → main (invoke): capture a finished Run's Completion block (issue
+   * 34). Main parses the Run's buffered PTY output into a structured record and
+   * persists it to the per-Project Run log on disk, so its "what changed / try
+   * it / verified / doc-drift" survives the Pane scroll. Resolves to a
+   * RunLogCaptureResult.
+   */
+  RunLogCapture: 'runlog:capture',
+  /**
+   * renderer → main (invoke): load a Project's persisted Run log (issue 34) so
+   * the Execution view's Run-log feed survives closing Panes and app restarts.
+   * Resolves to a RunLogLoadResult.
+   */
+  RunLogLoad: 'runlog:load',
 } as const;
 
 export type IpcChannel = (typeof IpcChannel)[keyof typeof IpcChannel];
@@ -459,6 +474,55 @@ export interface WindowOpenResult {
 }
 
 /**
+ * One persisted Run-log entry (issue 34): the pure `completion-parser`'s parsed
+ * fields plus the capture metadata the feed/store need. `id` is the Run's PTY
+ * session id, so a re-capture supersedes its earlier version and each Run gets
+ * exactly one card. Shared here so main (persist), preload, and renderer (feed)
+ * agree on one shape.
+ */
+export interface RunLogRecord extends CompletionRecord {
+  /** Stable per-Run id (the PTY session id). */
+  id: string;
+  /** ISO-8601 timestamp of when the block was captured. */
+  capturedAt: string;
+  /** The `NN-slug` of the Run's issue, when known. */
+  slug: string | null;
+  /** The issue title, for the card header. */
+  title: string | null;
+}
+
+/** Re-export the parser's outcome enum so consumers need one import. */
+export type { RunOutcome };
+
+export interface RunLogCaptureRequest {
+  /** The Project repo path whose Run log to append to. */
+  projectPath: string;
+  /** The finished Run's PTY session id (its buffered output is parsed). */
+  sessionId: SessionId;
+  /** The Run's issue id (fallback when the block heading omits it). */
+  issueId: number;
+  /** The Run's issue file name (`NN-slug.md`), for the slug + card. */
+  issueFileName: string;
+  /** The Run's issue title, for the card header. */
+  issueTitle: string;
+}
+
+export interface RunLogCaptureResult {
+  /** The persisted record, or null when capture was refused (e.g. not owner). */
+  record: RunLogRecord | null;
+}
+
+export interface RunLogLoadRequest {
+  /** The Project repo path whose persisted Run log to read. */
+  projectPath: string;
+}
+
+export interface RunLogLoadResult {
+  /** The Project's Run-log records, newest first. */
+  records: RunLogRecord[];
+}
+
+/**
  * The surface preload exposes on `window.mc`. Declared here so main, preload,
  * and renderer all agree on one shape.
  */
@@ -531,6 +595,13 @@ export interface MissionControlApi {
   openWindow(req: WindowOpenRequest): Promise<WindowOpenResult>;
   /** Subscribe to registry changes across Windows; returns an unsubscribe fn. */
   onProjectRegistryChanged(listener: () => void): () => void;
+  /**
+   * Capture a finished Run's Completion block into the per-Project Run log
+   * (issue 34): main parses the Run's buffered output and persists the record.
+   */
+  captureRunLog(req: RunLogCaptureRequest): Promise<RunLogCaptureResult>;
+  /** Load a Project's persisted Run log for the Execution view feed (issue 34). */
+  loadRunLog(req: RunLogLoadRequest): Promise<RunLogLoadResult>;
   spawnPty(req: PtySpawnRequest): Promise<PtySpawnResult>;
   writePty(msg: PtyWriteMessage): void;
   resizePty(msg: PtyResizeMessage): void;
