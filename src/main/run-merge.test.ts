@@ -163,6 +163,59 @@ describe('mergeRuns — the real afk-merge.sh against real parallel branches', (
     expect(result.merged).toEqual(['03-a']);
   });
 
+  it('excludes a non-existent slug from merged and reports the true count (issue 23)', async () => {
+    // One real finished Run and one slug whose afk/ branch never existed. The
+    // script exits 0 and SKIPS the missing branch — it must not be reported as
+    // merged, and only the real branch's worktree/branch get cleaned up.
+    await finishedRun('03-a', 'a.txt', 'from run 3\n');
+
+    const result = await mergeRuns(repo, ['03-a', '99-ghost'], { scriptPath: SCRIPT });
+
+    expect(result.ok).toBe(true);
+    expect(result.conflicted).toBe(false);
+    expect(result.merged).toEqual(['03-a']); // 99-ghost excluded
+    expect(result.message).toContain('Merged 1 branch into main');
+    expect(result.message).toContain('99-ghost: no branch');
+
+    // Only the real branch was integrated + cleaned up; the ghost slug leaves
+    // no phantom branch behind.
+    await git(repo, 'checkout', 'main');
+    expect((await git(repo, 'ls-files'))).toContain('a.txt');
+    expect(await branchExists('03-a')).toBe(false);
+    expect(await branchExists('99-ghost')).toBe(false);
+  });
+
+  it('reports 0 merged (not a fresh merge) when a branch is already in main (issue 23)', async () => {
+    await finishedRun('03-a', 'a.txt', 'from run 3\n');
+    // First merge integrates it.
+    await mergeRuns(repo, ['03-a'], { scriptPath: SCRIPT, cleanup: false });
+    // A second stale-scan Merge of the same slug: already on main, nothing new.
+    const again = await mergeRuns(repo, ['03-a'], { scriptPath: SCRIPT, cleanup: false });
+
+    expect(again.ok).toBe(true);
+    expect(again.merged).toEqual([]);
+    expect(again.message).toContain('Merged 0 branches into main');
+    expect(again.message).toContain('03-a: already in main');
+  });
+
+  it('names a dirty-tree preflight refusal as its real cause, not a conflict (issue 23)', async () => {
+    await finishedRun('03-a', 'a.txt', 'from run 3\n');
+    // Dirty the main checkout with a TRACKED, uncommitted change so afk-merge.sh's
+    // clean-repo preflight refuses before merging anything.
+    await writeFile(join(repo, 'README.md'), '# scratch repo\nuncommitted edit\n');
+
+    const result = await mergeRuns(repo, ['03-a'], { scriptPath: SCRIPT });
+
+    expect(result.ok).toBe(false);
+    expect(result.conflicted).toBe(false); // NOT a conflict
+    expect(result.merged).toEqual([]);
+    expect(result.message).toMatch(/uncommitted changes/i);
+    expect(result.message).not.toMatch(/conflict/i);
+    // The branch and worktree are untouched — nothing was merged or cleaned up.
+    expect(await branchExists('03-a')).toBe(true);
+    expect(existsSync(worktreePathFor(repo, '03-a'))).toBe(true);
+  });
+
   it('is a no-op with an empty slug list', async () => {
     const result = await mergeRuns(repo, [], { scriptPath: SCRIPT });
     expect(result.ok).toBe(true);

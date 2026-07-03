@@ -35,6 +35,7 @@ import { removeWorktree } from './git-worktree-adapter';
 import { ensureLocallyIgnored } from './local-ignore';
 import { afkMergeConfContent } from '../shared/merge-plan';
 import { branchFor } from '../shared/isolation-policy';
+import { parseMergeSummary, classifyMergeFailure } from '../shared/merge-output';
 import type { MergeRunsResult } from '../shared/ipc-contract';
 
 const exec = promisify(execFile);
@@ -83,12 +84,15 @@ interface ExecFailure {
 /**
  * Merge the given finished `afk/NN-slug` branches into `main` and clean up.
  *
- * On a clean merge (script exit 0): each branch is now on `main`; we remove its
- * worktree (non-force — untracked leftovers keep the worktree, reported) and
- * delete the merged branch. On a conflict (or any non-zero exit): nothing is
- * cleaned up, the script's own output (which names the conflicting files and how
- * to resolve them) is surfaced verbatim, and the merge is left as the script
- * left it for the human. Never resolves conflicts silently (issue 08).
+ * On exit 0 the script may still have SKIPPED branches (missing, or already on
+ * main), so we parse its `=== summary ===` block for the slugs it actually
+ * merged: only those are reported in `merged`, and only their worktrees are
+ * removed (non-force — untracked leftovers keep the worktree, reported) and
+ * branches deleted. A skipped slug is named in the message, never counted as a
+ * fresh merge (issue 23). On any non-zero exit nothing is cleaned up, the
+ * failure is classified from the script's structured lines (conflict vs.
+ * preflight refusal) so the message names the real cause, and the script's own
+ * output is surfaced verbatim. Never resolves conflicts silently (issue 08).
  */
 export async function mergeRuns(
   projectPath: string,
@@ -133,24 +137,32 @@ export async function mergeRuns(
   const output = [stdout, stderr].filter((s) => s.trim().length > 0).join('\n').trim();
 
   if (code !== 0) {
-    const conflicted = /conflict/i.test(output);
-    return {
-      ok: false,
-      conflicted,
-      merged: [],
-      message: conflicted
+    // Classify from the script's structured lines, not a substring, so a
+    // preflight refusal is reported as its real cause instead of a false
+    // "conflict" or a generic "could not run".
+    const cause = classifyMergeFailure(output);
+    const conflicted = cause === 'conflict';
+    const message =
+      cause === 'conflict'
         ? 'Merge stopped on a conflict — resolve the listed files, then Merge again. Nothing was cleaned up.'
-        : 'Merge could not run — see details below.',
-      output,
-    };
+        : cause === 'dirty-tree'
+          ? 'Merge preflight failed: the repository has uncommitted changes. Commit or stash them, then Merge again.'
+          : cause === 'wrong-branch'
+            ? 'Merge preflight failed: the repository is not on its main branch. Check out main, then Merge again.'
+            : 'Merge could not run — see details below.';
+    return { ok: false, conflicted, merged: [], message, output };
   }
 
-  // Clean merge: integrate is done. Clean up Mission Control's own worktrees +
-  // branches for exactly the slugs we merged (the script left them via --keep).
+  // Clean merge (exit 0). The script exits 0 even when it SKIPPED branches that
+  // were missing or already on main, so parse its `=== summary ===` block for
+  // the slugs it ACTUALLY merged this run — report and clean up only those.
+  const summary = parseMergeSummary(output);
+  const mergedSlugs = summary.mergedSlugs;
+
   const cleanup = options.cleanup !== false;
   const merged: string[] = [];
   const leftBehind: string[] = [];
-  for (const slug of slugs) {
+  for (const slug of mergedSlugs) {
     if (cleanup) {
       let worktreeGone = true;
       try {
@@ -175,11 +187,22 @@ export async function mergeRuns(
     merged.push(slug);
   }
 
+  // Name any requested slugs that were skipped (missing branch / already in
+  // main) so a stale-scan Merge reads honestly ("Merged 0 branches …") instead
+  // of claiming a merge that never happened.
+  const skipNotes = summary.rows
+    .filter((r) => !r.merged && r.skipReason)
+    .map((r) => `${r.slug}: ${r.skipReason}`);
+
   const base = `Merged ${merged.length} branch${merged.length === 1 ? '' : 'es'} into main`;
-  const message =
+  const skipSuffix = skipNotes.length > 0 ? ` (${skipNotes.join('; ')})` : '';
+  const cleanupSuffix =
     leftBehind.length > 0
-      ? `${base}. Left worktree(s) for ${leftBehind.join(', ')} in place (uncommitted changes).`
-      : `${base}${cleanup ? ' and cleaned up their worktrees.' : '.'}`;
+      ? `. Left worktree(s) for ${leftBehind.join(', ')} in place (uncommitted changes).`
+      : cleanup && merged.length > 0
+        ? ` and cleaned up ${merged.length === 1 ? 'its worktree' : 'their worktrees'}.`
+        : '.';
+  const message = `${base}${skipSuffix}${cleanupSuffix}`;
 
   return { ok: true, conflicted: false, merged, message, output };
 }
