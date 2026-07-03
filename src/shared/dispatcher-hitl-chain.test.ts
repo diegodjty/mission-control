@@ -31,6 +31,9 @@ import {
 } from './dispatcher-lifecycle';
 import { channelForAction } from './dispatcher-channel';
 import { buildBacklog, type RawFile } from './backlog-model';
+import { parseReceipt } from './receipt-parser';
+import { createDispatcherPump, type PumpScheduler } from './dispatcher-pump';
+import { SUBMIT_KEY } from './dispatcher-feed';
 
 const CONFIG = '## Active PRD\n\n`docs/PRD.md` — the PRD.\n';
 
@@ -130,5 +133,108 @@ describe('issue 53 — parked HITL Run reliably notifies the user (pure chain)',
     expect(result.notifications).toHaveLength(1);
     // ...but as a routine ambient-log note, not a blocking chat prompt.
     expect(result.notifications[0].channel).toBe('log');
+  });
+});
+
+// --- Issue 60: the notification must SURVIVE the enqueue → chat-PTY stretch ---
+//
+// The issue-53 chain above is pure derivation, and in the live walkthrough-58
+// failure every link of it was green — issue 05's Receipt was ingested with a
+// declared `needs-verification`, the derivation said hitl-waiting → chat — yet
+// no notification ever appeared. The loss was in the submit pump. This test
+// drives the SAME chain from a real Receipt through the extracted pump under a
+// simulated gate-churn sequence (session replaced/dead/replaced mid-delivery)
+// and pins the requirement: exactly one chat notification, carrying the issue
+// id and its manual-verification steps, delivered into whatever session
+// survives the churn.
+
+const PARKED_HITL_RECEIPT =
+  '---\n' +
+  'issue: 5\n' +
+  'slug: manual-check\n' +
+  'outcome: needs-verification\n' +
+  'finished: 2026-07-03T21:12:29Z\n' +
+  '---\n' +
+  '## Ready for manual verification — issue 05 (manual-check)\n\n' +
+  'Steps: 1. Start the app. 2. Confirm the parked issue shows as awaiting sign-off.\n';
+
+/** Minimal manual scheduler (same contract the pump tests use). */
+class ManualScheduler implements PumpScheduler {
+  now = 0;
+  private tasks: { at: number; fn: () => void; id: number }[] = [];
+  private seq = 0;
+  schedule(fn: () => void, ms: number): unknown {
+    const id = ++this.seq;
+    this.tasks.push({ at: this.now + ms, fn, id });
+    return id;
+  }
+  cancel(handle: unknown): void {
+    this.tasks = this.tasks.filter((t) => t.id !== handle);
+  }
+  advance(ms: number): void {
+    const target = this.now + ms;
+    for (;;) {
+      const due = this.tasks.filter((t) => t.at <= target).sort((a, b) => a.at - b.at)[0];
+      if (!due) break;
+      this.tasks = this.tasks.filter((t) => t !== due);
+      this.now = Math.max(this.now, due.at);
+      due.fn();
+    }
+    this.now = target;
+  }
+}
+
+describe('issue 60 — hitl-waiting notification survives gate churn (Receipt → pump)', () => {
+  it('delivers exactly one chat notification (id + steps) across session replacement churn', () => {
+    // 1) Ingest (proven healthy in the live failure): the Receipt declares it.
+    const record = parseReceipt(PARKED_HITL_RECEIPT);
+    expect(record.outcome).toBe('needs-verification');
+    expect(record.issueId).toBe(5);
+
+    // 2) Pure derivation: `hitl: true` issue → hitl-waiting → blocking → chat.
+    const kind = lifecycleKindForOutcome(record.outcome, true);
+    expect(kind).toBe('hitl-waiting');
+    if (kind !== 'hitl-waiting') throw new Error('unreachable');
+    const reaction = reactToLifecycleEvent({
+      kind,
+      runId: 'receipt-05',
+      issueId: record.issueId,
+      slug: record.slug,
+      title: null,
+      detail: record.detail,
+    });
+    expect(reaction.notification).not.toBeNull();
+    expect(channelForAction(actionForLifecycle(kind))).toBe('chat');
+
+    // 3) The formerly-lossy stretch: enqueue, then churn the Dispatcher session
+    //    mid-delivery the way heavy gate churn does — replaced, dead, replaced.
+    const sched = new ManualScheduler();
+    const writes: { session: string; data: string }[] = [];
+    const pump = createDispatcherPump({
+      write: (session, data) => writes.push({ session, data }),
+      canFlush: () => true,
+      now: () => sched.now,
+      scheduler: sched,
+    });
+    const key = `${kind}:receipt-05`; // App.tsx's lifecycle event key
+    pump.attachSession('sess-1');
+    expect(pump.enqueue({ key, text: reaction.notification ?? '' })).toBe(true);
+    pump.attachSession(null); // sess-1 died mid-delivery
+    // A re-render re-deriving the same event must not multiply the message.
+    expect(pump.enqueue({ key, text: reaction.notification ?? '' })).toBe(false);
+    pump.attachSession('sess-2'); // replacement spawns...
+    pump.attachSession('sess-3'); // ...and is itself replaced before settling
+    sched.advance(10_000);
+
+    // Exactly one submitted notification across the whole churn, in the
+    // surviving session, naming the issue and relaying its steps.
+    const submits = writes.filter((w) => w.data === SUBMIT_KEY);
+    expect(submits).toHaveLength(1);
+    expect(submits[0].session).toBe('sess-3');
+    const delivered = writes.filter((w) => w.session === 'sess-3' && w.data !== SUBMIT_KEY);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0].data).toContain('issue 05');
+    expect(delivered[0].data).toContain('manual verification');
+    expect(delivered[0].data).toContain('Confirm the parked issue shows as awaiting sign-off');
   });
 });

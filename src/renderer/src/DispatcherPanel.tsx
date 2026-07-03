@@ -17,6 +17,12 @@ interface DispatcherPanelProps {
    * never interleave with the user's message ("prompt over prompt").
    */
   onInput?: (data: string) => void;
+  /**
+   * Called when the chat session's PTY exits (issue 60): the parent detaches
+   * its submit pump so queued blocking notifications stay queued — per-Project
+   * state, never dropped with a dead session — and clears the stale session id.
+   */
+  onExit?: (exitCode: number) => void;
   /** Dismiss the Dispatcher — ends the session and closes the chat panel. */
   onDismiss?: () => void;
   /** How many Runs' Completion blocks have been captured so far (feed count). */
@@ -131,6 +137,7 @@ export function DispatcherPanel({
   target,
   onSession,
   onInput,
+  onExit,
   onDismiss,
   ingestedCount,
   activities,
@@ -204,7 +211,7 @@ export function DispatcherPanel({
         </div>
       )}
       <div className="dispatcher__body">
-        <Pane dispatcher={target} onSession={onSession} onInput={onInput} />
+        <Pane dispatcher={target} onSession={onSession} onInput={onInput} onExit={onExit} />
       </div>
     </div>
   );
