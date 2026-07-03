@@ -48,8 +48,15 @@ The structured summary a **Worker** emits when its Run ends (what changed / try-
 **Run log**:
 The captured feed of **Completion blocks**, one card per Run. The lean, scannable record of a drain; the Dispatcher's input and the human's at-a-glance history.
 
-**Dispatcher authority (hybrid)**:
-The Dispatcher acts autonomously only on *safe, reversible, mechanical* things — committing a clean checkpoint between issues, synthesizing/relaying, starting the next queued Run within the cap — and *proposes for one-click approval* every scope-changing judgment call: logging a new issue, a **Merge**, aborting a drain, changing course. (Mirrors ADR-0002's human-triggered Merge and ADR-0001's interactive posture.)
+**Dispatcher authority (silent-autonomy default)**:
+The Dispatcher acts **silently and autonomously by default**; interruptions are a small, explicit exception (ADR-0011, refining ADR-0007). Three tiers:
+- **Blocking approval** (must click before it proceeds) — the *entire* list is: (1) a **Merge that hits a conflict**, (2) **aborting/stopping a drain**, (3) a **HITL issue awaiting sign-off**. Nothing else blocks.
+- **Passive note** (lands in an ambient, ignorable log — never blocks): committed a checkpoint, a **clean merge** (auto-proceeds), an issue completed, a new follow-up issue logged.
+- **Silent** — everything else; answerable on-demand ("what's happening?").
+A **clean, conflict-free Merge auto-proceeds** (refines ADR-0002's "human-triggered" to *auto-on-clean, gate-on-conflict*), and **logging a follow-up issue** is a silent+passive action, not a gate.
+
+**Noise floor & interaction (ADR-0012)**:
+"If in doubt, stay silent." Empty/boot-screen/unclassifiable captures are dropped (never a Run or note); doc-drift surfaces only on a real contradiction (not "none"); cross-run consolidation is a rare, deduped **passive note** (never a per-tick proposal). Inferred/speculative signals must clear a high confidence bar; routine facts (committed/merged/done) are ambient passive notes. **Passive notes render in the ambient log, not injected into the chat** — only blocking approvals and the user's Q&A use the chat (one serialized queue; no injection while the user types). Backward status moves (finished→open) are debounced ≥1 reconcile checkpoint before surfacing.
 
 ## Relationships
 

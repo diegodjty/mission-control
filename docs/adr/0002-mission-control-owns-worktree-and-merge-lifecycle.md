@@ -1,5 +1,7 @@
 # Mission Control owns the worktree + merge lifecycle, keyed on concurrency
 
+**Status:** refined by ADR-0011 for Dispatcher-driven drains — a *clean* merge auto-proceeds; only a *conflicting* merge stays human-triggered. The human-triggered **Merge button** on the Map (a manual, single-shot execution-view action) is unchanged.
+
 Isolation is Mission Control's job, not the user's, and it keys off how many Runs are live: a **single Run works directly on `main`** (solo mode, no worktree); as soon as **2+ Runs** run concurrently, Mission Control auto-enables parallel mode, gives each Run its own git worktree on an `afk/NN-slug` branch, and — when the parallel Runs finish — surfaces a human-triggered **Merge** action on the Map that runs `afk-merge.sh` and reports conflicts.
 
 ## Considered Options
