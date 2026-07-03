@@ -26,6 +26,20 @@ describe('buildDispatcherPrompt', () => {
     expect(prompt.toLowerCase()).toContain('approval');
   });
 
+  it('directs cross-Run synthesis: doc-drift amendment, patterns, consolidation (issue 38)', () => {
+    const prompt = buildDispatcherPrompt(REF);
+    const lower = prompt.toLowerCase();
+    // (a) doc-drift → propose an approval-gated plan amendment, never self-edit.
+    expect(lower).toContain('doc-drift');
+    expect(lower).toContain('propose');
+    expect(lower).toContain('amend');
+    // (b) cross-Run patterns — same seam / recurring finding class.
+    expect(lower).toContain('seam');
+    expect(lower).toContain('recurring');
+    // (c) consolidate related findings into one summary.
+    expect(lower).toContain('consolidate');
+  });
+
   it('omits the PRD clause when none is set', () => {
     const prompt = buildDispatcherPrompt({ projectPath: '/repo', activePrd: null });
     expect(prompt).not.toContain('active PRD is');

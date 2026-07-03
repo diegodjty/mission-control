@@ -18,6 +18,7 @@ const LINE: Record<DispatcherAction, Authority> = {
   merge: 'needs-approval',
   'abort-drain': 'needs-approval',
   'discard-and-continue': 'needs-approval',
+  'amend-plan': 'needs-approval',
   'course-change': 'needs-approval',
 };
 
@@ -39,6 +40,7 @@ describe('dispatcher authority classifier (ADR-0007, full line)', () => {
       'merge',
       'abort-drain',
       'discard-and-continue',
+      'amend-plan',
       'course-change',
     ];
     for (const action of scope) {
@@ -70,12 +72,19 @@ describe('dispatcher authority classifier (ADR-0007, full line)', () => {
     expect(isAuto('discard-and-continue')).toBe(false);
   });
 
-  it('returns exactly four auto actions and five needs-approval actions', () => {
+  it('amend-plan is approval-gated (issue 38 — the PRD is the human\'s to change)', () => {
+    // A doc-drift-driven plan amendment is a scope change the Dispatcher proposes
+    // (afk-issue-runner §4: the Worker surfaces drift, the human decides).
+    expect(classifyAuthority('amend-plan')).toBe('needs-approval');
+    expect(isAuto('amend-plan')).toBe(false);
+  });
+
+  it('returns exactly four auto actions and six needs-approval actions', () => {
     const actions = Object.keys(LINE) as DispatcherAction[];
     const auto = actions.filter((a) => classifyAuthority(a) === 'auto');
     const gated = actions.filter((a) => classifyAuthority(a) === 'needs-approval');
     expect(auto).toHaveLength(4);
-    expect(gated).toHaveLength(5);
+    expect(gated).toHaveLength(6);
   });
 
   it('isAuto agrees with classifyAuthority', () => {

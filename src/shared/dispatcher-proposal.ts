@@ -65,6 +65,7 @@ const LABELS: Record<DispatcherAction, string> = {
   merge: 'Merge finished parallel Runs into main',
   'abort-drain': 'Abort the drain',
   'discard-and-continue': 'Discard the stranded worktree and continue the drain',
+  'amend-plan': 'Amend the plan to reconcile a doc-drift finding',
   'course-change': 'Change course',
 };
 

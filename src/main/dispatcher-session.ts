@@ -8,7 +8,13 @@
  * The Dispatcher session is the LLM integration in this slice: the app feeds it
  * the input contract (seed + a stream of Completion blocks, never raw Pane
  * output — see `dispatcher-input-contract`), and it synthesizes across Runs and
- * answers questions ("what's left?") from those summaries. The deterministic
+ * answers questions ("what's left?") from those summaries. The cross-Run
+ * synthesis behaviour (issue 38) is prompt-level and verified via the QA
+ * walkthrough: flag a Run's doc-drift and PROPOSE an approval-gated plan
+ * amendment, spot several Runs touching the same seam / a recurring finding
+ * class, and consolidate related findings into one summary rather than relisting
+ * each raw block. The pure primitives behind it live in `dispatcher-synthesis`.
+ * The deterministic
  * mechanics around it — who starts next under the cap (Run Coordinator, via the
  * bridge), spawning worker Panes, committing the inter-issue checkpoint — are
  * the app's, NOT the LLM's (ADR-0008); the prompt says so explicitly.
@@ -50,8 +56,14 @@ export function buildDispatcherPrompt(ref: DispatcherRef): string {
     `scope-changing action (logging a new issue, a merge, aborting the drain, or ` +
     `changing course). As Runs finish, synthesize a short plain-language summary ` +
     `of what changed across them, and answer questions like "what's left?" from ` +
-    `the Completion blocks and Run log — never from raw Pane output. Wait for the ` +
-    `first Completion block before summarizing.`
+    `the Completion blocks and Run log — never from raw Pane output. Synthesize ` +
+    `ACROSS Runs, not just per Run: when a Completion block reports doc-drift (a ` +
+    `PRD/reality contradiction), surface it and propose amending the plan for ` +
+    `one-click approval — never edit the PRD yourself. Point out cross-Run ` +
+    `patterns — several Runs touching the same seam, or a recurring class of ` +
+    `finding — and consolidate related findings from multiple Runs into ONE ` +
+    `summary rather than relisting each raw block. Wait for the first Completion ` +
+    `block before summarizing.`
   );
 }
 

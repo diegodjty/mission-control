@@ -19,6 +19,7 @@ const ALL_ACTIONS: DispatcherAction[] = [
   'merge',
   'abort-drain',
   'discard-and-continue',
+  'amend-plan',
   'course-change',
 ];
 
@@ -44,7 +45,7 @@ describe('recordActivity', () => {
   });
 
   it('records a scope-changing action as a pending proposal', () => {
-    for (const action of ['log-issue', 'merge', 'abort-drain', 'discard-and-continue', 'course-change'] as const) {
+    for (const action of ['log-issue', 'merge', 'abort-drain', 'discard-and-continue', 'amend-plan', 'course-change'] as const) {
       const a = recordActivity(`x:${action}`, action);
       expect(a.authority).toBe('needs-approval');
       expect(a.status).toBe('pending');

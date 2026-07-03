@@ -45,6 +45,14 @@ export type DispatcherAction =
    * must approve (issue 37), never something the Dispatcher does on its own.
    */
   | 'discard-and-continue'
+  /**
+   * Amend the plan (PRD/backlog) to reconcile a doc-drift finding a Run reported
+   * (issue 38). Doc-drift is a PRD/reality contradiction the Worker surfaced but
+   * never resolves — the PRD is the human's to change (afk-issue-runner §4), so
+   * the Dispatcher PROPOSES the amendment and the human approves it, never edits
+   * the plan on its own.
+   */
+  | 'amend-plan'
   /** Change course (re-order, re-scope, skip). */
   | 'course-change';
 

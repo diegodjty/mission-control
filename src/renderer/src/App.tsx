@@ -26,6 +26,12 @@ import {
   type LifecycleEvent,
 } from '../../shared/dispatcher-lifecycle';
 import {
+  describeDocDrift,
+  detectCrossRunOverlap,
+  extractDocDrift,
+  proposeDocDriftAmendment,
+} from '../../shared/dispatcher-synthesis';
+import {
   deriveRunStatus,
   isTerminal,
   observedIssueStatus,
@@ -243,6 +249,10 @@ export function App(): JSX.Element {
   // Keyed by proposal id (`Map` the component name shadows the global, so a plain
   // record avoids the collision).
   const discardTargets = useRef<Record<string, { issueId: number; slug: string }>>({});
+  // Cross-Run synthesis (issue 38): which shared seams the Dispatcher has already
+  // surfaced as a cross-Run pattern, so a re-scan doesn't re-narrate the same
+  // "these Runs all hit X" line each poll.
+  const overlapSurfaced = useRef<Set<string>>(new Set<string>());
 
   // --- Merge state (issue 08; issue 17) ------------------------------------
   // `mergeDisplay` is the pure selector's decision of what the Merge UI shows
@@ -328,6 +338,7 @@ export function App(): JSX.Element {
     mergeProposalSig.current = null;
     lifecycleReacted.current.clear();
     discardTargets.current = {};
+    overlapSurfaced.current.clear();
     setMerging(false);
     setAborting(false);
     setMergeDisplay(null);
@@ -1006,6 +1017,35 @@ export function App(): JSX.Element {
           ? prev
           : [...prev, recordActivity(`synthesize:${rec.id}`, 'synthesize')],
       );
+      // Cross-Run synthesis (issue 38, acceptance a): if this block reports
+      // doc-drift (a PRD/reality contradiction), the Dispatcher SURFACES it and
+      // PROPOSES a plan amendment — an approval-gated `amend-plan` action (the
+      // PRD is the human's to change). Doc-drift free / "none" blocks add nothing.
+      const [drift] = extractDocDrift([rec]);
+      if (drift) {
+        dispatcherQueue.current.push(
+          `${describeDocDrift(drift)} — amend the plan to reconcile it?`,
+        );
+        const proposal = proposeDocDriftAmendment(drift);
+        setDispatcherActivities((prev) =>
+          prev.some((a) => a.id === proposal.id) ? prev : [...prev, proposal],
+        );
+      }
+    }
+    // Cross-Run patterns (issue 38, acceptance b/c): once ≥2 Runs touch the same
+    // seam (a file, a named "… seam", a shared identifier), consolidate them into
+    // ONE surfaced line instead of leaving the user to spot it across cards. The
+    // detection is the pure `detectCrossRunOverlap` over the captured records;
+    // `overlapSurfaced` guards each seam so a re-poll doesn't re-narrate it.
+    for (const group of detectCrossRunOverlap(runLog)) {
+      if (overlapSurfaced.current.has(group.seam)) continue;
+      overlapSurfaced.current.add(group.seam);
+      const runs = group.runs
+        .map((r) => (r.issueId !== null ? `issue ${String(r.issueId).padStart(2, '0')}` : r.runId))
+        .join(', ');
+      dispatcherQueue.current.push(
+        `${group.runs.length} Runs touched ${group.seam} (${runs}) — consider a consolidated pass rather than treating each separately.`,
+      );
     }
     pumpDispatcherQueue(sessionId);
   }, [runLog, dispatcher, pumpDispatcherQueue]);
@@ -1149,6 +1189,7 @@ export function App(): JSX.Element {
     mergeProposalSig.current = null;
     lifecycleReacted.current.clear();
     discardTargets.current = {};
+    overlapSurfaced.current.clear();
   }, []);
 
   // Keep the App's backlog copy fresh from every Map load/live-change so the
