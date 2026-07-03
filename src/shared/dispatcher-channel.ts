@@ -124,3 +124,23 @@ export function canFlushChat(state: TypingState, now: number, idleMs: number = C
   if (state.composing) return false;
   return now - state.lastInputAt >= idleMs;
 }
+
+// --- On-demand status-injection trigger (issue 52) ----------------------------
+
+/**
+ * Decide, from one chunk of the user's chat input, whether it is a moment to
+ * inject the current ground-truth status snapshot (issue 52). The trigger is the
+ * user SENDING a composed message: a submit (`\r`/`\n`) that ends a line the user
+ * had actually been composing (`prev.composing`). This deliberately does NOT fire
+ * on:
+ *   - a bare Enter on an empty prompt (nothing was composed → `prev.composing`
+ *     is false), so idle Enters don't spam injections;
+ *   - an ordinary keystroke mid-compose (not a submit); or
+ *   - a line-clear (Ctrl-C / Ctrl-U), which abandons the line rather than sends it.
+ *
+ * `prev` is the compose state as it stood BEFORE this chunk is folded in (so the
+ * caller must consult it before calling `reduceTyping`). Pure — no I/O, no clock.
+ */
+export function isStatusInjectionTrigger(prev: TypingState, data: string): boolean {
+  return prev.composing && isSubmitInput(data);
+}

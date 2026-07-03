@@ -11,6 +11,7 @@ import { describe, it, expect } from 'vitest';
 import {
   reconcileStatusModel,
   renderStatusModel,
+  buildStatusSnapshotMessage,
   debounceStatusModel,
   initialStatusDebounceState,
   REGRESSION_CHECKPOINTS,
@@ -327,5 +328,44 @@ describe('renderStatusModel', () => {
     );
     expect(text).toContain('…');
     expect(text).not.toContain(long);
+  });
+});
+
+describe('buildStatusSnapshotMessage — on-demand injection (issue 52)', () => {
+  it('returns null when there is no model yet (nothing to inject)', () => {
+    expect(buildStatusSnapshotMessage(null)).toBeNull();
+  });
+
+  it('returns null before the backlog loads (empty model, no needs-look)', () => {
+    // The same "not loaded yet" state renderStatusModel guards against — we must
+    // NOT inject a hollow snapshot on the user's query in that window.
+    expect(buildStatusSnapshotMessage(reconcileStatusModel(input()))).toBeNull();
+  });
+
+  it('wraps the authoritative status body in on-query framing when there is real status', () => {
+    const model = reconcileStatusModel(
+      input({
+        backlog: backlog([issue(1, 'done'), issue(2, 'done'), issue(5, 'wip'), issue(6, 'open')]),
+      }),
+    );
+    const msg = buildStatusSnapshotMessage(model);
+    expect(msg).not.toBeNull();
+    // Framing tells the session to answer from THIS snapshot, not the seed.
+    expect(msg).toContain('injected on your query');
+    expect(msg).toContain('not the drain-start seed');
+    // And it carries the full reconciled body verbatim.
+    expect(msg).toContain(renderStatusModel(model));
+    expect(msg).toContain('Done (merged): 01, 02');
+    expect(msg).toContain('In progress (wip): 05');
+    expect(msg).toContain('Open: 06');
+  });
+
+  it('injects when the only ground truth is a needs-look item (no backlog issues)', () => {
+    const model = reconcileStatusModel(
+      input({ runLog: [record({ id: 's1', issueId: 9, outcome: 'unknown', detail: 'huh' })] }),
+    );
+    const msg = buildStatusSnapshotMessage(model);
+    expect(msg).not.toBeNull();
+    expect(msg).toContain('Needs a look');
   });
 });

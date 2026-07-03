@@ -6,6 +6,7 @@ import {
   channelForAction,
   channelForAuthority,
   isLineClearInput,
+  isStatusInjectionTrigger,
   isSubmitInput,
   reduceTyping,
   usesChat,
@@ -144,5 +145,36 @@ describe('canFlushChat (defer-while-typing gate)', () => {
     state = reduceTyping(state, '\r', (t += 100));
     expect(canFlushChat(state, t)).toBe(false);
     expect(canFlushChat(state, t + CHAT_IDLE_MS)).toBe(true);
+  });
+});
+
+describe('isStatusInjectionTrigger (issue 52)', () => {
+  const composing: TypingState = { composing: true, lastInputAt: 100 };
+  const idle: TypingState = { composing: false, lastInputAt: 0 };
+
+  it('fires when the user submits a line they were composing', () => {
+    expect(isStatusInjectionTrigger(composing, '\r')).toBe(true);
+    expect(isStatusInjectionTrigger(composing, '\n')).toBe(true);
+    expect(isStatusInjectionTrigger(composing, 'what is left?\r')).toBe(true);
+  });
+
+  it('does NOT fire on a bare Enter on an empty prompt (nothing composed)', () => {
+    expect(isStatusInjectionTrigger(idle, '\r')).toBe(false);
+  });
+
+  it('does NOT fire on an ordinary keystroke mid-compose', () => {
+    expect(isStatusInjectionTrigger(composing, 'x')).toBe(false);
+    expect(isStatusInjectionTrigger(idle, 'w')).toBe(false);
+  });
+
+  it('does NOT fire on a line-clear (Ctrl-C / Ctrl-U), which abandons the line', () => {
+    expect(isStatusInjectionTrigger(composing, '\x03')).toBe(false);
+    expect(isStatusInjectionTrigger(composing, '\x15')).toBe(false);
+  });
+
+  it('agrees with isSubmitInput exactly when the line was being composed', () => {
+    for (const data of ['\r', '\n', 'abc\r', 'x', '\x03', '']) {
+      expect(isStatusInjectionTrigger(composing, data)).toBe(isSubmitInput(data));
+    }
   });
 });

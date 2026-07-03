@@ -24,6 +24,7 @@ import {
   channelForAction,
   canFlushChat,
   reduceTyping,
+  isStatusInjectionTrigger,
   INITIAL_TYPING_STATE,
   type TypingState,
 } from '../../shared/dispatcher-channel';
@@ -46,6 +47,7 @@ import {
   renderStatusModel,
   debounceStatusModel,
   initialStatusDebounceState,
+  buildStatusSnapshotMessage,
   type DispatcherStatusModel,
   type StatusDebounceState,
 } from '../../shared/dispatcher-status-model';
@@ -1130,9 +1132,35 @@ export function App(): JSX.Element {
   // knows when the input line is idle (issue 48). Fires only for real user input
   // into the chat terminal — the Dispatcher's own queued writes go out via
   // `writePty` and never reach this, so they can't be mistaken for typing.
-  const handleDispatcherInput = useCallback((data: string): void => {
-    dispatcherTyping.current = reduceTyping(dispatcherTyping.current, data, Date.now());
-  }, []);
+  //
+  // On-demand ground-truth injection (issue 52): the same input stream is where
+  // we detect the user SENDING a message, and enqueue the CURRENT reconciled +
+  // debounced status snapshot as quiet context. After issue 48/ADR-0012 routed
+  // the `status-refresh` to the ambient log, the chat session heard nothing after
+  // its seed, so "what's left?" answered from the drain-start seed (the issue-51
+  // bug). Injecting the snapshot at query time re-grounds the session in reality
+  // WITHOUT reintroducing per-fact chat streaming (ADR-0012) — the chat stays
+  // quiet the rest of the time. The pure `isStatusInjectionTrigger` reads the
+  // PRE-fold compose state (so a bare Enter on an empty prompt does not fire), and
+  // `buildStatusSnapshotMessage` renders the snapshot (or null when the backlog
+  // has not loaded). The snapshot rides the SAME serialized submit queue as the
+  // feed, so it honours the defer-while-typing gate and never interleaves with the
+  // user's own line.
+  const handleDispatcherInput = useCallback(
+    (data: string): void => {
+      const prev = dispatcherTyping.current;
+      if (isStatusInjectionTrigger(prev, data)) {
+        const sessionId = dispatcher?.sessionId ?? null;
+        const snapshot = buildStatusSnapshotMessage(debouncedStatusModelRef.current);
+        if (sessionId !== null && snapshot !== null) {
+          dispatcherQueue.current.push(snapshot);
+          pumpDispatcherQueue(sessionId);
+        }
+      }
+      dispatcherTyping.current = reduceTyping(prev, data, Date.now());
+    },
+    [dispatcher, pumpDispatcherQueue],
+  );
 
   // Record a routine passive FACT as a quiet ambient-log note (issue 48,
   // ADR-0012): it appears in the activity log beside the chat rather than being

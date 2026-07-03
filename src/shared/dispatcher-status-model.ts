@@ -364,3 +364,40 @@ export function renderStatusModel(model: DispatcherStatusModel): string {
 
   return lines.join('\n');
 }
+
+// --- On-demand status injection (issue 52) ----------------------------------
+//
+// After issue 48 (ADR-0012) routed every passive fact — including the
+// `status-refresh` — to the ambient LOG rather than the chat, the Dispatcher's
+// `claude` session receives NOTHING after its seed except blocking approvals.
+// So "what's left?" was answered from the drain-start seed, not reality (the
+// issue-51 verification bug). The reconciled+debounced ground truth EXISTS
+// (`reconcileStatusModel` → `debounceStatusModel`) but never reached the
+// session. The fix is on-demand: when the user SENDS a message to the
+// Dispatcher, inject the CURRENT snapshot as quiet context so the answer is
+// grounded in reality — WITHOUT reintroducing per-fact chat streaming
+// (ADR-0012); the chat stays quiet the rest of the time.
+//
+// This builder is the pure half of that fix: it turns a (possibly null / not-
+// yet-loaded) debounced model into the exact on-query injection message, or
+// `null` when there is nothing worth injecting (no backlog loaded yet). The
+// caller enqueues a non-null result through the same serialized submit queue the
+// feed uses, gated by the defer-while-typing rule.
+
+/**
+ * Build the on-demand status-injection message from the reconciled + debounced
+ * model, or `null` when there is nothing to inject (no model yet, or a model
+ * with no issues and no needs-look items — the backlog has not loaded). The
+ * message wraps `renderStatusModel`'s authoritative body in a short framing that
+ * tells the session this is the CURRENT ground truth injected because the user
+ * just asked, so it answers from reality rather than the drain-start seed.
+ */
+export function buildStatusSnapshotMessage(model: DispatcherStatusModel | null): string | null {
+  if (model === null) return null;
+  if (model.issues.length === 0 && model.needsLook.length === 0) return null;
+  return (
+    '[Current status — injected on your query so your answer reflects reality right now, ' +
+    'not the drain-start seed. Answer from THIS snapshot, not any earlier one.]\n' +
+    renderStatusModel(model)
+  );
+}
