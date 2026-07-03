@@ -1,16 +1,17 @@
 /**
- * Dispatcher activity + proposal model (PURE) — the ADR-0007 approval gate's
+ * Dispatcher activity + proposal model (PURE) — the ADR-0011 approval gate's
  * state, minus the UI.
  *
- * The authority classifier (`dispatcher-authority`) draws the line: an action is
- * `auto` (reversible mechanics the Dispatcher just does) or `needs-approval`
- * (a scope-changing judgement call). This module turns a classified action into
- * a renderable **activity**:
+ * The authority classifier (`dispatcher-authority`) draws the line into three
+ * tiers: `blocking` (the 3-item interruption list), `passive` (an ambient note),
+ * and `silent`. This module turns a classified action into a renderable
+ * **activity**:
  *
- *   - an `auto` action is recorded as already `taken` — the UI shows it as
- *     something the Dispatcher DID on its own;
- *   - a `needs-approval` action is recorded as `pending` — a PROPOSAL the human
- *     approves or rejects with one click before it executes.
+ *   - a `blocking` action is recorded as `pending` — a PROPOSAL the human
+ *     approves or rejects with one click before it executes;
+ *   - a `passive` or `silent` (non-blocking) action is recorded as already
+ *     `taken` — the Dispatcher acted on its own (ADR-0011's silent autonomy);
+ *     the UI shows it as a quiet note rather than a gate.
  *
  * Approving/rejecting is a pure state transition here; the actual execution (run
  * the merge, etc.) is the caller's — this module never performs a side effect.
@@ -39,7 +40,7 @@ export type ApprovalDecision = 'approved' | 'rejected';
 /**
  * One thing the Dispatcher did or proposes, as the chat panel renders it. The
  * `authority` is carried alongside `status` so the UI can style "autonomous"
- * (auto) distinctly from "proposed" (needs-approval) regardless of status.
+ * (silent/passive) distinctly from "proposed" (blocking) regardless of status.
  */
 export interface DispatcherActivity {
   /** Stable id (caller-assigned), so approve/reject can target one activity. */
@@ -61,12 +62,14 @@ const LABELS: Record<DispatcherAction, string> = {
   'start-next': 'Start the next queued Run within the cap',
   synthesize: 'Synthesize cross-Run progress',
   relay: 'Relay progress in plain language',
-  'log-issue': 'Log a new issue',
-  merge: 'Merge finished parallel Runs into main',
-  'abort-drain': 'Abort the drain',
+  'log-issue': 'Log a new follow-up issue',
+  merge: 'Merge finished parallel Runs into main (clean)',
   'discard-and-continue': 'Discard the stranded worktree and continue the drain',
   'amend-plan': 'Amend the plan to reconcile a doc-drift finding',
   'course-change': 'Change course',
+  'merge-conflict': 'Resolve the merge conflict on main (or abort it)',
+  'abort-drain': 'Abort the drain',
+  'hitl-signoff': 'Sign off the HITL issue awaiting manual verification',
 };
 
 /** Plain-language description of an action, for the chat panel. */
@@ -76,9 +79,10 @@ export function describeAction(action: DispatcherAction): string {
 
 /**
  * Build the activity for a proposed/taken action. Its initial status follows its
- * authority: an `auto` action is already `taken` (the Dispatcher did it); a
- * `needs-approval` action is `pending` (a proposal awaiting a click) — so a
- * Merge, always `needs-approval` (ADR-0002), can never start as `taken`.
+ * authority (ADR-0011): a `blocking` action is `pending` (a proposal awaiting a
+ * click); a non-blocking (`passive` or `silent`) action is already `taken` (the
+ * Dispatcher did it on its own) — so only the three-item blocking list ever
+ * starts as a gate, and a clean merge or a logged issue never does.
  */
 export function recordActivity(
   id: string,
@@ -90,7 +94,7 @@ export function recordActivity(
     action,
     authority,
     label: describeAction(action),
-    status: authority === 'auto' ? 'taken' : 'pending',
+    status: authority === 'blocking' ? 'pending' : 'taken',
   };
 }
 
@@ -108,14 +112,14 @@ export function resolveActivity(
   return { ...activity, status: decision };
 }
 
-/** A scope-changing action the Dispatcher proposes rather than takes. */
+/** A blocking action the Dispatcher proposes rather than takes (ADR-0011). */
 export function isProposal(activity: DispatcherActivity): boolean {
-  return activity.authority === 'needs-approval';
+  return activity.authority === 'blocking';
 }
 
-/** A reversible-mechanics action the Dispatcher takes on its own. */
+/** A non-blocking action the Dispatcher takes on its own (silent or passive). */
 export function isAutonomous(activity: DispatcherActivity): boolean {
-  return activity.authority === 'auto';
+  return activity.authority !== 'blocking';
 }
 
 /** Whether this activity is still awaiting a human click (approve/reject shown). */

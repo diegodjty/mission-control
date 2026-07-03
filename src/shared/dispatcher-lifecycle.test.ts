@@ -30,7 +30,7 @@ describe('reactToLifecycleEvent', () => {
     }
   });
 
-  it('surfaces a blocked Run and proposes an approval-gated discard-and-continue', () => {
+  it('surfaces a blocked Run and suggests discard-and-continue (non-blocking, ADR-0011)', () => {
     const r = reactToLifecycleEvent(
       ev({ kind: 'blocked', detail: '62 is wip and blocks the rest' }),
     );
@@ -42,16 +42,17 @@ describe('reactToLifecycleEvent', () => {
     expect(r.proposal).not.toBeNull();
     expect(r.proposal?.action).toBe('discard-and-continue');
     expect(r.proposal?.id).toBe('discard-and-continue:sess-1');
-    // The proposed next step is scope-changing, so it is approval-gated (issue 36).
-    expect(classifyAuthority(r.proposal!.action)).toBe('needs-approval');
+    // ADR-0011: discard-and-continue is NOT on the three-item blocking list, so
+    // the suggested next step no longer raises an approve/reject gate.
+    expect(classifyAuthority(r.proposal!.action)).not.toBe('blocking');
   });
 
-  it('surfaces a stranded Run and proposes discard-and-continue', () => {
+  it('surfaces a stranded Run and suggests a non-blocking discard-and-continue', () => {
     const r = reactToLifecycleEvent(ev({ kind: 'stranded' }));
     expect(r.proactive).toBe(true);
     expect(r.notification).toContain('stranded');
     expect(r.proposal?.action).toBe('discard-and-continue');
-    expect(classifyAuthority(r.proposal!.action)).toBe('needs-approval');
+    expect(classifyAuthority(r.proposal!.action)).not.toBe('blocking');
   });
 
   it('surfaces a needs-attention Run so the drain does not silently stall', () => {

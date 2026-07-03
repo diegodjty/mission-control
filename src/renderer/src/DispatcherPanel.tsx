@@ -49,7 +49,8 @@ function ActivityRow({
   onApprove?: (id: string) => void;
   onReject?: (id: string) => void;
 }): JSX.Element {
-  const autonomous = activity.authority === 'auto';
+  // ADR-0011: only a `blocking` action is a proposal; silent/passive are notes.
+  const autonomous = activity.authority !== 'blocking';
   const pending = activity.status === 'pending';
 
   const kindClass = autonomous

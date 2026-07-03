@@ -52,14 +52,15 @@ describe('dispatcher ↔ coordinator bridge (ADR-0008: scheduling delegated)', (
     expect(decision.plan.drain.stop).toBe(false);
   });
 
-  it('emits a start-next (auto) action when the Coordinator has startable work', () => {
+  it('emits a start-next (silent) action when the Coordinator has startable work', () => {
     const decision = decideDispatcherStep(twoIssueDrain());
     const startNext = decision.actions.find((a) => a.action === 'start-next');
     expect(startNext).toBeDefined();
-    expect(startNext?.authority).toBe('auto');
-    // synthesize is always available and always auto.
+    // ADR-0011: starting the next Run is a silent mechanic (never a gate).
+    expect(startNext?.authority).toBe('silent');
+    // synthesize is always available and always silent.
     const synth = decision.actions.find((a) => a.action === 'synthesize');
-    expect(synth?.authority).toBe('auto');
+    expect(synth?.authority).toBe('silent');
   });
 
   it('issues no start-next once the drain stops, but can still synthesize', () => {
@@ -74,9 +75,10 @@ describe('dispatcher ↔ coordinator bridge (ADR-0008: scheduling delegated)', (
     expect(decision.actions.some((a) => a.action === 'synthesize')).toBe(true);
   });
 
-  it('the inter-issue checkpoint commit is an auto action (ADR-0007)', () => {
+  it('the inter-issue checkpoint commit is a passive note (ADR-0011)', () => {
     const checkpoint = checkpointCommitAction();
     expect(checkpoint.action).toBe('commit-checkpoint');
-    expect(checkpoint.authority).toBe('auto');
+    // A committed checkpoint is non-blocking — a passive note, not a gate.
+    expect(checkpoint.authority).toBe('passive');
   });
 });

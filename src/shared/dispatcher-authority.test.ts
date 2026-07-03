@@ -1,94 +1,83 @@
 import { describe, expect, it } from 'vitest';
 import {
   classifyAuthority,
-  isAuto,
+  isBlocking,
   type Authority,
   type DispatcherAction,
 } from './dispatcher-authority';
 
-// The full ADR-0007 line as a table — every action mapped to its authority.
-// Kept exhaustive so a newly-added action forces a decision here (and a failing
-// test) rather than silently defaulting.
+// The full ADR-0011 line as a table — every action mapped to its interruption
+// tier. Kept exhaustive so a newly-added action forces a decision here (and a
+// failing test) rather than silently defaulting.
 const LINE: Record<DispatcherAction, Authority> = {
-  'commit-checkpoint': 'auto',
-  'start-next': 'auto',
-  synthesize: 'auto',
-  relay: 'auto',
-  'log-issue': 'needs-approval',
-  merge: 'needs-approval',
-  'abort-drain': 'needs-approval',
-  'discard-and-continue': 'needs-approval',
-  'amend-plan': 'needs-approval',
-  'course-change': 'needs-approval',
+  // Silent mechanics.
+  'start-next': 'silent',
+  synthesize: 'silent',
+  relay: 'silent',
+  // Passive, non-blocking notes.
+  'commit-checkpoint': 'passive',
+  'log-issue': 'passive',
+  merge: 'passive',
+  'discard-and-continue': 'passive',
+  'amend-plan': 'passive',
+  'course-change': 'passive',
+  // The three-item blocking list.
+  'merge-conflict': 'blocking',
+  'abort-drain': 'blocking',
+  'hitl-signoff': 'blocking',
 };
 
-describe('dispatcher authority classifier (ADR-0007, full line)', () => {
-  it('marks commit-checkpoint, start-next and synthesize as auto', () => {
-    // The exact three the tracer-bullet spine (issue 35) must self-authorize.
-    expect(classifyAuthority('commit-checkpoint')).toBe('auto');
-    expect(classifyAuthority('start-next')).toBe('auto');
-    expect(classifyAuthority('synthesize')).toBe('auto');
+// The ENTIRE blocking list per ADR-0011 — nothing else may block.
+const BLOCKING: DispatcherAction[] = ['merge-conflict', 'abort-drain', 'hitl-signoff'];
+
+describe('dispatcher authority classifier (ADR-0011, silent-autonomy default)', () => {
+  it('blocks on EXACTLY the three-item interruption list, nothing else', () => {
+    for (const action of BLOCKING) {
+      expect(classifyAuthority(action)).toBe('blocking');
+      expect(isBlocking(action)).toBe(true);
+    }
+    const blocking = (Object.keys(LINE) as DispatcherAction[]).filter((a) => isBlocking(a));
+    expect(blocking.sort()).toEqual([...BLOCKING].sort());
+    expect(blocking).toHaveLength(3);
   });
 
-  it('also marks relay (plain-language progress) as auto', () => {
-    expect(classifyAuthority('relay')).toBe('auto');
-  });
-
-  it('marks every scope-changing action as needs-approval', () => {
-    const scope: DispatcherAction[] = [
-      'log-issue',
-      'merge',
-      'abort-drain',
-      'discard-and-continue',
-      'amend-plan',
-      'course-change',
-    ];
-    for (const action of scope) {
-      expect(classifyAuthority(action)).toBe('needs-approval');
+  it('makes a clean merge, logging an issue, amend-plan and discard-and-continue non-blocking', () => {
+    // The costly former gates that ADR-0011 demotes to passive notes.
+    for (const action of ['merge', 'log-issue', 'amend-plan', 'discard-and-continue'] as const) {
+      expect(classifyAuthority(action)).toBe('passive');
+      expect(isBlocking(action)).toBe(false);
     }
   });
 
-  it('Merge is always approval-gated (ADR-0002 — no auto-merge)', () => {
-    // Called out explicitly because a Merge is the costliest, hard-to-unwind
-    // action; it must never fall on the auto side.
-    expect(classifyAuthority('merge')).toBe('needs-approval');
-    expect(isAuto('merge')).toBe(false);
+  it('a clean merge is passive but a conflicting merge blocks (refines ADR-0002)', () => {
+    expect(classifyAuthority('merge')).toBe('passive');
+    expect(classifyAuthority('merge-conflict')).toBe('blocking');
   });
 
-  it('classifies the entire action union exactly per the ADR-0007 table', () => {
+  it('keeps pure scheduling/relay mechanics silent', () => {
+    for (const action of ['start-next', 'synthesize', 'relay'] as const) {
+      expect(classifyAuthority(action)).toBe('silent');
+      expect(isBlocking(action)).toBe(false);
+    }
+  });
+
+  it('a committed checkpoint is a passive note', () => {
+    expect(classifyAuthority('commit-checkpoint')).toBe('passive');
+  });
+
+  it('classifies the entire action union exactly per the ADR-0011 table', () => {
     for (const [action, authority] of Object.entries(LINE) as [
       DispatcherAction,
       Authority,
     ][]) {
       expect(classifyAuthority(action)).toBe(authority);
-      expect(isAuto(action)).toBe(authority === 'auto');
+      expect(isBlocking(action)).toBe(authority === 'blocking');
     }
   });
 
-  it('discard-and-continue is approval-gated (issue 22 discard is destructive)', () => {
-    // Force-removing a worktree + deleting its branch is irreversible, so the
-    // Dispatcher proposes it (issue 37) rather than doing it on its own.
-    expect(classifyAuthority('discard-and-continue')).toBe('needs-approval');
-    expect(isAuto('discard-and-continue')).toBe(false);
-  });
-
-  it('amend-plan is approval-gated (issue 38 — the PRD is the human\'s to change)', () => {
-    // A doc-drift-driven plan amendment is a scope change the Dispatcher proposes
-    // (afk-issue-runner §4: the Worker surfaces drift, the human decides).
-    expect(classifyAuthority('amend-plan')).toBe('needs-approval');
-    expect(isAuto('amend-plan')).toBe(false);
-  });
-
-  it('returns exactly four auto actions and six needs-approval actions', () => {
-    const actions = Object.keys(LINE) as DispatcherAction[];
-    const auto = actions.filter((a) => classifyAuthority(a) === 'auto');
-    const gated = actions.filter((a) => classifyAuthority(a) === 'needs-approval');
-    expect(auto).toHaveLength(4);
-    expect(gated).toHaveLength(6);
-  });
-
-  it('isAuto agrees with classifyAuthority', () => {
-    expect(isAuto('start-next')).toBe(true);
-    expect(isAuto('merge')).toBe(false);
+  it('classifies every action into exactly one of blocking | passive | silent', () => {
+    for (const action of Object.keys(LINE) as DispatcherAction[]) {
+      expect(['blocking', 'passive', 'silent']).toContain(classifyAuthority(action));
+    }
   });
 });

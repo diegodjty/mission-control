@@ -22,6 +22,22 @@ const ALL_ACTIONS: DispatcherAction[] = [
   'discard-and-continue',
   'amend-plan',
   'course-change',
+  'merge-conflict',
+  'hitl-signoff',
+];
+
+// ADR-0011: the entire blocking list; everything else is non-blocking.
+const BLOCKING_ACTIONS: DispatcherAction[] = ['merge-conflict', 'abort-drain', 'hitl-signoff'];
+const NON_BLOCKING_ACTIONS: DispatcherAction[] = [
+  'commit-checkpoint',
+  'start-next',
+  'synthesize',
+  'relay',
+  'log-issue',
+  'merge',
+  'discard-and-continue',
+  'amend-plan',
+  'course-change',
 ];
 
 describe('describeAction', () => {
@@ -33,10 +49,10 @@ describe('describeAction', () => {
 });
 
 describe('recordActivity', () => {
-  it('records an auto action as already taken (autonomous)', () => {
-    for (const action of ['commit-checkpoint', 'start-next', 'synthesize', 'relay'] as const) {
+  it('records a non-blocking action as already taken (autonomous, no gate)', () => {
+    for (const action of NON_BLOCKING_ACTIONS) {
       const a = recordActivity(`x:${action}`, action);
-      expect(a.authority).toBe('auto');
+      expect(a.authority).not.toBe('blocking');
       expect(a.status).toBe('taken');
       expect(isAutonomous(a)).toBe(true);
       expect(isProposal(a)).toBe(false);
@@ -45,10 +61,10 @@ describe('recordActivity', () => {
     }
   });
 
-  it('records a scope-changing action as a pending proposal', () => {
-    for (const action of ['log-issue', 'merge', 'abort-drain', 'discard-and-continue', 'amend-plan', 'course-change'] as const) {
+  it('records only a blocking action as a pending proposal (ADR-0011 3-item list)', () => {
+    for (const action of BLOCKING_ACTIONS) {
       const a = recordActivity(`x:${action}`, action);
-      expect(a.authority).toBe('needs-approval');
+      expect(a.authority).toBe('blocking');
       expect(a.status).toBe('pending');
       expect(isProposal(a)).toBe(true);
       expect(isAutonomous(a)).toBe(false);
@@ -57,22 +73,28 @@ describe('recordActivity', () => {
     }
   });
 
-  it('records Merge as a pending proposal, never taken (ADR-0002)', () => {
+  it('records a CLEAN merge as taken, never a gate (ADR-0011 refines ADR-0002)', () => {
     const a = recordActivity('merge:1', 'merge');
+    expect(a.status).toBe('taken');
+    expect(a.authority).toBe('passive');
+  });
+
+  it('records a conflicting merge as a pending proposal (the one merge that blocks)', () => {
+    const a = recordActivity('merge-conflict:1', 'merge-conflict');
     expect(a.status).toBe('pending');
-    expect(a.authority).toBe('needs-approval');
+    expect(a.authority).toBe('blocking');
   });
 
   it('carries the id and label through', () => {
-    const a = recordActivity('merge:42', 'merge');
-    expect(a.id).toBe('merge:42');
-    expect(a.label).toBe(describeAction('merge'));
+    const a = recordActivity('merge-conflict:42', 'merge-conflict');
+    expect(a.id).toBe('merge-conflict:42');
+    expect(a.label).toBe(describeAction('merge-conflict'));
   });
 });
 
 describe('resolveActivity', () => {
   it('approving a pending proposal marks it approved (caller then executes)', () => {
-    const pending = recordActivity('merge:1', 'merge');
+    const pending = recordActivity('merge-conflict:1', 'merge-conflict');
     const approved = resolveActivity(pending, 'approved');
     expect(approved.status).toBe('approved');
     // Immutable transition — the original is untouched.
@@ -91,17 +113,23 @@ describe('resolveActivity', () => {
     expect(resolveActivity(taken, 'rejected')).toEqual(taken);
   });
 
+  it('is a no-op on a passive (taken) note — a clean merge never gates', () => {
+    const taken = recordActivity('merge:1', 'merge');
+    expect(resolveActivity(taken, 'approved')).toEqual(taken);
+    expect(resolveActivity(taken, 'rejected')).toEqual(taken);
+  });
+
   it('is idempotent — an already-resolved proposal cannot be re-flipped or re-fired', () => {
-    const pending = recordActivity('merge:1', 'merge');
+    const pending = recordActivity('merge-conflict:1', 'merge-conflict');
     const approved = resolveActivity(pending, 'approved');
     // A second click (or a re-render) must not flip approved → rejected.
     expect(resolveActivity(approved, 'rejected')).toEqual(approved);
-    const rejected = resolveActivity(recordActivity('merge:2', 'merge'), 'rejected');
+    const rejected = resolveActivity(recordActivity('merge-conflict:2', 'merge-conflict'), 'rejected');
     expect(resolveActivity(rejected, 'approved')).toEqual(rejected);
   });
 
   it('a resolved proposal is no longer actionable', () => {
-    const pending = recordActivity('merge:1', 'merge');
+    const pending = recordActivity('merge-conflict:1', 'merge-conflict');
     expect(isActionable(resolveActivity(pending, 'approved'))).toBe(false);
     expect(isActionable(resolveActivity(pending, 'rejected'))).toBe(false);
   });
@@ -119,22 +147,23 @@ describe('autonomous vs proposed partition', () => {
 describe('partitionActivities (pending vs resolved for display)', () => {
   it('puts pending proposals in `pending` and everything else in `resolved`', () => {
     const acts: DispatcherActivity[] = [
-      recordActivity('synth:1', 'synthesize'), // auto → taken → resolved
-      recordActivity('merge:1', 'merge'), // pending
-      resolveActivity(recordActivity('merge:2', 'merge'), 'approved'), // approved → resolved
+      recordActivity('synth:1', 'synthesize'), // silent → taken → resolved
+      recordActivity('mc:1', 'merge-conflict'), // pending
+      resolveActivity(recordActivity('mc:2', 'merge-conflict'), 'approved'), // approved → resolved
       recordActivity('abort:1', 'abort-drain'), // pending
-      resolveActivity(recordActivity('merge:3', 'merge'), 'rejected'), // rejected → resolved
+      recordActivity('clean-merge:1', 'merge'), // passive → taken → resolved (no gate)
+      resolveActivity(recordActivity('mc:3', 'merge-conflict'), 'rejected'), // rejected → resolved
     ];
     const { pending, resolved } = partitionActivities(acts);
-    expect(pending.map((a) => a.id)).toEqual(['merge:1', 'abort:1']);
-    expect(resolved.map((a) => a.id)).toEqual(['synth:1', 'merge:2', 'merge:3']);
+    expect(pending.map((a) => a.id)).toEqual(['mc:1', 'abort:1']);
+    expect(resolved.map((a) => a.id)).toEqual(['synth:1', 'mc:2', 'clean-merge:1', 'mc:3']);
   });
 
   it('preserves arrival order within each group', () => {
     const acts: DispatcherActivity[] = [
-      recordActivity('m:a', 'merge'),
-      recordActivity('m:b', 'merge'),
-      recordActivity('m:c', 'merge'),
+      recordActivity('m:a', 'merge-conflict'),
+      recordActivity('m:b', 'merge-conflict'),
+      recordActivity('m:c', 'merge-conflict'),
     ];
     expect(partitionActivities(acts).pending.map((a) => a.id)).toEqual(['m:a', 'm:b', 'm:c']);
   });

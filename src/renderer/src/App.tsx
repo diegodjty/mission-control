@@ -29,7 +29,6 @@ import {
   describeDocDrift,
   detectCrossRunOverlap,
   extractDocDrift,
-  proposeDocDriftAmendment,
 } from '../../shared/dispatcher-synthesis';
 import {
   reconcileStatusModel,
@@ -259,14 +258,12 @@ export function App(): JSX.Element {
   // DISTINCT messages, never concatenated into one input line.
   const dispatcherQueue = useRef<string[]>([]);
   const dispatcherPumping = useRef<boolean>(false);
-  // The Dispatcher's hybrid-authority activity log (issue 36, ADR-0007):
-  // autonomous actions it took (auto — shown as quiet notes) and scope-changing
-  // actions it's proposing (needs-approval — shown with one-click approve/reject
-  // that don't execute until approved). `mergeProposalSig` guards the derived
-  // Merge proposal so a rejected one isn't re-added every poll while the same
-  // branches stay mergeable (see the merge-proposal effect).
+  // The Dispatcher's authority activity log (issue 36, ADR-0011): non-blocking
+  // actions it took on its own (silent/passive — shown as quiet notes) and the
+  // three-item blocking list it must propose (merge-conflict, abort-drain, HITL
+  // sign-off — shown with one-click approve/reject that don't execute until
+  // approved).
   const [dispatcherActivities, setDispatcherActivities] = useState<DispatcherActivity[]>([]);
-  const mergeProposalSig = useRef<string | null>(null);
   // Lifecycle-event reactions (issue 37): which lifecycle events (keyed
   // `<kind>:<runId>`) the Dispatcher has already reacted to, so a re-render /
   // re-scan doesn't re-notify or re-propose. `discardTargets` maps a
@@ -366,7 +363,6 @@ export function App(): JSX.Element {
     dispatcherQueue.current = [];
     dispatcherPumping.current = false;
     setDispatcherActivities([]);
-    mergeProposalSig.current = null;
     lifecycleReacted.current.clear();
     discardTargets.current = {};
     overlapSurfaced.current.clear();
@@ -1057,17 +1053,15 @@ export function App(): JSX.Element {
           : [...prev, recordActivity(`synthesize:${rec.id}`, 'synthesize')],
       );
       // Cross-Run synthesis (issue 38, acceptance a): if this block reports
-      // doc-drift (a PRD/reality contradiction), the Dispatcher SURFACES it and
-      // PROPOSES a plan amendment — an approval-gated `amend-plan` action (the
-      // PRD is the human's to change). Doc-drift free / "none" blocks add nothing.
+      // doc-drift (a PRD/reality contradiction), the Dispatcher SURFACES it as a
+      // plain-language note. Under ADR-0011 amending the plan no longer raises a
+      // blocking approve/reject gate (it is a passive, non-blocking action), so
+      // this only relays the finding — where that passive note renders is issue
+      // 48. Doc-drift free / "none" blocks add nothing.
       const [drift] = extractDocDrift([rec]);
       if (drift) {
         dispatcherQueue.current.push(
-          `${describeDocDrift(drift)} — amend the plan to reconcile it?`,
-        );
-        const proposal = proposeDocDriftAmendment(drift);
-        setDispatcherActivities((prev) =>
-          prev.some((a) => a.id === proposal.id) ? prev : [...prev, proposal],
+          `${describeDocDrift(drift)} — the plan may need amending to reconcile it.`,
         );
       }
     }
@@ -1187,19 +1181,11 @@ export function App(): JSX.Element {
         dispatcherQueue.current.push(reaction.notification);
         pumped = true;
       }
-      if (reaction.proposal !== null) {
-        const proposal = reaction.proposal;
-        // If this issue has a worktree on disk, wire the proposal to the real
-        // issue-22 discard; otherwise approving it just clears the gate (a
-        // blocked solo Run has no worktree to force-remove).
-        const wt = worktreeRunStates.find((s) => s.issueId === event.issueId);
-        if (wt) discardTargets.current[proposal.id] = { issueId: wt.issueId, slug: wt.slug };
-        setDispatcherActivities((prev) =>
-          prev.some((a) => a.id === proposal.id)
-            ? prev
-            : [...prev, recordActivity(proposal.id, proposal.action)],
-        );
-      }
+      // ADR-0011: discard-and-continue is no longer a blocking gate (only
+      // merge-conflict, abort-drain and HITL sign-off block). The blocked/
+      // stranded Run is still surfaced proactively via the notification above; the
+      // user discards it from the Map's Discard control. So no approve/reject
+      // proposal is raised here anymore.
     }
     if (pumped) pumpDispatcherQueue(sessionId);
   }, [runLog, worktreeRunStates, dispatcher, backlog, pumpDispatcherQueue]);
@@ -1256,7 +1242,6 @@ export function App(): JSX.Element {
     dispatcherQueue.current = [];
     dispatcherPumping.current = false;
     setDispatcherActivities([]);
-    mergeProposalSig.current = null;
     lifecycleReacted.current.clear();
     discardTargets.current = {};
     overlapSurfaced.current.clear();
@@ -1491,30 +1476,14 @@ export function App(): JSX.Element {
       .finally(() => setMerging(false));
   }, [projectPath, merging, mergePlan]);
 
-  // --- Dispatcher hybrid-authority gate (issue 36, ADR-0007) --------------
-  // A Merge is always human-approved (ADR-0002): rather than only living as a
-  // Map button, surface it in the Dispatcher panel as a one-click approve/reject
-  // PROPOSAL whenever the Dispatcher is driving and branches are mergeable. The
-  // signature (the sorted mergeable slugs) guards it so a rejected proposal isn't
-  // re-added on every ~1.5s scan while the same branches stay ready; readiness
-  // clearing (a merge succeeding, branches vanishing) resets the guard so a later
-  // set of finished Runs proposes afresh.
-  useEffect(() => {
-    if (!dispatcher) return;
-    const sig = mergePlan.ready
-      ? mergePlan.mergeable.map((m) => m.slug).sort().join(',')
-      : null;
-    if (sig === null) {
-      mergeProposalSig.current = null;
-      return;
-    }
-    if (sig === mergeProposalSig.current) return;
-    mergeProposalSig.current = sig;
-    const id = `merge:${sig}`;
-    setDispatcherActivities((prev) =>
-      prev.some((a) => a.id === id) ? prev : [...prev, recordActivity(id, 'merge')],
-    );
-  }, [dispatcher, mergePlan.ready, mergePlan.mergeable]);
+  // --- Dispatcher merge posture (issue 45, ADR-0011) ----------------------
+  // A CLEAN merge no longer raises a blocking approve/reject gate: ADR-0011's
+  // three-item blocking list is merge-conflict, abort-drain and HITL sign-off
+  // only, and a conflict-free merge of finished work auto-proceeds (refines
+  // ADR-0002). So the Dispatcher no longer surfaces a `merge` proposal when
+  // branches are mergeable — the human still triggers a clean merge from the
+  // Map's Merge control, and a conflicting merge surfaces via the mid-merge
+  // conflict panel below (the one merge case that still blocks).
 
   // Approve a pending proposal: mark it approved, then EXECUTE the action (the
   // gate's whole point — nothing ran until this click). Execution is dispatched

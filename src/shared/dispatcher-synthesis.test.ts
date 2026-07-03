@@ -223,11 +223,12 @@ describe('doc-drift surfacing + approval-gated amendment (acceptance a)', () => 
     );
   });
 
-  it('proposes an amend-plan action that is approval-gated (never auto-taken)', () => {
+  it('records an amend-plan activity that is non-blocking (ADR-0011: a passive note)', () => {
     const activity = proposeDocDriftAmendment(entry);
     expect(activity.action).toBe('amend-plan');
-    expect(activity.authority).toBe('needs-approval');
-    expect(activity.status).toBe('pending');
+    // ADR-0011 demotes plan amendment off the blocking list — it no longer gates.
+    expect(activity.authority).toBe('passive');
+    expect(activity.status).toBe('taken');
     expect(activity.id).toBe('amend-plan:run-1');
   });
 });

@@ -1,85 +1,125 @@
 /**
- * Dispatcher authority classifier (PURE) — the ADR-0007 line, minimal slice.
+ * Dispatcher authority classifier (PURE) — the ADR-0011 line.
  *
- * The Dispatcher acts on its own for **safe, reversible mechanics** and asks for
- * one-click human approval on **scope-changing** judgment calls. This module is
- * the encoding of that division: a proposed action → `auto | needs-approval`.
+ * ADR-0011 INVERTS the old ADR-0007 posture: the Dispatcher acts **silently and
+ * autonomously by default**, and interruptions are a tiny, explicit exception.
+ * This module encodes that division: a proposed action → one of three tiers:
  *
- * This is the FULL ADR-0007 line (issue 36): the auto side (commit a checkpoint,
- * start the next Run within the cap, synthesize/relay) AND the scope-changing
- * side (log a new issue, Merge, abort a drain, any course change) are both
- * classified here. The approval-gate UX that consumes it — proposing an action,
- * one-click approve/reject, distinguishing autonomous from proposed — lives in
- * `dispatcher-proposal` (also pure) and `DispatcherPanel`, so every gate builds
- * on this one tested rule rather than re-deriving the boundary.
+ *   - `blocking` — the Dispatcher must STOP and get a one-click human approval
+ *     before it proceeds. The ENTIRE blocking list is three items and nothing
+ *     else: (1) a Merge that hit a conflict, (2) aborting/stopping a drain,
+ *     (3) a HITL issue awaiting the user's sign-off.
+ *   - `passive`  — a notable, non-blocking state change worth an ambient,
+ *     ignorable note (committed a checkpoint, a clean merge, a follow-up issue
+ *     logged, a plan amended, a stranded worktree discarded, a course tweak).
+ *     Where those notes render is issue 48; here they just classify as passive.
+ *   - `silent`   — pure mechanics the Dispatcher does without even a note,
+ *     answerable on demand (starting the next Run, synthesizing, relaying).
+ *
+ * The proposal/activity UX that consumes it — recording a `blocking` action as a
+ * pending one-click approve/reject, and everything else as an already-taken note
+ * — lives in `dispatcher-proposal` (also pure) and `DispatcherPanel`, so every
+ * gate builds on this one tested rule rather than re-deriving the boundary.
  *
  * PURE: no I/O, no Electron, no LLM — a table lookup, unit-testable in isolation
  * and safe to share across main/renderer.
  */
 
 /**
- * A thing the Dispatcher might do. The `auto` set (reversible mechanics) and the
- * `needs-approval` set (scope-changing) are exactly the ADR-0007 division.
+ * A thing the Dispatcher might do. The `blocking` set is the ADR-0011 three-item
+ * interruption list; everything else is non-blocking (`passive` or `silent`).
  */
 export type DispatcherAction =
-  // --- Reversible mechanics — auto (ADR-0007) ---
-  /** Commit a clean checkpoint between issues (reversible: a commit). */
-  | 'commit-checkpoint'
+  // --- Silent mechanics (no note) ---
   /** Start the next queued Run within the cap (the *choice* is the Coordinator's). */
   | 'start-next'
   /** Synthesize a cross-Run summary ("both done — here's what changed"). */
   | 'synthesize'
   /** Relay progress in plain language. */
   | 'relay'
-  // --- Scope-changing — needs human approval (ADR-0007) ---
-  /** Log a new issue (a scope change). */
+  // --- Passive notes (ambient, non-blocking) ---
+  /** Commit a clean checkpoint between issues (reversible: a commit). */
+  | 'commit-checkpoint'
+  /** Log a new follow-up issue (cheap + reversible — a passive note, ADR-0011). */
   | 'log-issue'
-  /** Merge finished parallel Runs into main (human-triggered, ADR-0002). */
+  /**
+   * Merge finished parallel Runs into main when it is CLEAN. A conflict-free
+   * merge of finished work auto-proceeds (ADR-0011 refines ADR-0002) and leaves a
+   * passive note; only a *conflicting* merge (`merge-conflict`) blocks.
+   */
   | 'merge'
-  /** Abort the drain. */
-  | 'abort-drain'
   /**
    * Discard a blocked/stranded Run's worktree + branch and continue the drain
-   * (issue 22's discard path). Destructive and irreversible — it force-removes a
-   * worktree and deletes its branch — so it is a scope-changing call the human
-   * must approve (issue 37), never something the Dispatcher does on its own.
+   * (issue 22's discard path). Still destructive, but ADR-0011 keeps the blocking
+   * list to three items and this is not one of them — so it is non-blocking, left
+   * as a passive note rather than a gate.
    */
   | 'discard-and-continue'
   /**
    * Amend the plan (PRD/backlog) to reconcile a doc-drift finding a Run reported
-   * (issue 38). Doc-drift is a PRD/reality contradiction the Worker surfaced but
-   * never resolves — the PRD is the human's to change (afk-issue-runner §4), so
-   * the Dispatcher PROPOSES the amendment and the human approves it, never edits
-   * the plan on its own.
+   * (issue 38). Under ADR-0011 this no longer gates — it is a passive note; the
+   * heavier "surface, human decides" ceremony was part of the interruption
+   * firehose the ADR removes.
    */
   | 'amend-plan'
-  /** Change course (re-order, re-scope, skip). */
-  | 'course-change';
-
-/** Whether the Dispatcher may act on its own, or must ask first. */
-export type Authority = 'auto' | 'needs-approval';
+  /** Change course (re-order, re-scope, skip) — a passive note, not a gate. */
+  | 'course-change'
+  // --- Blocking approval — the ADR-0011 three-item list ---
+  /**
+   * A Merge that hit a conflict. The one merge case that still blocks (ADR-0011
+   * refines ADR-0002): a conflicting/risky merge must not land on main silently,
+   * so the user resolves or aborts it.
+   */
+  | 'merge-conflict'
+  /** Abort/stop the drain. */
+  | 'abort-drain'
+  /**
+   * A HITL issue awaiting the user's sign-off — the drain reached a
+   * human-in-the-loop issue parked for manual verification, and only the human
+   * can mark it done.
+   */
+  | 'hitl-signoff';
 
 /**
- * The reversible-mechanics set: the Dispatcher acts on these without asking. A
- * `Set` (not a switch) so the boundary is one obvious list to read and extend.
+ * Which interruption tier an action falls in (ADR-0011):
+ *   - `blocking` — stop and get one-click approval first.
+ *   - `passive`  — a non-blocking ambient note.
+ *   - `silent`   — done without a note, answerable on demand.
  */
-const AUTO_ACTIONS: ReadonlySet<DispatcherAction> = new Set<DispatcherAction>([
-  'commit-checkpoint',
-  'start-next',
-  'synthesize',
-  'relay',
-]);
+export type Authority = 'blocking' | 'passive' | 'silent';
 
 /**
- * Classify a proposed Dispatcher action. Anything not explicitly in the auto set
- * is `needs-approval` — the safe default is to ask, so a new (unclassified)
- * action never silently self-authorizes.
+ * The full ADR-0011 line as an exhaustive table — every action mapped to its
+ * tier. A `Record` (not a `Set` + default) so a newly-added action fails to
+ * compile until it is classified here, rather than silently defaulting.
+ *
+ * The `blocking` values are the ENTIRE interruption list: merge-conflict,
+ * abort-drain, hitl-signoff. Nothing else blocks (ADR-0011).
  */
+const AUTHORITY: Record<DispatcherAction, Authority> = {
+  // Silent mechanics.
+  'start-next': 'silent',
+  synthesize: 'silent',
+  relay: 'silent',
+  // Passive, non-blocking notes.
+  'commit-checkpoint': 'passive',
+  'log-issue': 'passive',
+  merge: 'passive',
+  'discard-and-continue': 'passive',
+  'amend-plan': 'passive',
+  'course-change': 'passive',
+  // The three-item blocking list.
+  'merge-conflict': 'blocking',
+  'abort-drain': 'blocking',
+  'hitl-signoff': 'blocking',
+};
+
+/** Classify a proposed Dispatcher action into its ADR-0011 interruption tier. */
 export function classifyAuthority(action: DispatcherAction): Authority {
-  return AUTO_ACTIONS.has(action) ? 'auto' : 'needs-approval';
+  return AUTHORITY[action];
 }
 
-/** Convenience: does the Dispatcher act on this on its own? */
-export function isAuto(action: DispatcherAction): boolean {
-  return classifyAuthority(action) === 'auto';
+/** Does this action STOP for a one-click human approval (the 3-item list)? */
+export function isBlocking(action: DispatcherAction): boolean {
+  return classifyAuthority(action) === 'blocking';
 }
