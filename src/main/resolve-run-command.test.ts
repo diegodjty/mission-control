@@ -1,7 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { buildRunPrompt, resolveRunCommand } from './resolve-run-command';
+import { buildRunPrompt, receiptPathFor, resolveRunCommand } from './resolve-run-command';
 
-const ISSUE = { id: 3, fileName: '03-run-issue-in-pane.md', title: '03 — Run one issue in a Pane' };
+const ISSUE = {
+  id: 3,
+  fileName: '03-run-issue-in-pane.md',
+  title: '03 — Run one issue in a Pane',
+  cwd: '/repos/project',
+};
 
 describe('buildRunPrompt', () => {
   it('scopes the afk-issue-runner to exactly the given issue, zero-padded', () => {
@@ -11,6 +16,32 @@ describe('buildRunPrompt', () => {
     expect(prompt).toContain('afk-issue-runner');
     expect(prompt).toContain('single-issue');
   });
+
+  it('spells out the ABSOLUTE per-Run Receipt path from the resolved cwd (issue 62)', () => {
+    // Solo mode: the resolved cwd is the Project repo.
+    const solo = buildRunPrompt(ISSUE);
+    expect(solo).toContain('/repos/project/issues/completions/03-run-issue-in-pane.md');
+
+    // Parallel mode: the resolved cwd is the Run's OWN worktree — the prompt
+    // must point the Receipt write there, not at the main checkout, so a cwd
+    // mixup can't dirty `main` and block every later merge.
+    const parallel = buildRunPrompt({
+      ...ISSUE,
+      cwd: '/repos/.afk-worktrees/03-run-issue-in-pane',
+    });
+    expect(parallel).toContain(
+      '/repos/.afk-worktrees/03-run-issue-in-pane/issues/completions/03-run-issue-in-pane.md',
+    );
+    expect(parallel).not.toContain('/repos/project/issues/completions');
+  });
+});
+
+describe('receiptPathFor', () => {
+  it('derives <cwd>/issues/completions/<NN-slug>.md from the issue file name', () => {
+    expect(receiptPathFor(ISSUE)).toBe(
+      '/repos/project/issues/completions/03-run-issue-in-pane.md',
+    );
+  });
 });
 
 describe('resolveRunCommand', () => {
@@ -19,6 +50,8 @@ describe('resolveRunCommand', () => {
     expect(cmd.file).toBe('claude');
     expect(cmd.args).toHaveLength(1);
     expect(cmd.args[0]).toContain('issue 03');
+    // The launch carries the absolute per-Run Receipt path (issue 62).
+    expect(cmd.args[0]).toContain('/repos/project/issues/completions/03-run-issue-in-pane.md');
   });
 
   it('honours CLAUDE_BIN for the executable path', () => {
@@ -32,6 +65,9 @@ describe('resolveRunCommand', () => {
     expect(cmd.file).toBe('node');
     expect(cmd.args.slice(0, 2)).toEqual(['./fake-session.js', '--flag']);
     expect(cmd.args[cmd.args.length - 1]).toContain('issue 03');
+    expect(cmd.args[cmd.args.length - 1]).toContain(
+      '/repos/project/issues/completions/03-run-issue-in-pane.md',
+    );
   });
 
   it('ignores a blank CLAUDE_BIN and falls back to `claude`', () => {

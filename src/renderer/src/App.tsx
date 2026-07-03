@@ -268,6 +268,10 @@ export function App(): JSX.Element {
   // The per-issue Receipt grace timers, and which ids' windows have elapsed.
   const soloGraceTimers = useRef<Record<number, ReturnType<typeof setTimeout>>>({});
   const soloGraceElapsed = useRef<Set<number>>(new Set<number>());
+  // Stray Receipts the SOLO commit path adopted (issue 62), queued here until
+  // the ambient-log effect below (after `logNote` exists) turns each batch into
+  // one passive `receipt-adopt` note.
+  const [soloAdoptions, setSoloAdoptions] = useState<string[][]>([]);
   const [focusedId, setFocusedId] = useState<number | null>(null);
   // Which tile (if any) is maximized to fill the Pane area; null = tiled grid.
   const [maximizedId, setMaximizedId] = useState<number | null>(null);
@@ -636,6 +640,14 @@ export function App(): JSX.Element {
       soloCommitPhases.current[id] = nextPhase;
       void window.mc
         .commitFinishedMain({ projectPath, slug: slugOf(run.target.issueFileName) })
+        .then((outcome) => {
+          // Stray Receipts adopted alongside the run commit (issue 62) — queue
+          // them for a passive `receipt-adopt` note (the log effect below).
+          if (outcome.adopted !== undefined && outcome.adopted.length > 0) {
+            const adopted = outcome.adopted;
+            setSoloAdoptions((prev) => [...prev, adopted]);
+          }
+        })
         .catch(() => {
           // Transient/failed commit: allow a later observation to retry.
           soloCommitPhases.current[id] = prior;
@@ -1251,6 +1263,22 @@ export function App(): JSX.Element {
     [],
   );
 
+  // Drain the SOLO-path stray-Receipt adoptions (issue 62) into passive
+  // `receipt-adopt` notes. The adoptions are queued where the commit resolves
+  // (`commitSoloRun`, defined before `logNote` exists) and turned into ambient
+  // log lines here — one note per adoption batch, deduped by its file list.
+  useEffect(() => {
+    if (soloAdoptions.length === 0) return;
+    for (const files of soloAdoptions) {
+      logNote(
+        `receipt-adopt:solo:${files.join(',')}`,
+        'receipt-adopt',
+        `Adopted stray Receipt(s) on main: ${files.join(', ')}`,
+      );
+    }
+    setSoloAdoptions([]);
+  }, [soloAdoptions, logNote]);
+
   // Route one Dispatcher event to its channel (issue 48, ADR-0012). The pure,
   // tested `channelForAction` is the single decision: a `blocking`-tier action is
   // a conversational prompt typed into the chat PTY via the serialized pump —
@@ -1839,6 +1867,17 @@ export function App(): JSX.Element {
       .then((result) => {
         setMergeDisplay(mergeResultDisplay(result));
         if (auto) {
+          // A stray-Receipt adoption (issue 62) is a passive repair note: MC
+          // auto-committed known artifacts (dirty files under
+          // `issues/completions/` on main) so the preflight could proceed —
+          // record WHAT was adopted; unknown dirt still halts below.
+          if (result.adopted !== undefined && result.adopted.length > 0) {
+            logNote(
+              `receipt-adopt:${sig}:${result.adopted.join(',')}`,
+              'receipt-adopt',
+              `Adopted stray Receipt(s) on main: ${result.adopted.join(', ')}`,
+            );
+          }
           // Dispatcher path only (ADR-0011): classify the completed merge into an
           // auto-proceed passive note vs a conflict/failure blocking gate.
           const decision = decideDispatcherMerge(result);

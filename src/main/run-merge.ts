@@ -35,6 +35,7 @@ import {
   removeWorktree,
   detectDefaultBranch,
   reconcileMergedWorktrees,
+  adoptStrayReceipts,
 } from './git-worktree-adapter';
 import { ensureLocallyIgnored } from './local-ignore';
 import { afkMergeConfContent } from '../shared/merge-plan';
@@ -79,7 +80,12 @@ function confPath(projectPath: string): string {
  */
 async function dirtyMainPaths(projectPath: string): Promise<string[]> {
   try {
-    const { stdout } = await exec('git', ['status', '--porcelain'], { cwd: projectPath });
+    // `--untracked-files=all` so a file inside a brand-new directory is named
+    // itself (`docs/PRD.md`) rather than as an opaque `docs/` dir entry — the
+    // message should name what is actually uncommitted (issues 59/62).
+    const { stdout } = await exec('git', ['status', '--porcelain', '--untracked-files=all'], {
+      cwd: projectPath,
+    });
     return dirtyPathsFromPorcelain(stdout);
   } catch {
     return [];
@@ -148,7 +154,14 @@ export async function mergeRuns(
   options: MergeRunsOptions = {},
 ): Promise<MergeRunsResult> {
   if (slugs.length === 0) {
-    return { ok: true, conflicted: false, merged: [], message: 'Nothing to merge.', output: '' };
+    return {
+      ok: true,
+      conflicted: false,
+      merged: [],
+      adopted: [],
+      message: 'Nothing to merge.',
+      output: '',
+    };
   }
 
   const scriptPath = options.scriptPath ?? defaultMergeScriptPath();
@@ -157,12 +170,25 @@ export async function mergeRuns(
       ok: false,
       conflicted: false,
       merged: [],
+      adopted: [],
       message: `Merge tool not found at ${scriptPath}.`,
       output: '',
     };
   }
 
   await ensureMergeConf(projectPath);
+
+  // Adopt stray Receipts BEFORE the script's clean-tree preflight (issue 62,
+  // ADR-0013): a Worker that misplaced its Receipt into the main checkout's
+  // `issues/completions/` (instead of its own worktree's copy) is a KNOWN,
+  // repairable artifact — auto-committed under a dedicated `chore: adopt stray
+  // Receipt(s)` message so ONE stray file no longer fails every merge and piles
+  // up finished-unmerged Runs. Anything dirty OUTSIDE that set is unknown state:
+  // it is NOT committed, and the script's preflight still halts on it with the
+  // truthful issue-59 message below. An adoption failure is likewise left to
+  // that same preflight halt.
+  const adoption = await adoptStrayReceipts(projectPath);
+  const adopted = adoption.adopted;
 
   // The branch afk-merge.sh integrates into is the repo's default branch, not a
   // hardcoded `main` (issue 27) — detect it so every message names the real one.
@@ -226,6 +252,7 @@ export async function mergeRuns(
         conflicted: true,
         midMerge: true,
         merged,
+        adopted,
         conflictingFiles: files,
         message,
         output,
@@ -241,7 +268,15 @@ export async function mergeRuns(
         : cause === 'wrong-branch'
           ? wrongBranchMessage(output, defaultBranch)
           : 'Merge could not run — see details below.';
-    return { ok: false, conflicted: false, midMerge: false, merged: [], message, output };
+    return {
+      ok: false,
+      conflicted: false,
+      midMerge: false,
+      merged: [],
+      adopted,
+      message,
+      output,
+    };
   }
 
   // Clean merge (exit 0). The script exits 0 even when it SKIPPED branches that
@@ -310,7 +345,7 @@ export async function mergeRuns(
         : '.';
   const message = `${base}${skipSuffix}${cleanupSuffix}`;
 
-  return { ok: true, conflicted: false, midMerge: false, merged, message, output };
+  return { ok: true, conflicted: false, midMerge: false, merged, adopted, message, output };
 }
 
 /**

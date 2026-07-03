@@ -54,6 +54,10 @@ export class PtySessionManager {
           id: req.run.issueId,
           fileName: req.run.issueFileName,
           title: req.run.issueTitle,
+          // The Run's RESOLVED cwd (worktree in parallel mode, repo in solo) —
+          // the prompt spells out the absolute per-Run Receipt path from it
+          // (issue 62), so a Worker's cwd confusion can't misplace the write.
+          cwd: req.run.projectPath,
         })
       : req.dispatcher
         ? resolveDispatcherCommand(process.env, {

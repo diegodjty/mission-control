@@ -303,6 +303,13 @@ export interface MainCommitResult {
    * so a failed auto-commit is surfaced rather than silently leaving `main` dirty.
    */
   error: string | null;
+  /**
+   * Stray Receipts (dirty files under `issues/completions/` that are NOT this
+   * Run's own) adopted — auto-committed under a dedicated `chore: adopt stray
+   * Receipt(s)` message — before the run commit (issue 62, ADR-0013). The Run's
+   * own Receipt stays in the run commit (issue 59). Empty/absent when none.
+   */
+  adopted?: string[];
 }
 
 export interface WorktreeCommitRequest {
@@ -407,6 +414,14 @@ export interface MergeRunsResult {
   midMerge?: boolean;
   /** On a conflict, the files git reported conflicting (issue 24). */
   conflictingFiles?: string[];
+  /**
+   * Stray Receipts (dirty files under `issues/completions/` on `main`) that were
+   * ADOPTED — auto-committed under a dedicated `chore: adopt stray Receipt(s)`
+   * message — before the merge preflight ran (issue 62, ADR-0013). A misplaced
+   * Worker Receipt is a known, repairable artifact; only unknown dirt outside
+   * that set still halts the preflight. Empty/absent when nothing was adopted.
+   */
+  adopted?: string[];
   /** A short human-readable summary for the Map. */
   message: string;
   /** The full `afk-merge.sh` output (stdout+stderr) for the UI to show. */

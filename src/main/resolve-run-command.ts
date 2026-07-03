@@ -16,6 +16,22 @@ export interface RunIssueRef {
   id: number;
   fileName: string;
   title: string;
+  /**
+   * The Run's RESOLVED working directory — its own worktree in parallel mode,
+   * the Project repo in solo mode. Used to spell out the Run's absolute Receipt
+   * path in the prompt (issue 62): Workers are LLMs, and a parallel Worker once
+   * wrote its Receipt into the MAIN checkout's `issues/completions/` instead of
+   * its worktree's copy (cwd confusion), dirtying `main` and blocking every
+   * merge. The skill's relative-path wording stays the general contract; the
+   * per-Run absolute path is Mission Control being defensive.
+   */
+  cwd: string;
+}
+
+/** The Run's absolute Receipt path: `<cwd>/issues/completions/<NN-slug>.md`. */
+export function receiptPathFor(issue: Pick<RunIssueRef, 'fileName' | 'cwd'>): string {
+  const stem = issue.fileName.replace(/\.md$/, '');
+  return `${issue.cwd}/issues/completions/${stem}.md`;
 }
 
 /**
@@ -30,7 +46,10 @@ export function buildRunPrompt(issue: RunIssueRef): string {
     `work EXACTLY issue ${num} (${issue.fileName}). ` +
     `Read ~/.claude/skills/afk-issue-runner/SKILL.md and issues/CONFIG.md, ` +
     `claim issue ${num} by flipping it to wip, complete it per its acceptance ` +
-    `criteria, and stop after that one issue. Do not pick any other issue.`
+    `criteria, and stop after that one issue. Do not pick any other issue. ` +
+    `Your Receipt path for this Run is exactly ${receiptPathFor(issue)} ` +
+    `(this checkout's own issues/completions/ — an absolute path so a cwd mixup ` +
+    `cannot misplace it); write your Receipt to that path and nowhere else.`
   );
 }
 

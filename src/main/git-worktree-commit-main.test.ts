@@ -274,3 +274,62 @@ describe('the corr-4 wall: leftover solo work blocks a parallel Merge (issue 25)
     expect(backlog.issues.find((i) => i.id === 25)?.status).toBe('done');
   });
 });
+
+describe('issue 62 — the solo finished path adopts a stray Receipt', () => {
+  const OWN_RECEIPT = `issues/completions/${SOLO_SLUG}.md`;
+  const STRAY_RECEIPT = 'issues/completions/07-parked-elsewhere.md';
+
+  async function writeReceiptFile(path: string, issue: number): Promise<void> {
+    await mkdir(join(repo, 'issues/completions'), { recursive: true });
+    await writeFile(
+      join(repo, path),
+      `---\nissue: ${issue}\noutcome: completed\n---\nbody\n`,
+    );
+  }
+
+  async function subjects(): Promise<string[]> {
+    return (await git(repo, 'log', '--format=%s', 'main')).trim().split('\n');
+  }
+
+  it('a stray Receipt present at the solo finish is adopted in its OWN chore commit; the run commit keeps the Run\'s work + its own Receipt', async () => {
+    const before = await commitCountMain();
+
+    // The solo Run finished (work + done flip + its own Receipt), and a stray
+    // Receipt from some other Run sits misplaced on main.
+    await simulateSoloAgent('done');
+    await writeReceiptFile(OWN_RECEIPT, 25);
+    await writeReceiptFile(STRAY_RECEIPT, 7);
+
+    const outcome = await commitFinishedMain(repo, SOLO_SLUG);
+    expect(outcome.committed).toBe(true);
+    expect(outcome.error).toBeNull();
+    expect(outcome.adopted).toEqual([STRAY_RECEIPT]);
+
+    // Two commits: the dedicated adoption, then the run commit — main clean.
+    expect(await commitCountMain()).toBe(before + 2);
+    expect(await mainIsClean()).toBe(true);
+    const log = await subjects();
+    expect(log[0]).toBe('afk: complete issue 25 — commit-solo-runs-keep-main-clean');
+    expect(log[1]).toBe(`chore: adopt stray Receipt(s) — ${STRAY_RECEIPT}`);
+
+    // Attribution stays honest: the stray is ONLY in the adoption commit; the
+    // Run's own Receipt and work are ONLY in the run commit (issue 59 intact).
+    const adoptFiles = await git(repo, 'show', '--name-only', '--format=', 'main~1');
+    expect(adoptFiles.trim()).toBe(STRAY_RECEIPT);
+    const runFiles = await git(repo, 'show', '--name-only', '--format=', 'main');
+    expect(runFiles).toContain(SOLO_FEATURE_PATH);
+    expect(runFiles).toContain(OWN_RECEIPT);
+    expect(runFiles).not.toContain(STRAY_RECEIPT);
+  });
+
+  it('a not-yet-finished solo Run adopts nothing (the guard still gates on done)', async () => {
+    await simulateSoloAgent('wip');
+    await writeReceiptFile(STRAY_RECEIPT, 7);
+    const before = await commitCountMain();
+
+    const outcome = await commitFinishedMain(repo, SOLO_SLUG);
+    expect(outcome.committed).toBe(false);
+    expect(outcome.adopted).toBeUndefined();
+    expect(await commitCountMain()).toBe(before);
+  });
+});

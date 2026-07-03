@@ -407,3 +407,104 @@ describe('reconcileMergedWorktrees — sweeps leftover merged residue, spares un
     expect(await branchExists('05-manual-check')).toBe(true);
   });
 });
+
+describe('adopt stray Receipts before the merge preflight (issue 62, ADR-0013)', () => {
+  const STRAY = 'issues/completions/05-manual-check.md';
+
+  /** A Worker misplacing its Receipt: written UNTRACKED into the MAIN checkout. */
+  async function writeStrayReceipt(path = STRAY, body = 'parked for HITL\n'): Promise<void> {
+    await mkdir(join(repo, 'issues/completions'), { recursive: true });
+    await writeFile(
+      join(repo, path),
+      `---\nissue: 5\nslug: 05-manual-check\noutcome: needs-verification\n---\n${body}`,
+    );
+  }
+
+  async function adoptCommits(): Promise<string[]> {
+    const log = await git(repo, 'log', '--format=%s', 'main');
+    return log.split('\n').filter((s) => s.startsWith('chore: adopt stray Receipt(s)'));
+  }
+
+  it('a stray UNTRACKED Receipt on main is adopted (one chore commit) and the merge proceeds cleanly', async () => {
+    await finishedRun('03-a', 'a.txt', 'from run 3\n');
+    await writeStrayReceipt();
+
+    // The exact wall the second walkthrough hit: without adoption this merge is
+    // refused by the clean-tree preflight and every Run piles up unmerged.
+    const result = await mergeRuns(repo, ['03-a'], { scriptPath: SCRIPT });
+
+    expect(result.ok).toBe(true);
+    expect(result.merged).toEqual(['03-a']);
+    expect(result.adopted).toEqual([STRAY]);
+
+    // Exactly ONE dedicated adoption commit, naming the file.
+    const adopts = await adoptCommits();
+    expect(adopts).toEqual([`chore: adopt stray Receipt(s) — ${STRAY}`]);
+
+    // The Receipt is tracked, the branch's work landed, and main is clean.
+    const tracked = await git(repo, 'ls-files');
+    expect(tracked).toContain(STRAY);
+    expect(tracked).toContain('a.txt');
+    expect((await git(repo, 'status', '--porcelain')).trim()).toBe('');
+  });
+
+  it('a stray MODIFIED Receipt is adopted the same way', async () => {
+    // The Receipt is already tracked (e.g. an earlier adoption), then a Worker
+    // re-writes it in place — a MODIFIED, not untracked, stray.
+    await writeStrayReceipt(STRAY, 'first version\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-m', 'receipt v1');
+    await writeStrayReceipt(STRAY, 'second version — re-run overwrote it\n');
+
+    await finishedRun('03-a', 'a.txt', 'from run 3\n');
+    const result = await mergeRuns(repo, ['03-a'], { scriptPath: SCRIPT });
+
+    expect(result.ok).toBe(true);
+    expect(result.adopted).toEqual([STRAY]);
+    expect(await adoptCommits()).toEqual([`chore: adopt stray Receipt(s) — ${STRAY}`]);
+    const committed = await git(repo, 'show', `main:${STRAY}`);
+    expect(committed).toContain('second version');
+    expect((await git(repo, 'status', '--porcelain')).trim()).toBe('');
+  });
+
+  it('a dirty NON-Receipt path still halts with the truthful issue-59 message and is NOT auto-committed', async () => {
+    await finishedRun('03-a', 'a.txt', 'from run 3\n');
+    await mkdir(join(repo, 'docs'), { recursive: true });
+    await writeFile(join(repo, 'docs/PRD.md'), '# unknown dirt\n');
+
+    const result = await mergeRuns(repo, ['03-a'], { scriptPath: SCRIPT });
+
+    // Unknown state halts — a preflight refusal, not a conflict, nothing merged.
+    expect(result.ok).toBe(false);
+    expect(result.conflicted).toBe(false);
+    expect(result.merged).toEqual([]);
+    expect(result.adopted).toEqual([]);
+    expect(result.message).toContain('uncommitted changes on main');
+    expect(result.message).toContain('docs/PRD.md');
+
+    // The unknown file was never committed, and no adoption commit exists.
+    expect(await git(repo, 'ls-files')).not.toContain('docs/PRD.md');
+    expect(await adoptCommits()).toEqual([]);
+  });
+
+  it('mixed dirt: the Receipt is adopted, the merge still halts naming ONLY the unknown path', async () => {
+    await finishedRun('03-a', 'a.txt', 'from run 3\n');
+    await writeStrayReceipt();
+    await mkdir(join(repo, 'docs'), { recursive: true });
+    await writeFile(join(repo, 'docs/PRD.md'), '# unknown dirt\n');
+
+    const result = await mergeRuns(repo, ['03-a'], { scriptPath: SCRIPT });
+
+    // The KNOWN artifact was repaired…
+    expect(result.adopted).toEqual([STRAY]);
+    expect(await adoptCommits()).toEqual([`chore: adopt stray Receipt(s) — ${STRAY}`]);
+    expect(await git(repo, 'ls-files')).toContain(STRAY);
+
+    // …but the unknown dirt still halts, truthfully named — and not committed.
+    expect(result.ok).toBe(false);
+    expect(result.conflicted).toBe(false);
+    expect(result.message).toContain('docs/PRD.md');
+    expect(result.message).not.toContain(STRAY);
+    expect(await git(repo, 'ls-files')).not.toContain('docs/PRD.md');
+  });
+});

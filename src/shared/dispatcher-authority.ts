@@ -73,6 +73,14 @@ export type DispatcherAction =
    * straggler-Receipt commit) cleans the tree.
    */
   | 'merge-preflight'
+  /**
+   * Adopted stray Receipt(s): dirty files under `issues/completions/` on `main`
+   * (a Worker misplaced its Receipt write) auto-committed under a dedicated
+   * `chore: adopt stray Receipt(s)` message so the merge preflight / solo commit
+   * proceeds (issue 62, ADR-0013). A repair of a KNOWN artifact — passive;
+   * unknown dirt outside that set still halts (`merge-preflight`).
+   */
+  | 'receipt-adopt'
   // --- Blocking approval — the ADR-0011 three-item list ---
   /**
    * A Merge that hit a conflict. The one merge case that still blocks (ADR-0011
@@ -118,6 +126,7 @@ const AUTHORITY: Record<DispatcherAction, Authority> = {
   'amend-plan': 'passive',
   'course-change': 'passive',
   'merge-preflight': 'passive',
+  'receipt-adopt': 'passive',
   // The three-item blocking list.
   'merge-conflict': 'blocking',
   'abort-drain': 'blocking',

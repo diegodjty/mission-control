@@ -32,6 +32,12 @@ import {
   type AfkBranchFacts,
 } from '../shared/worktree-scan';
 import { ensureLocallyIgnored } from './local-ignore';
+import { dirtyPathsFromPorcelain } from '../shared/merge-output';
+import {
+  splitAdoptablePaths,
+  adoptionCommitMessage,
+  RECEIPT_DIR,
+} from '../shared/receipt-adoption';
 import type {
   IsolationApplyResult,
   ResolvedPlacement,
@@ -511,6 +517,11 @@ export interface WorktreeCommitOutcome {
   committed: boolean;
   /** The git error when the commit was attempted and failed, else null. */
   error: string | null;
+  /**
+   * Stray Receipts adopted (auto-committed separately) on this call — the SOLO
+   * finished path only (issue 62); absent/empty for worktree commits.
+   */
+  adopted?: string[];
 }
 
 export async function commitFinishedWorktree(
@@ -538,6 +549,73 @@ export async function commitFinishedWorktree(
     // is not yet mergeable), and we report WHY so the Run reads "commit failed"
     // rather than perpetually "running".
     return { committed: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** The outcome of a stray-Receipt adoption sweep on `main` (issue 62). */
+export interface ReceiptAdoptionOutcome {
+  /** The repo-relative Receipt paths adopted (auto-committed) this call. */
+  adopted: string[];
+  /** The git error when an adoption was attempted and failed, else null. */
+  error: string | null;
+}
+
+/**
+ * Adopt stray Receipts on `main` (issue 62, ADR-0013): auto-commit any dirty
+ * (untracked or modified) file under `issues/completions/` in the MAIN checkout,
+ * under a dedicated `chore: adopt stray Receipt(s) — …` message.
+ *
+ * Workers are LLMs — occasionally misplacing a Receipt (a parallel Worker
+ * writing it into the main checkout instead of its own worktree) is a *when*,
+ * not an *if*. Ingest already reads both locations, so the Run log gets the
+ * Receipt either way; what the stray file used to leave behind was a "dirty"
+ * `main` that failed every later merge's clean-tree preflight, piling up
+ * finished-unmerged Runs until the drain looked broken. Mission Control repairs
+ * this KNOWN artifact instead of halting; anything dirty OUTSIDE
+ * `issues/completions/` is unknown state and keeps issue 59's truthful halt —
+ * the pure `splitAdoptablePaths` draws that line, and only the adopt set is
+ * ever staged/committed (a pathspec'd commit, so foreign staged work is never
+ * swept in).
+ *
+ * `excludeSlug` — the SOLO finished path passes its own Run's slug so the Run's
+ * expected Receipt (`issues/completions/NN-slug.md`) stays with the ONE run
+ * commit (issue 59's contract) instead of being split into an adoption commit.
+ *
+ * Skipped (adopted: []) when `main` is MID-MERGE: a partial commit is impossible
+ * on a conflicted index, and the mid-merge state is the user's to resolve/abort
+ * (issue 24) — adoption must not touch it. Idempotent: a clean tree adopts
+ * nothing.
+ */
+export async function adoptStrayReceipts(
+  projectPath: string,
+  options: { excludeSlug?: string } = {},
+): Promise<ReceiptAdoptionOutcome> {
+  if (await isMidMerge(projectPath)) return { adopted: [], error: null };
+
+  let porcelain: string;
+  try {
+    // `--untracked-files=all`: a brand-new `issues/completions/` directory is
+    // otherwise reported as one `?? issues/completions/` DIR entry, hiding the
+    // Receipt file(s) inside it — exactly the stray-write case being repaired.
+    porcelain = await git(projectPath, ['status', '--porcelain', '--untracked-files=all']);
+  } catch (err) {
+    return { adopted: [], error: err instanceof Error ? err.message : String(err) };
+  }
+
+  const ownReceiptPath = options.excludeSlug
+    ? `${RECEIPT_DIR}${options.excludeSlug}.md`
+    : null;
+  const { adopt } = splitAdoptablePaths(dirtyPathsFromPorcelain(porcelain), ownReceiptPath);
+  if (adopt.length === 0) return { adopted: [], error: null };
+
+  try {
+    await git(projectPath, ['add', '--', ...adopt]);
+    // Pathspec'd commit: ONLY the adopted Receipts land, even if other paths
+    // happen to be staged — unknown state is never swept into the adoption.
+    await git(projectPath, ['commit', '-m', adoptionCommitMessage(adopt), '--', ...adopt]);
+    return { adopted: adopt, error: null };
+  } catch (err) {
+    return { adopted: [], error: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -571,18 +649,34 @@ export async function commitFinishedMain(
     return { committed: false, error: null };
   }
 
+  // Adopt stray Receipts FIRST (issue 62): a Receipt under `issues/completions/`
+  // that is NOT this Run's own (a solo Worker writing to an unexpected-but-known
+  // location, or an earlier parallel Worker's misplaced write) is a repairable
+  // known artifact — committed under its own `chore: adopt stray Receipt(s)`
+  // message so the run commit below stays exactly this Run's work + its own
+  // Receipt (issue 59's one-commit contract). Best-effort: if the adoption
+  // itself fails, the `git add -A` run commit below still sweeps the stray in
+  // (the pre-issue-62 behavior), so `main` ends clean either way.
+  const adoption = await adoptStrayReceipts(projectPath, { excludeSlug: slug });
+
   try {
     // Idempotency guard: with a clean working tree there is nothing to commit
     // (this Run's work was already committed, by MC or by hand).
     const porcelain = await git(projectPath, ['status', '--porcelain']);
-    if (porcelain.trim().length === 0) return { committed: false, error: null };
+    if (porcelain.trim().length === 0) {
+      return { committed: false, error: null, adopted: adoption.adopted };
+    }
     await git(projectPath, ['add', '-A']);
     await git(projectPath, ['commit', '-m', commitMessageForRun(slug)]);
-    return { committed: true, error: null };
+    return { committed: true, error: null, adopted: adoption.adopted };
   } catch (err) {
     // The finished work stays uncommitted (so `main` is still dirty) and we
     // report WHY rather than swallowing it.
-    return { committed: false, error: err instanceof Error ? err.message : String(err) };
+    return {
+      committed: false,
+      error: err instanceof Error ? err.message : String(err),
+      adopted: adoption.adopted,
+    };
   }
 }
 

@@ -68,6 +68,7 @@ const LABELS: Record<DispatcherAction, string> = {
   'amend-plan': 'Amend the plan to reconcile a doc-drift finding',
   'course-change': 'Change course',
   'merge-preflight': 'Merge preflight failed — clean up main, then Merge again',
+  'receipt-adopt': 'Adopt stray Receipt(s) left on main (auto-committed)',
   'merge-conflict': 'Resolve the merge conflict on main (or abort it)',
   'abort-drain': 'Abort the drain',
   'hitl-signoff': 'Sign off the HITL issue awaiting manual verification',
