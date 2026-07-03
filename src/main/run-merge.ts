@@ -31,11 +31,16 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { removeWorktree } from './git-worktree-adapter';
+import { removeWorktree, detectDefaultBranch } from './git-worktree-adapter';
 import { ensureLocallyIgnored } from './local-ignore';
 import { afkMergeConfContent } from '../shared/merge-plan';
 import { branchFor } from '../shared/isolation-policy';
-import { parseMergeSummary, classifyMergeFailure, parsePartialMerge } from '../shared/merge-output';
+import {
+  parseMergeSummary,
+  classifyMergeFailure,
+  parsePartialMerge,
+  parseWrongBranch,
+} from '../shared/merge-output';
 import type { MergeRunsResult, MergeAbortResult } from '../shared/ipc-contract';
 
 const exec = promisify(execFile);
@@ -50,6 +55,27 @@ export function defaultMergeScriptPath(): string {
 
 function confPath(projectPath: string): string {
   return join(projectPath, 'issues', 'afk-merge.conf');
+}
+
+/**
+ * The user-facing wrong-branch preflight message (issue 27). afk-merge.sh refuses
+ * unless the repo is on its DETECTED default branch, so we name the actual branch
+ * pair from the script's `die` line ("on 'feature', not 'master'") rather than the
+ * old, wrong hardcoded "not on main". Falls back to the detected default branch,
+ * then to a generic phrasing, if the line can't be parsed.
+ */
+function wrongBranchMessage(output: string, defaultBranch: string): string {
+  const wb = parseWrongBranch(output);
+  if (wb) {
+    return (
+      `Merge preflight failed: the repository is on '${wb.current}', not its default ` +
+      `branch '${wb.expected}'. Check out ${wb.expected}, then Merge again.`
+    );
+  }
+  return (
+    `Merge preflight failed: the repository is not on its default branch ` +
+    `('${defaultBranch}'). Check out ${defaultBranch}, then Merge again.`
+  );
 }
 
 /**
@@ -116,6 +142,10 @@ export async function mergeRuns(
 
   await ensureMergeConf(projectPath);
 
+  // The branch afk-merge.sh integrates into is the repo's default branch, not a
+  // hardcoded `main` (issue 27) — detect it so every message names the real one.
+  const defaultBranch = await detectDefaultBranch(projectPath);
+
   // --keep: never let the script touch worktree paths/branches (see file header
   // — its <slug>/<label> layout does not match ours). --no-test: Mission
   // Control verifies separately; the merge action stays focused on integration.
@@ -156,7 +186,7 @@ export async function mergeRuns(
 
       const mergedPart =
         merged.length > 0
-          ? `Merged ${merged.length} branch${merged.length === 1 ? '' : 'es'} into main ` +
+          ? `Merged ${merged.length} branch${merged.length === 1 ? '' : 'es'} into ${defaultBranch} ` +
             `(${merged.join(', ')}), then hit`
           : 'Hit';
       const conflictPart = conflictedOn ? `a conflict on ${conflictedOn}` : 'a conflict';
@@ -166,8 +196,8 @@ export async function mergeRuns(
           ? ` (the already-merged branch${merged.length === 1 ? '' : 'es'} stay${merged.length === 1 ? 's' : ''} merged)`
           : '';
       const message =
-        `${mergedPart} ${conflictPart}${filesPart} — main is now mid-merge. ` +
-        `Resolve the conflict and commit, or Abort the merge to return main to a clean state${staySuffix}.`;
+        `${mergedPart} ${conflictPart}${filesPart} — ${defaultBranch} is now mid-merge. ` +
+        `Resolve the conflict and commit, or Abort the merge to return ${defaultBranch} to a clean state${staySuffix}.`;
 
       return {
         ok: false,
@@ -184,7 +214,7 @@ export async function mergeRuns(
       cause === 'dirty-tree'
         ? 'Merge preflight failed: the repository has uncommitted changes. Commit or stash them, then Merge again.'
         : cause === 'wrong-branch'
-          ? 'Merge preflight failed: the repository is not on its main branch. Check out main, then Merge again.'
+          ? wrongBranchMessage(output, defaultBranch)
           : 'Merge could not run — see details below.';
     return { ok: false, conflicted: false, midMerge: false, merged: [], message, output };
   }
@@ -230,7 +260,7 @@ export async function mergeRuns(
     .filter((r) => !r.merged && r.skipReason)
     .map((r) => `${r.slug}: ${r.skipReason}`);
 
-  const base = `Merged ${merged.length} branch${merged.length === 1 ? '' : 'es'} into main`;
+  const base = `Merged ${merged.length} branch${merged.length === 1 ? '' : 'es'} into ${defaultBranch}`;
   const skipSuffix = skipNotes.length > 0 ? ` (${skipNotes.join('; ')})` : '';
   const cleanupSuffix =
     leftBehind.length > 0

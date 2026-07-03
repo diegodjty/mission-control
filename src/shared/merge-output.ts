@@ -21,7 +21,8 @@
  *                  | "skip (no branch)" | "would merge (dry-run)"
  *   conflict:      "x <label>: conflict in afk/<slug> needs you — not a clean append:"
  *   dirty tree:    "x <label> has uncommitted changes in <path>. …"
- *   wrong branch:  "x <label> is on '<br>', not main. …"
+ *   wrong branch:  "x <label> is on '<br>', not <default> (the default branch). …"
+ *                  (the default branch is detected, not hardcoded `main` — issue 27)
  */
 
 /** One row parsed from the script's `=== summary ===` block. */
@@ -110,9 +111,33 @@ export function parseMergeSummary(output: string): MergeSummary {
 export function classifyMergeFailure(output: string): MergeFailureCause {
   const clean = stripAnsi(output);
   if (/conflict in .* needs you/.test(clean)) return 'conflict';
-  if (/is on .*, not main/.test(clean)) return 'wrong-branch';
+  // Branch-agnostic (issue 27): the script now names the DETECTED default branch
+  // ("not master", "not trunk", …), not the old literal "not main".
+  if (/is on '[^']*', not \S+/.test(clean)) return 'wrong-branch';
   if (/has uncommitted changes/.test(clean)) return 'dirty-tree';
   return 'tool-error';
+}
+
+/** The current-vs-expected branch a wrong-branch preflight refusal named. */
+export interface WrongBranch {
+  /** The branch the repo is actually checked out on. */
+  current: string;
+  /** The default branch afk-merge.sh wanted it on (detected, not hardcoded). */
+  expected: string;
+}
+
+/**
+ * Pull the checked-out branch and the expected default branch out of the
+ * script's wrong-branch `die` line (issue 27), so the adapter's user-facing
+ * message can name the ACTUAL default branch ("not on 'master'") instead of the
+ * old, wrong hardcoded "not on main". Returns null when the line isn't present.
+ */
+export function parseWrongBranch(output: string): WrongBranch | null {
+  // Branch names may contain dots (`release-1.2`) but never a TRAILING one, so
+  // this stops before the sentence-ending "." in the legacy "not main." phrasing
+  // and before the " (the default branch)" suffix in the current one.
+  const m = /is on '([^']*)', not ([^\s.]+(?:\.[^\s.]+)*)/.exec(stripAnsi(output));
+  return m ? { current: m[1], expected: m[2] } : null;
 }
 
 /** The partial-merge facts recovered from a conflict-exit run (issue 24). */

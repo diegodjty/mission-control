@@ -24,6 +24,7 @@ import {
   type IsolationState,
 } from '../shared/isolation-policy';
 import { buildBacklog, type IssueStatus } from '../shared/backlog-model';
+import { resolveDefaultBranch } from '../shared/default-branch';
 import { shouldCommitWorktree, shouldCommitMain } from '../shared/run-state';
 import { issueIdFromSlug, type AfkBranchFacts } from '../shared/worktree-scan';
 import { ensureLocallyIgnored } from './local-ignore';
@@ -130,11 +131,39 @@ export async function listAfkBranchSlugs(projectPath: string): Promise<string[]>
   return slugs;
 }
 
-/** Is the `afk/<slug>` branch tip already an ancestor of `main` (i.e. merged)? */
-async function isMergedIntoMain(projectPath: string, slug: string): Promise<boolean> {
+/**
+ * The repo's default/integration branch — the one the Merge path integrates into
+ * and checks branches against (issue 27). Detected from the main checkout's
+ * current branch (`git symbolic-ref --short HEAD`), so a `master`/`trunk` repo is
+ * handled instead of the old hardcoded `main` (which made `merge-base` error and
+ * every branch look unmerged forever). Falls back to `main` when git can't read a
+ * branch (a detached HEAD, or the command failing) — see `resolveDefaultBranch`.
+ */
+export async function detectDefaultBranch(projectPath: string): Promise<string> {
+  let out: string | null = null;
+  try {
+    out = await git(projectPath, ['symbolic-ref', '--short', 'HEAD']);
+  } catch {
+    out = null;
+  }
+  return resolveDefaultBranch(out);
+}
+
+/**
+ * Is the `afk/<slug>` branch tip already an ancestor of the repo's default branch
+ * (i.e. merged)? The default branch is DETECTED and passed in (issue 27) rather
+ * than the old hardcoded `main`, so on a `master`/`trunk` repo a merged branch is
+ * correctly seen as merged instead of the `merge-base` erroring and the branch
+ * reading `finished (unmerged)` forever.
+ */
+async function isMergedIntoDefaultBranch(
+  projectPath: string,
+  slug: string,
+  defaultBranch: string,
+): Promise<boolean> {
   try {
     // `--is-ancestor` exits 0 when merged, non-zero otherwise (rejects here).
-    await git(projectPath, ['merge-base', '--is-ancestor', branchFor(slug), 'main']);
+    await git(projectPath, ['merge-base', '--is-ancestor', branchFor(slug), defaultBranch]);
     return true;
   } catch {
     return false;
@@ -153,6 +182,9 @@ async function isMergedIntoMain(projectPath: string, slug: string): Promise<bool
 export async function scanAfkBranches(projectPath: string): Promise<AfkBranchFacts[]> {
   const slugs = await listAfkBranchSlugs(projectPath);
   const worktreeSlugs = new Set(await listWorktreeSlugs(projectPath));
+  // Detect the repo's default branch once (issue 27) and reuse it for every
+  // slug's merged check — cheaper than re-reading per branch, and consistent.
+  const defaultBranch = await detectDefaultBranch(projectPath);
   const facts = await Promise.all(
     slugs.map(async (slug) => {
       const hasWorktree = worktreeSlugs.has(slug);
@@ -167,7 +199,7 @@ export async function scanAfkBranches(projectPath: string): Promise<AfkBranchFac
         worktreeStatus: hasWorktree
           ? await readWorktreeIssueStatus(projectPath, slug)
           : null,
-        mergedIntoMain: await isMergedIntoMain(projectPath, slug),
+        mergedIntoMain: await isMergedIntoDefaultBranch(projectPath, slug, defaultBranch),
       };
     }),
   );

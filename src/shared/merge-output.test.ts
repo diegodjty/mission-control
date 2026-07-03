@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { parseMergeSummary, classifyMergeFailure, parsePartialMerge } from './merge-output';
+import {
+  parseMergeSummary,
+  classifyMergeFailure,
+  parsePartialMerge,
+  parseWrongBranch,
+} from './merge-output';
 
 /**
  * These fixtures are the VERBATIM strings afk-merge.sh emits when piped (no TTY,
@@ -53,8 +58,10 @@ const dirtyTree = `. Project: /tmp/proj
 x app has uncommitted changes in /tmp/proj. Commit or stash them first — this guard stops merging on top of in-flight work.
 `;
 
+// The default branch is DETECTED, not hardcoded `main` (issue 27) — on a master
+// repo the script names 'master' as the branch it wanted.
 const wrongBranch = `. Project: /tmp/proj
-x app is on 'feature', not main. Check out main in /tmp/proj first.
+x app is on 'feature', not master (the default branch). Check out master in /tmp/proj first.
 `;
 
 describe('parseMergeSummary — which slugs actually merged', () => {
@@ -104,14 +111,35 @@ describe('classifyMergeFailure — the real cause, not a substring', () => {
     expect(classifyMergeFailure(dirtyTree)).toBe('dirty-tree');
   });
 
-  it('classifies a wrong-branch preflight die as wrong-branch', () => {
+  it('classifies a wrong-branch preflight die as wrong-branch (non-`main` default, issue 27)', () => {
     expect(classifyMergeFailure(wrongBranch)).toBe('wrong-branch');
+    // The old hardcoded-`main` phrasing must still classify too, for older output.
+    expect(
+      classifyMergeFailure(`x app is on 'feature', not main. Check out main first.`),
+    ).toBe('wrong-branch');
   });
 
   it('falls back to tool-error for anything unrecognised', () => {
     expect(classifyMergeFailure('x missing config: /tmp/proj/issues/afk-merge.conf')).toBe(
       'tool-error',
     );
+  });
+});
+
+describe('parseWrongBranch — current-vs-expected branch from the die line (issue 27)', () => {
+  it('extracts the checked-out branch and the detected default branch', () => {
+    expect(parseWrongBranch(wrongBranch)).toEqual({ current: 'feature', expected: 'master' });
+  });
+
+  it('handles the old hardcoded-`main` phrasing too', () => {
+    expect(
+      parseWrongBranch(`x app is on 'develop', not main. Check out main first.`),
+    ).toEqual({ current: 'develop', expected: 'main' });
+  });
+
+  it('returns null when there is no wrong-branch line (e.g. a conflict output)', () => {
+    expect(parseWrongBranch(conflict)).toBeNull();
+    expect(parseWrongBranch(dirtyTree)).toBeNull();
   });
 });
 

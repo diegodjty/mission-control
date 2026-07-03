@@ -260,6 +260,49 @@ describe('mergeRuns — the real afk-merge.sh against real parallel branches', (
     expect(existsSync(worktreePathFor(repo, '03-a'))).toBe(true);
   });
 
+  it('integrates a finished branch on a non-`main` (master) repo, naming the real branch (issue 27)', async () => {
+    // A self-contained scratch repo initialised on `master`, not `main` — the
+    // exact shape where the old hardcoded `main` made the whole merge path
+    // unusable. Exercises the REAL afk-merge.sh end to end.
+    const s2 = await mkdtemp(join(tmpdir(), 'mc-merge-master-'));
+    const r2 = join(s2, 'repo');
+    try {
+      await mkdir(join(r2, 'issues'), { recursive: true });
+      await git(r2, 'init', '-b', 'master');
+      await git(r2, 'config', 'user.email', 'test@example.com');
+      await git(r2, 'config', 'user.name', 'MC Test');
+      await git(r2, 'config', 'commit.gpgsign', 'false');
+      await writeFile(join(r2, 'README.md'), '# scratch repo\n');
+      await git(r2, 'add', '.');
+      await git(r2, 'commit', '-m', 'initial on master');
+
+      // A finished parallel Run on afk/03-a in this master repo.
+      const wt = await createWorktree(r2, '03-a', branchFor('03-a'));
+      await writeFile(join(wt, 'a.txt'), 'from run 3\n');
+      await git(wt, 'add', '.');
+      await git(wt, 'commit', '-m', 'work for 03-a');
+
+      const result = await mergeRuns(r2, ['03-a'], { scriptPath: SCRIPT });
+
+      expect(result.ok).toBe(true);
+      expect(result.conflicted).toBe(false);
+      expect(result.merged).toEqual(['03-a']);
+      // The message names the DETECTED branch (master), not a hardcoded main.
+      expect(result.message).toContain('into master');
+      expect(result.message).not.toContain('into main');
+
+      // The work really is on master; the merged branch was cleaned up.
+      await git(r2, 'checkout', 'master');
+      expect(await git(r2, 'ls-files')).toContain('a.txt');
+      await expect(
+        git(r2, 'rev-parse', '--verify', '--quiet', branchFor('03-a')),
+      ).rejects.toBeTruthy(); // branch deleted on clean merge
+      expect(existsSync(worktreePathFor(r2, '03-a'))).toBe(false);
+    } finally {
+      await rm(s2, { recursive: true, force: true });
+    }
+  });
+
   it('is a no-op with an empty slug list', async () => {
     const result = await mergeRuns(repo, [], { scriptPath: SCRIPT });
     expect(result.ok).toBe(true);

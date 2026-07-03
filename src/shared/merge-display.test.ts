@@ -97,11 +97,11 @@ describe('mergeResultDisplay', () => {
 describe('pendingMergeDisplay', () => {
   it('pluralizes the in-flight headline and shows no panel', () => {
     expect(pendingMergeDisplay(1)).toMatchObject({
-      headline: 'Merging 1 finished Run into main…',
+      headline: 'Merging 1 finished Run…',
       tone: 'pending',
       showOutput: false,
     });
-    expect(pendingMergeDisplay(3).headline).toBe('Merging 3 finished Runs into main…');
+    expect(pendingMergeDisplay(3).headline).toBe('Merging 3 finished Runs…');
   });
 });
 

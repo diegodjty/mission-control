@@ -27,10 +27,16 @@ export interface MergeDisplay {
   tone: MergeDisplayTone;
 }
 
-/** Shown while a Merge is in flight. */
+/**
+ * Shown while a Merge is in flight. Branch-neutral wording (issue 27): the
+ * integration target is the repo's detected default branch, which the renderer
+ * doesn't have on hand for this transient headline, so it names the count only
+ * rather than a possibly-wrong "into main". The completed result message
+ * (`mergeResultDisplay`, from `run-merge.ts`) names the actual branch.
+ */
 export function pendingMergeDisplay(count: number): MergeDisplay {
   return {
-    headline: `Merging ${count} finished Run${count === 1 ? '' : 's'} into main…`,
+    headline: `Merging ${count} finished Run${count === 1 ? '' : 's'}…`,
     output: '',
     showOutput: false,
     tone: 'pending',
