@@ -149,6 +149,16 @@ export function App(): JSX.Element {
     setNewRepoPath('');
   }, [newRepoPath]);
 
+  // Browse… for a Project folder with the native OS chooser (issue 19). The
+  // chosen path just populates the repo-path field, so the existing Open here /
+  // Open in new Window buttons then act on it exactly as a pasted path would —
+  // one picker serving both flows. Cancelling the dialog resolves to a null
+  // path and is a clean no-op (the field keeps whatever was there).
+  const browseForFolder = useCallback(async (): Promise<void> => {
+    const { path } = await window.mc.pickProjectFolder();
+    if (path) setNewRepoPath(path);
+  }, []);
+
   // --- Run state -----------------------------------------------------------
   const [runs, setRuns] = useState<TrackedRun[]>([]);
   const [focusedId, setFocusedId] = useState<number | null>(null);
@@ -501,6 +511,7 @@ export function App(): JSX.Element {
           newRepoPath={newRepoPath}
           onNewRepoPathChange={setNewRepoPath}
           onSwitch={(repoPath) => void switchProject(repoPath)}
+          onBrowse={() => void browseForFolder()}
           onOpenHere={() => void openProjectHere(newRepoPath.trim())}
           onOpenNewWindow={openInNewWindow}
           error={projectError}

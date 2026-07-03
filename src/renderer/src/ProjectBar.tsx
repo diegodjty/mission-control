@@ -17,6 +17,12 @@ export interface ProjectBarProps {
   onNewRepoPathChange: (value: string) => void;
   /** Switch this Window to an already-registered repo. */
   onSwitch: (repoPath: string) => void;
+  /**
+   * Open the native OS folder chooser to Browse… for a repo (issue 19); the
+   * chosen path lands in the input via `onNewRepoPathChange`, so Open here /
+   * Open in new Window then act on it. Cancel is a no-op.
+   */
+  onBrowse: () => void;
   /** Open (register-if-needed + claim) the entered repo in this Window. */
   onOpenHere: () => void;
   /** Open the entered repo in a brand-new Window on the same backend. */
@@ -38,6 +44,7 @@ export function ProjectBar({
   newRepoPath,
   onNewRepoPathChange,
   onSwitch,
+  onBrowse,
   onOpenHere,
   onOpenNewWindow,
   error,
@@ -88,6 +95,13 @@ export function ProjectBar({
           if (e.key === 'Enter') onOpenHere();
         }}
       />
+      <button
+        className="projectbar__browse"
+        onClick={onBrowse}
+        title="Browse… for a Project folder with the native file chooser"
+      >
+        Browse…
+      </button>
       <button className="projectbar__open" onClick={onOpenHere} disabled={!newRepoPath.trim()}>
         Open here
       </button>

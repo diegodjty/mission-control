@@ -5,7 +5,8 @@
  * Contract to the PTY Session Manager so keystrokes and output round-trip
  * between xterm.js (renderer) and node-pty (here in main).
  */
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { PtySessionManager } from './pty-session-manager';
 import { readBacklog } from './backlog-reader';
@@ -28,6 +29,7 @@ import {
   type ProjectOpenRequest,
   type ProjectSwitchRequest,
   type ProjectTransitionRequest,
+  type ProjectPickFolderResult,
   type ProjectView,
   type PtyKillMessage,
   type PtyResizeMessage,
@@ -36,6 +38,10 @@ import {
   type WindowOpenRequest,
   type WindowOpenResult,
 } from '../shared/ipc-contract';
+import {
+  resolvePickedFolder,
+  resolvePickerDefaultPath,
+} from '../shared/folder-picker';
 import {
   emptyRegistry,
   registerProject,
@@ -71,6 +77,11 @@ function loadRenderer(win: BrowserWindow): void {
 // or the Window closes.
 let registry: ProjectRegistry = emptyRegistry();
 const pendingOpen = new Map<number, string>();
+
+// The last folder chosen through the native Browse… chooser (issue 19), so the
+// next open of the picker starts where the user last was instead of at $HOME
+// every time. Null until the user picks one; a cancel never updates it.
+let lastPickedFolder: string | null = null;
 
 function createWindow(repoToOpen?: string): BrowserWindow {
   const win = new BrowserWindow({
@@ -302,6 +313,36 @@ function registerIpc(): void {
       pendingOpen: pendingOpen.get(event.sender.id) ?? null,
     };
   });
+
+  // Native folder chooser (issue 19): Browse… for a Project repo instead of
+  // pasting a path. A thin shell over Electron's `dialog.showOpenDialog` — all
+  // decisions (which path was chosen / cancel = no-op, where to start) live in
+  // the unit-tested pure `folder-picker` module. The dialog is parented to the
+  // calling Window so it's modal to it. Cancel → `path: null`; the renderer then
+  // does nothing, so no empty-path open ever happens.
+  ipcMain.handle(
+    IpcChannel.ProjectPickFolder,
+    async (event): Promise<ProjectPickFolderResult> => {
+      const parent = BrowserWindow.fromWebContents(event.sender);
+      const defaultPath = resolvePickerDefaultPath(lastPickedFolder, homedir());
+      const result = await (parent
+        ? dialog.showOpenDialog(parent, {
+            title: 'Choose a Project folder',
+            properties: ['openDirectory'],
+            defaultPath,
+          })
+        : dialog.showOpenDialog({
+            title: 'Choose a Project folder',
+            properties: ['openDirectory'],
+            defaultPath,
+          }));
+      const path = resolvePickedFolder(result);
+      // Remember a real choice so the next Browse… starts there; a cancel
+      // (null) leaves the last location untouched.
+      if (path) lastPickedFolder = path;
+      return { path };
+    },
+  );
 
   ipcMain.handle(
     IpcChannel.WindowOpen,

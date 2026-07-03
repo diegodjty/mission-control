@@ -24,6 +24,7 @@ import {
   type ProjectOpenRequest,
   type ProjectSwitchRequest,
   type ProjectTransitionRequest,
+  type ProjectPickFolderResult,
   type WindowOpenRequest,
   type WindowOpenResult,
   type PtyDataMessage,
@@ -74,6 +75,9 @@ const api: MissionControlApi = {
 
   listProjects: (): Promise<ProjectListResult> =>
     ipcRenderer.invoke(IpcChannel.ProjectList),
+
+  pickProjectFolder: (): Promise<ProjectPickFolderResult> =>
+    ipcRenderer.invoke(IpcChannel.ProjectPickFolder),
 
   openWindow: (req: WindowOpenRequest): Promise<WindowOpenResult> =>
     ipcRenderer.invoke(IpcChannel.WindowOpen, req),

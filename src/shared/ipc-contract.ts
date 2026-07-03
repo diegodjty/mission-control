@@ -87,6 +87,14 @@ export const IpcChannel = {
    */
   ProjectList: 'project:list',
   /**
+   * renderer → main (invoke): open the native OS directory chooser (Electron
+   * `dialog.showOpenDialog({ properties: ['openDirectory'] })`, issue 19) so the
+   * user can Browse… for a Project folder instead of pasting a path. Resolves to
+   * a ProjectPickFolderResult whose `path` is the chosen directory, or null when
+   * the dialog was cancelled (a clean no-op).
+   */
+  ProjectPickFolder: 'project:pick-folder',
+  /**
    * renderer → main (invoke): open a NEW Project Window onto the same single
    * backend (ADR-0004 — no second process/port). The new Window auto-opens the
    * given repo (if any) on bootstrap. Resolves to a WindowOpenResult.
@@ -311,6 +319,15 @@ export interface ProjectTransitionRequest {
   toStage: PipelineStage;
 }
 
+/** The outcome of the native folder chooser (issue 19). */
+export interface ProjectPickFolderResult {
+  /**
+   * The directory the user chose, or null when the dialog was cancelled (no
+   * folder picked). The renderer treats null as a no-op — no empty-path open.
+   */
+  path: string | null;
+}
+
 export interface WindowOpenRequest {
   /** A repo the new Window should auto-open on bootstrap, if any. */
   repoPath?: string;
@@ -362,6 +379,11 @@ export interface MissionControlApi {
   transitionProject(req: ProjectTransitionRequest): Promise<ProjectActionResult>;
   /** This Window's view of the Project registry (+ any queued auto-open). */
   listProjects(): Promise<ProjectListResult>;
+  /**
+   * Open the native OS folder chooser to Browse… for a Project repo (issue 19).
+   * Resolves with the chosen path, or null when the dialog was cancelled.
+   */
+  pickProjectFolder(): Promise<ProjectPickFolderResult>;
   /** Open a new Project Window onto the same backend (optionally on a repo). */
   openWindow(req: WindowOpenRequest): Promise<WindowOpenResult>;
   /** Subscribe to registry changes across Windows; returns an unsubscribe fn. */
