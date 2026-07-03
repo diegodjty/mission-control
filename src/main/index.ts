@@ -24,7 +24,6 @@ import {
 import { mergeRuns, abortMerge } from './run-merge';
 import { RunLogStore } from './run-log-store';
 import { ReceiptWatcher } from './receipt-watcher';
-import { parseCompletionBlock } from '../shared/completion-parser';
 import {
   IpcChannel,
   type AfkScanRequest,
@@ -54,11 +53,8 @@ import {
   type ProjectPickFolderResult,
   type ProjectView,
   type ReceiptWatchRequest,
-  type RunLogCaptureRequest,
-  type RunLogCaptureResult,
   type RunLogLoadRequest,
   type RunLogLoadResult,
-  type RunLogRecord,
   type PtyKillMessage,
   type PtyResizeMessage,
   type PtySpawnRequest,
@@ -258,11 +254,6 @@ function seenReceiptsFor(projectPath: string): Promise<Map<string, string | null
     receiptSeenByProject.set(key, promise);
   }
   return promise;
-}
-
-/** The `NN-slug` for a Run's issue file name (`NN-slug.md`). */
-function slugOfFile(fileName: string): string {
-  return fileName.replace(/\.md$/, '');
 }
 
 function registerIpc(): void {
@@ -552,31 +543,10 @@ function registerIpc(): void {
     },
   );
 
-  // Capture a finished Run's Completion block into the per-Project Run log (issue
-  // 34). The renderer fires this once a Run reaches a terminal status; main reads
-  // that session's buffered PTY output, parses it with the pure completion-parser,
-  // and persists the record keyed by the Run's session id (a re-capture as a
-  // streaming block finishes supersedes the earlier version). Non-owners get a
-  // null record — a stale Window must not write another repo's Run log.
-  ipcMain.handle(
-    IpcChannel.RunLogCapture,
-    async (event, req: RunLogCaptureRequest): Promise<RunLogCaptureResult> => {
-      if (ownershipError(event, req.projectPath)) return { record: null };
-      const parsed = parseCompletionBlock(ptyManager.getRunOutput(req.sessionId));
-      const record: RunLogRecord = {
-        ...parsed,
-        // Prefer the block's own id, but fall back to the Run's known issue id
-        // so a malformed block still lands on the right card.
-        issueId: parsed.issueId ?? req.issueId,
-        id: req.sessionId,
-        capturedAt: new Date().toISOString(),
-        slug: slugOfFile(req.issueFileName),
-        title: req.issueTitle,
-      };
-      await runLogStore.append(req.projectPath, record);
-      return { record };
-    },
-  );
+  // NOTE (issue 57, ADR-0013): there is deliberately NO handler that parses a
+  // Run's buffered PTY output into a completion record. Receipts (the watch
+  // below) are the SOLE capture input; the tail buffer survives in the PTY
+  // Session Manager for human peek/debug only.
 
   // Load a Project's persisted Run log for the Execution view feed (issue 34).
   // A non-owner gets an empty log rather than another Window's history.

@@ -35,8 +35,6 @@ import {
   type ProjectPickFolderResult,
   type ReceiptCapturedMessage,
   type ReceiptWatchRequest,
-  type RunLogCaptureRequest,
-  type RunLogCaptureResult,
   type RunLogLoadRequest,
   type RunLogLoadResult,
   type WindowOpenRequest,
@@ -115,9 +113,6 @@ const api: MissionControlApi = {
     ipcRenderer.on(IpcChannel.ProjectRegistryChanged, handler);
     return () => ipcRenderer.removeListener(IpcChannel.ProjectRegistryChanged, handler);
   },
-
-  captureRunLog: (req: RunLogCaptureRequest): Promise<RunLogCaptureResult> =>
-    ipcRenderer.invoke(IpcChannel.RunLogCapture, req),
 
   loadRunLog: (req: RunLogLoadRequest): Promise<RunLogLoadResult> =>
     ipcRenderer.invoke(IpcChannel.RunLogLoad, req),

@@ -53,11 +53,17 @@ import {
 } from '../../shared/dispatcher-status-model';
 import {
   deriveRunStatus,
-  isTerminal,
   observedIssueStatus,
   runningIssueIds,
   type RunStatus,
 } from '../../shared/run-state';
+import {
+  auditMissingReceipts,
+  detectReceiptStateMismatches,
+  describeReceiptMismatch,
+  hasReceiptFor,
+  mismatchKey,
+} from '../../shared/receipt-audit';
 import { planDrain, type ActiveRun } from '../../shared/run-coordinator';
 import { hasInFlightRun } from '../../shared/run-eligibility';
 import {
@@ -104,6 +110,16 @@ const DISPATCHER_WIDTH_KEY = 'mc.dispatcherWidth';
 const DISPATCHER_TYPING_RECHECK_MS = 250;
 
 /**
+ * Grace window before the Receipt audits conclude anything (issue 57,
+ * ADR-0012's debounce discipline). A Worker's Receipt can land a beat after
+ * its issue's `done` flip is observed (write → watch debounce → stability
+ * reads), and a `done` flip can land a beat after its Receipt — so both the
+ * finished-without-receipt note and the Receipt/state-mismatch note re-check
+ * the live facts after this window and stay silent when reality caught up.
+ */
+const RECEIPT_AUDIT_GRACE_MS = 5000;
+
+/**
  * Collapse a (possibly multi-line) fact into one quiet ambient-log line (issue
  * 48): the activity log renders `label` as a single row, so newlines become ` · `
  * separators the way the chat feed flattens its messages.
@@ -139,12 +155,10 @@ interface TrackedRun {
   sessionAlive: boolean;
   stoppedByUser: boolean;
   stopSignal: number;
-  /** The PTY session id, set once the Pane spawns (issue 34, for capture). */
-  sessionId: string | null;
 }
 
 function newRun(target: RunTarget): TrackedRun {
-  return { target, sessionAlive: true, stoppedByUser: false, stopSignal: 0, sessionId: null };
+  return { target, sessionAlive: true, stoppedByUser: false, stopSignal: 0 };
 }
 
 /**
@@ -249,18 +263,29 @@ export function App(): JSX.Element {
   // Which tile (if any) is maximized to fill the Pane area; null = tiled grid.
   const [maximizedId, setMaximizedId] = useState<number | null>(null);
 
-  // --- Run log (issue 34) --------------------------------------------------
-  // The captured Completion blocks for the active Project, newest first. Loaded
-  // from disk when a Project opens (so the feed survives closing Panes / the app
-  // / restarts) and upserted as Runs finish. `capturedSessions` tracks which
-  // sessions we've already begun capturing so the terminal-status effect fires
-  // capture once per Run, not on every re-render.
+  // --- Run log (issue 34, ADR-0013) ----------------------------------------
+  // The Completion-block records for the active Project, newest first — read
+  // from Receipts (the sole capture input, issue 57). Loaded from disk when a
+  // Project opens (so the feed survives closing Panes / the app / restarts)
+  // and upserted as the Receipt edge ingests each Run's Receipt.
   const [runLog, setRunLog] = useState<RunLogRecord[]>([]);
-  const capturedSessions = useRef<Set<string>>(new Set<string>());
-  // Live mirror of `projectPath` so a capture that resolves after a Project
-  // switch can tell it belongs to the previous Project and skip the feed upsert
-  // (it is still persisted to that Project's on-disk log, correctly).
+  // Live mirror of `projectPath` so an async result that resolves after a
+  // Project switch can tell it belongs to the previous Project and skip the
+  // feed upsert.
   const projectPathRef = useRef<string | null>(null);
+  // Live mirror of `runLog` for the Receipt audits' grace-window re-checks
+  // (issue 57): a timer that fires after the window must judge the CURRENT
+  // log, not the render it was scheduled in.
+  const runLogRef = useRef<RunLogRecord[]>([]);
+  useEffect(() => {
+    runLogRef.current = runLog;
+  }, [runLog]);
+  // Which issues' ended Runs the finished-without-receipt audit has already
+  // scheduled/noted, and which Receipt/state mismatches have been surfaced —
+  // so each yields at most ONE passive note (issue 57), never a per-render or
+  // per-tick repeat.
+  const receiptAudited = useRef<Set<number>>(new Set<number>());
+  const mismatchSurfaced = useRef<Set<string>>(new Set<string>());
 
   // --- Drain state ---------------------------------------------------------
   const [draining, setDraining] = useState(false);
@@ -433,10 +458,11 @@ export function App(): JSX.Element {
     setWorktreeCommitErrors({});
     committedSoloIds.current.clear();
     committedWorktreeIds.current.clear();
-    // The Run-log feed is per-Project (issue 34): clear it and the capture
-    // bookkeeping so the new Project starts blank and loads its own log.
+    // The Run-log feed is per-Project (issue 34): clear it and the Receipt
+    // audit bookkeeping so the new Project starts blank and loads its own log.
     setRunLog([]);
-    capturedSessions.current.clear();
+    receiptAudited.current.clear();
+    mismatchSurfaced.current.clear();
     setBacklog(null);
     setProjectPath(null);
   }, []);
@@ -943,19 +969,9 @@ export function App(): JSX.Element {
     );
   }, []);
 
-  // Record a Run's PTY session id once its Pane spawns (issue 34), so the
-  // capture effect can pull that session's buffered output when the Run ends.
-  const handleRunSession = useCallback((issueId: number, sessionId: string): void => {
-    setRuns((prev) =>
-      prev.map((r) =>
-        r.target.issueId === issueId ? { ...r, sessionId } : r,
-      ),
-    );
-  }, []);
-
-  // Upsert a captured record into the feed, keyed by its Run (session) id, so a
-  // re-capture as a streaming block finishes replaces the earlier version rather
-  // than adding a duplicate card. Newest first.
+  // Upsert an ingested record into the feed, keyed by its Receipt id, so a
+  // superseding ingest (same issue + `finished`, changed body) replaces the
+  // earlier version rather than adding a duplicate card. Newest first.
   const upsertRunLog = useCallback((record: RunLogRecord): void => {
     setRunLog((prev) => {
       const others = prev.filter((r) => r.id !== record.id);
@@ -965,66 +981,11 @@ export function App(): JSX.Element {
     });
   }, []);
 
-  // --- Completion-block capture (issue 34) ---------------------------------
-  // When a Run reaches a terminal status, capture its Completion block into the
-  // per-Project Run log. The block is the Worker's FINAL output, emitted just
-  // after it flips the issue `done`, so we capture shortly AFTER the terminal
-  // transition (a short debounce) and — because the block may still be streaming
-  // — retry a few times while the parse comes back `unknown`. Main de-dupes by
-  // session id, so the retries and the optimistic feed upsert can't create
-  // duplicate cards. Fires once per session (guarded by `capturedSessions`).
-  useEffect(() => {
-    if (projectPath === null) return;
-
-    for (const run of runs) {
-      const sessionId = run.sessionId;
-      if (sessionId === null) continue;
-      if (capturedSessions.current.has(sessionId)) continue;
-      if (!isTerminal(runStatusOf(run))) continue;
-
-      // Claim this session so a re-render doesn't schedule a second capture chain.
-      // The chain isn't cancelled on re-render (unlike the scan poll): captures
-      // are de-duped by session id and idempotent, so letting the retries run to
-      // completion is safe and avoids truncating them when a sibling Run's event
-      // re-fires this effect mid-capture.
-      capturedSessions.current.add(sessionId);
-      const capturePath = projectPath;
-      const { issueId, issueFileName, issueTitle } = run.target;
-      const MAX_ATTEMPTS = 4;
-
-      const attempt = (n: number): void => {
-        setTimeout(
-          () => {
-            void window.mc
-              .captureRunLog({ projectPath: capturePath, sessionId, issueId, issueFileName, issueTitle })
-              .then((res) => {
-                // Skip the feed upsert if the Project changed while we captured —
-                // the record still belongs to (and was persisted for) capturePath.
-                // Noise floor (issue 47, ADR-0012): only a REAL capture becomes a
-                // Run in the log. An empty / boot-screen / unclassifiable capture
-                // (an `unknown` with no parsed substance) is dropped silently — it
-                // never becomes a card, a note, or a needs-a-look item.
-                if (res.record && isRealCapture(res.record) && projectPathRef.current === capturePath) {
-                  upsertRunLog(res.record);
-                }
-                // A still-streaming block parses as `unknown`; retry so the final
-                // block is what sticks. Persisted every attempt, but de-duped by
-                // session id, so the last (best) capture wins.
-                if ((!res.record || res.record.outcome === 'unknown') && n + 1 < MAX_ATTEMPTS) {
-                  attempt(n + 1);
-                }
-              })
-              .catch(() => {
-                // Transient IPC error: allow a later attempt within the budget.
-                if (n + 1 < MAX_ATTEMPTS) attempt(n + 1);
-              });
-          },
-          n === 0 ? 1800 : 1500,
-        );
-      };
-      attempt(0);
-    }
-  }, [runs, projectPath, runStatusOf, upsertRunLog]);
+  // NOTE (issue 57, ADR-0013): there is deliberately NO scroll-capture effect
+  // here. Receipts (`issues/completions/`, watched below) are the SOLE capture
+  // input; the PTY tail buffer is a human peek/debug surface and never reaches
+  // a parser, the status model, or the feed. A Run that ends without a Receipt
+  // is surfaced honestly by the finished-without-receipt audit further down.
 
   // Load the active Project's persisted Run log when it opens/changes (issue 34),
   // so the feed is populated from disk and survives closing Panes, the app, and
@@ -1419,6 +1380,83 @@ export function App(): JSX.Element {
     }
     if (pumped) pumpDispatcherQueue(sessionId);
   }, [runLog, worktreeRunStates, dispatcher, backlog, pumpDispatcherQueue, surfaceEvent]);
+
+  // --- The honest signals that replaced the scroll scrape (issue 57) --------
+  // (a) finished-without-receipt: ground truth (the issue's `done` flip / a
+  // session ending unfinished) says a Run ended, but no Receipt exists for it.
+  // Exactly ONE passive note per Run ("peek at the Pane") lands in the ambient
+  // log — never a scrape of the tail buffer, never a guess (ADR-0013). The
+  // audit waits a grace window and re-checks the LIVE Run log first, so a
+  // Receipt that lands a beat after the flip surfaces as a normal card and no
+  // note fires.
+  useEffect(() => {
+    if (projectPath === null) return;
+    const audited = auditMissingReceipts(
+      runs.map((r) => ({
+        issueId: r.target.issueId,
+        slug: slugOf(r.target.issueFileName),
+        title: r.target.issueTitle,
+        status: runStatusOf(r),
+      })),
+      runLog,
+    );
+    for (const event of audited) {
+      const issueId = event.issueId;
+      if (issueId === null || receiptAudited.current.has(issueId)) continue;
+      receiptAudited.current.add(issueId);
+      const auditPath = projectPath;
+      setTimeout(() => {
+        // The grace window passed: judge the CURRENT log (and Project). A
+        // Receipt that arrived meanwhile means honesty requires silence; the
+        // id stays clearable so a later re-run gets its own audit.
+        if (projectPathRef.current !== auditPath) return;
+        if (hasReceiptFor(runLogRef.current, issueId)) {
+          receiptAudited.current.delete(issueId);
+          return;
+        }
+        const reaction = reactToLifecycleEvent(event);
+        if (reaction.notification !== null) {
+          // `finished-without-receipt` → relay → the ambient log, not the chat.
+          surfaceEvent(
+            `${event.kind}:${event.runId}`,
+            actionForLifecycle(event.kind),
+            reaction.notification,
+          );
+        }
+      }, RECEIPT_AUDIT_GRACE_MS);
+    }
+  }, [runs, runLog, projectPath, runStatusOf, surfaceEvent]);
+
+  // (b) Receipt/state mismatch (ADR-0013 trust hierarchy): the latest Receipt's
+  // declared narrative disagrees with git's ground truth (e.g. Receipt says
+  // completed, the issue file says wip). State wins — the status model above
+  // never reads outcomes — and the disagreement surfaces as ONE debounced
+  // passive note per issue: checked against the already-debounced status model,
+  // held for the grace window, and re-verified against the live facts before it
+  // is noted, so a `done` flip that lands a beat after its Receipt stays silent.
+  useEffect(() => {
+    if (projectPath === null) return;
+    for (const mismatch of detectReceiptStateMismatches(runLog, debouncedStatusModel.issues)) {
+      const key = mismatchKey(mismatch);
+      if (mismatchSurfaced.current.has(key)) continue;
+      mismatchSurfaced.current.add(key);
+      const auditPath = projectPath;
+      setTimeout(() => {
+        if (projectPathRef.current !== auditPath) return;
+        const still = detectReceiptStateMismatches(
+          runLogRef.current,
+          debouncedStatusModelRef.current?.issues ?? [],
+        ).find((m) => mismatchKey(m) === key);
+        if (!still) {
+          // Reality caught up during the window — a transient, not a mismatch.
+          mismatchSurfaced.current.delete(key);
+          return;
+        }
+        // `relay` is a routine passive fact → the ambient log (ADR-0012).
+        surfaceEvent(key, 'relay', describeReceiptMismatch(still));
+      }, RECEIPT_AUDIT_GRACE_MS);
+    }
+  }, [runLog, debouncedStatusModel, projectPath, surfaceEvent]);
 
   const startDrain = useCallback(
     (chosenCap: number): void => {
@@ -2112,7 +2150,6 @@ export function App(): JSX.Element {
                     stopSignal={r.stopSignal}
                     onStatusChange={r.target.issueId === focusedId ? setPaneStatus : undefined}
                     onExit={() => handleRunExit(r.target.issueId)}
-                    onSession={(sid) => handleRunSession(r.target.issueId, sid)}
                   />
                 </div>
               );

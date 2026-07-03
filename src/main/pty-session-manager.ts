@@ -27,17 +27,18 @@ export interface PtySessionManagerCallbacks {
   onExit: (msg: PtyExitMessage) => void;
 }
 
-// Keep at most this many trailing chars of a Run's output. The Completion block
-// is the FINAL thing a Worker emits, so tail-truncating (drop from the front)
-// always preserves it while bounding memory over a long session.
+// Keep at most this many trailing chars of a Run's output. Tail-truncating
+// (drop from the front) keeps the most recent activity while bounding memory
+// over a long session.
 const MAX_RUN_OUTPUT = 500_000;
 
 export class PtySessionManager {
   private readonly sessions = new Map<SessionId, Session>();
-  // Buffered output for Run sessions only (issue 34), so a finished Run's
-  // Completion block can be parsed on demand. Kept after the session exits (the
-  // block is captured just after the issue flips `done`), and only ever cleared
-  // when the session is superseded — a plain shell Pane never buffers.
+  // Buffered output for Run sessions only — retained for HUMAN peek/debug ONLY
+  // (issue 57, ADR-0013). It is never an input to any classifier, status model,
+  // or the Dispatcher feed: Receipts (`issues/completions/`) are the sole
+  // capture input. Kept after the session exits so a post-mortem peek is
+  // possible; a plain shell Pane never buffers.
   private readonly runOutput = new Map<SessionId, string>();
 
   constructor(private readonly callbacks: PtySessionManagerCallbacks) {}
@@ -98,10 +99,11 @@ export class PtySessionManager {
   }
 
   /**
-   * The buffered output of a Run session (issue 34), for parsing its Completion
-   * block. Empty string for an unknown/non-Run session. The session may already
-   * have exited — the buffer outlives it so the block can be captured just after
-   * the issue flips `done`.
+   * The buffered tail of a Run session's output — a PEEK/DEBUG surface only
+   * (issue 57, ADR-0013). It must never be fed to a parser/classifier, the
+   * status model, or the Dispatcher feed; Receipts are the sole capture input.
+   * Empty string for an unknown/non-Run session. The buffer outlives the
+   * session so a post-mortem peek is possible.
    */
   getRunOutput(sessionId: SessionId): string {
     return this.runOutput.get(sessionId) ?? '';

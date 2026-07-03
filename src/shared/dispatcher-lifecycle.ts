@@ -27,6 +27,11 @@
  *                          issue, and relays its manual-verification steps (from
  *                          the captured block `detail`, issue 42) — the user is
  *                          not left to notice the pause themselves.
+ *   - `finished-without-receipt` — ground truth says a Run ended (issue 57,
+ *                          ADR-0013) but no Receipt file exists for it. Receipts
+ *                          are the SOLE capture input, so the honest reaction is
+ *                          one passive "peek at the Pane" note — never a scrape
+ *                          of the tail buffer, never a guess.
  *
  * This module is the pure decision core: `reactToLifecycleEvent` maps one event
  * to a `DispatcherReaction` (a plain-language notification to relay + an optional
@@ -51,7 +56,8 @@ export type LifecycleEventKind =
   | 'blocked'
   | 'stranded'
   | 'needs-attention'
-  | 'hitl-waiting';
+  | 'hitl-waiting'
+  | 'finished-without-receipt';
 
 /**
  * One structured lifecycle event. Built from a Run's structured facts (its id,
@@ -184,6 +190,17 @@ export function reactToLifecycleEvent(event: LifecycleEvent): DispatcherReaction
         proposal: null,
         proactive: true,
       };
+
+    case 'finished-without-receipt':
+      // Receipts are the sole capture input (issue 57, ADR-0013): when a Run
+      // ends per ground truth but no Receipt exists, MC never scrapes the tail
+      // buffer or guesses — it says so, once, as a routine passive fact. The
+      // Pane's own scrollback remains the human's peek/debug surface.
+      return {
+        notification: `${label} finished without a receipt — peek at the Pane.`,
+        proposal: null,
+        proactive: false,
+      };
   }
 }
 
@@ -207,6 +224,7 @@ export function actionForLifecycle(kind: LifecycleEventKind): DispatcherAction {
     case 'needs-attention':
     case 'started':
     case 'finished':
+    case 'finished-without-receipt':
       return 'relay';
   }
 }

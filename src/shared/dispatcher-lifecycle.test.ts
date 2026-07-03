@@ -86,6 +86,18 @@ describe('reactToLifecycleEvent', () => {
     expect(b.notification).not.toContain('Reason:');
   });
 
+  it('notes a finished-without-receipt Run passively — peek at the Pane, no scrape (issue 57)', () => {
+    const r = reactToLifecycleEvent(
+      ev({ kind: 'finished-without-receipt', issueId: 5, slug: 'manual-check' }),
+    );
+    // A routine passive fact: not proactive, nothing to approve.
+    expect(r.proactive).toBe(false);
+    expect(r.proposal).toBeNull();
+    expect(r.notification).toContain('issue 05');
+    expect(r.notification).toContain('finished without a receipt');
+    expect(r.notification).toContain('peek at the Pane');
+  });
+
   it('falls back gracefully when issue id/slug are unknown', () => {
     const r = reactToLifecycleEvent(
       ev({ kind: 'blocked', issueId: null, slug: null, title: null }),
@@ -106,6 +118,7 @@ describe('reactToLifecycleEvent', () => {
       'stranded',
       'needs-attention',
       'hitl-waiting',
+      'finished-without-receipt',
     ] as const) {
       const r = reactToLifecycleEvent(
         ev({ kind, detail: 'real captured detail', rawPaneOutput: RAW }),
