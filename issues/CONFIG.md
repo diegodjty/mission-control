@@ -4,7 +4,7 @@ Per-project specifics for the [AFK Issue Runner skill](~/.claude/skills/afk-issu
 
 ## Active PRD
 
-`docs/PRD.md` — the Mission Control PRD. An issue is **in the active batch** when its `## Parent` links to it.
+`docs/adr/0013-receipt-files-replace-tui-capture.md` — the Receipt pipeline batch (issues 54–58). An issue is **in the active batch** when its `## Parent` links to it.
 
 ## Repo
 

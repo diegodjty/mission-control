@@ -27,7 +27,7 @@ One issue being worked in one **Pane** — a single fresh Claude Code session cl
 _Avoid_: job, task (task = the issue itself, not the act of working it).
 
 **Artifacts**:
-The on-disk files the **Map** reads: `issues/NN-slug.md` (status/depends_on frontmatter), `issues/CONFIG.md`, git history, and the completion blocks the afk-issue-runner emits.
+The on-disk files the **Map** reads: `issues/NN-slug.md` (status/depends_on frontmatter), `issues/CONFIG.md`, git history, and **Receipts** (the on-disk carrier of the completion blocks the afk-issue-runner emits).
 
 **Execution view**:
 The Mission Control surface for running a backlog — the **Map** plus parallel **Panes** plus the **Merge** action.
@@ -43,10 +43,14 @@ _Avoid_: coordinator (that's the deterministic scheduler), agent (too generic).
 A **Run**'s Pane session, seen from the **Dispatcher**'s perspective — a fresh Claude Code session that does exactly one issue and emits a **Completion block** as its result. The Dispatcher's workers.
 
 **Completion block**:
-The structured summary a **Worker** emits when its Run ends (what changed / try-it / verified / bookkeeping / doc-drift). Captured per Run (see the **Run log**) and fed to the **Dispatcher**. This — not the raw Pane scroll — is what the Dispatcher holds.
+The structured summary a **Worker** emits when its Run ends (what changed / try-it / verified / bookkeeping / doc-drift). Carried by a **Receipt** and fed to the **Dispatcher** (see the **Run log**). This — not the raw Pane scroll — is what the Dispatcher holds.
+
+**Receipt** (ADR-0013):
+The on-disk carrier of a **Completion block**: `issues/completions/NN-slug.md`, committed, one per issue (latest Run wins). YAML frontmatter declares the machine-facing facts (`issue`, `slug`, `outcome: completed | needs-verification | blocked`, `finished`); the body is the verbatim block. Written by the **Worker** at *every* exit — finish, HITL park, or blocked — per the afk-issue-runner skill (producer-owned contract). Receipts are the **sole capture input**: the live Pane scroll is never parsed (peek/debug only). Trust hierarchy: git/issue frontmatter is ground truth for *state*; the Receipt is ground truth for *narrative*. A Run that ends with no Receipt surfaces as one explicit passive note, never a scrape. Intended as the standard result-handoff pattern for future companion tools.
+_Avoid_: completion file, run report, capture (the thing captured is the block; the Receipt is the artifact).
 
 **Run log**:
-The captured feed of **Completion blocks**, one card per Run. The lean, scannable record of a drain; the Dispatcher's input and the human's at-a-glance history.
+The feed of **Completion blocks** read from **Receipts**, one card per Run. The lean, scannable record of a drain; the Dispatcher's input and the human's at-a-glance history.
 
 **Dispatcher authority (silent-autonomy default)**:
 The Dispatcher acts **silently and autonomously by default**; interruptions are a small, explicit exception (ADR-0011, refining ADR-0007). Three tiers:
@@ -56,7 +60,7 @@ The Dispatcher acts **silently and autonomously by default**; interruptions are 
 A **clean, conflict-free Merge auto-proceeds** (refines ADR-0002's "human-triggered" to *auto-on-clean, gate-on-conflict*), and **logging a follow-up issue** is a silent+passive action, not a gate.
 
 **Noise floor & interaction (ADR-0012)**:
-"If in doubt, stay silent." Empty/boot-screen/unclassifiable captures are dropped (never a Run or note); doc-drift surfaces only on a real contradiction (not "none"); cross-run consolidation is a rare, deduped **passive note** (never a per-tick proposal). Inferred/speculative signals must clear a high confidence bar; routine facts (committed/merged/done) are ambient passive notes. **Passive notes render in the ambient log, not injected into the chat** — only blocking approvals and the user's Q&A use the chat (one serialized queue; no injection while the user types). Backward status moves (finished→open) are debounced ≥1 reconcile checkpoint before surfacing.
+"If in doubt, stay silent." Empty/unclassifiable inputs are dropped (never a Run or note) — with ADR-0013, capture input is **Receipts** only, so the boot-screen class is gone by construction; doc-drift surfaces only on a real contradiction (not "none"); cross-run consolidation is a rare, deduped **passive note** (never a per-tick proposal). Inferred/speculative signals must clear a high confidence bar; routine facts (committed/merged/done) are ambient passive notes. **Passive notes render in the ambient log, not injected into the chat** — only blocking approvals and the user's Q&A use the chat (one serialized queue; no injection while the user types). Backward status moves (finished→open) are debounced ≥1 reconcile checkpoint before surfacing.
 
 ## Relationships
 
@@ -66,7 +70,7 @@ A **clean, conflict-free Merge auto-proceeds** (refines ADR-0002's "human-trigge
 - Concurrent **Runs** are capped by a **max-concurrent** setting.
 - **Mission Control owns the isolation lifecycle:** a lone **Run** works on `main` (solo, no worktree); the moment there are 2+ concurrent **Runs**, it enables parallel mode and gives each **Run** its own **worktree**, then offers a **Merge** action once they finish.
 - The **Dispatcher** drives **Workers** (Runs) via the deterministic **Run Coordinator** for scheduling; it consumes **Completion blocks** (the **Run log**), not raw Pane output. Auto on reversible mechanics, human-approved on scope (see **Dispatcher authority**).
-- **Dispatcher input contract:** a one-time seed (backlog + PRD/CONTEXT) + a live stream of **{Completion blocks, terminal lifecycle events (started/finished/blocked/stranded/needs-attention), doc-drift flags}** — and **never raw Pane output**. Lifecycle events let it react mid-drain (e.g. "05 stranded — discard and continue?") without ingesting any implementation transcript.
+- **Dispatcher input contract:** a one-time seed (backlog + PRD/CONTEXT) + a live stream of **{Completion blocks read from Receipts, terminal lifecycle events (started/finished/blocked/stranded/needs-attention/finished-without-receipt), doc-drift flags}** — and **never raw Pane output**. Lifecycle events let it react mid-drain (e.g. "05 stranded — discard and continue?") without ingesting any implementation transcript.
 - **Dispatcher lifecycle:** **per-Project, on-demand** — spun up when a drain starts (or when explicitly opened), lives for that drain/work session, dismissable; not an always-on daemon. One Dispatcher per Project, hosted by the Window that owns it.
 - **Dispatcher is the layer behind Drain:** starting a drain starts a Dispatcher session that drives the **Run Coordinator** and spawns worker Panes. A **single manual Run stays bare** (just its one Pane, no Dispatcher) — the Dispatcher earns its place only for multi-issue/drain work.
 - **Dispatcher UI:** a **Dispatcher chat panel** (you converse with it) beside the **Map**, with the **Run log** as a feed of Completion-block cards; worker Panes are one click away to peek. "Talk to one orchestrator" instead of "watch N terminals."
