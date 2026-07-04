@@ -38,6 +38,7 @@ function issue(id: number, status: IssueStatus): BacklogIssue {
     parent: 'docs/PRD.md',
     source: null,
     hitl: false,
+    repoKey: null,
     inBatch: true,
     standalone: false,
     body: '',

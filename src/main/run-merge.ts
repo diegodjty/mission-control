@@ -127,6 +127,20 @@ export interface MergeRunsOptions {
   scriptPath?: string;
   /** Clean up worktrees + branches after a clean merge (default true). */
   cleanup?: boolean;
+  /**
+   * Whether to run the stray-Receipt adoption sweep before the preflight
+   * (issue 62). Default true (legacy). Workbench Projects pass false (issue
+   * 72): their Receipts live in the workbench, never in a code repo, so a
+   * dirty `issues/completions/` there is unknown state — the truthful
+   * preflight halt applies, not a repair.
+   */
+  adoptStrays?: boolean;
+  /**
+   * A workbench Project's issues root (issue 72): threaded into the merged-
+   * worktree reconciliation sweep so its committed-`done` detection reads the
+   * workbench claim surface. Absent for legacy (in-repo reads, unchanged).
+   */
+  workbenchIssuesRoot?: string;
 }
 
 interface ExecFailure {
@@ -187,7 +201,10 @@ export async function mergeRuns(
   // it is NOT committed, and the script's preflight still halts on it with the
   // truthful issue-59 message below. An adoption failure is likewise left to
   // that same preflight halt.
-  const adoption = await adoptStrayReceipts(projectPath);
+  const adoption =
+    options.adoptStrays === false
+      ? { adopted: [], error: null }
+      : await adoptStrayReceipts(projectPath);
   const adopted = adoption.adopted;
 
   // The branch afk-merge.sh integrates into is the repo's default branch, not a
@@ -322,7 +339,12 @@ export async function mergeRuns(
   // fully-merged drain. The sweep reuses the default-branch-aware merged check and
   // leaves not-yet-merged (finished-unmerged / running) worktrees untouched.
   if (cleanup) {
-    const swept = await reconcileMergedWorktrees(projectPath);
+    const swept = await reconcileMergedWorktrees(
+      projectPath,
+      options.workbenchIssuesRoot !== undefined
+        ? { workbenchIssuesRoot: options.workbenchIssuesRoot }
+        : {},
+    );
     for (const slug of swept.leftBehind) {
       if (!leftBehind.includes(slug)) leftBehind.push(slug);
     }

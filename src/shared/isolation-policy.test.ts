@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   decideIsolation,
+  decideIsolationByRepo,
   decideIsolationWith,
   isolationRunSetWith,
   reconcile,
@@ -264,5 +265,85 @@ describe('commitMessageForRun (issue 15 — auto-commit message)', () => {
 
   it('falls back gracefully when the slug has no NN- prefix', () => {
     expect(commitMessageForRun('adhoc-fix')).toBe('afk: complete issue — adhoc-fix');
+  });
+});
+
+describe('decideIsolationByRepo (issue 72, ADR-0015 — per-repo concurrency)', () => {
+  const DEFAULT = '/repos/default';
+
+  it('keeps two concurrent Runs in DIFFERENT repos solo — no worktrees', () => {
+    const groups = decideIsolationByRepo(
+      [
+        { issueId: 1, slug: '01-a', repoPath: '/repos/a' },
+        { issueId: 2, slug: '02-b', repoPath: '/repos/b' },
+      ],
+      DEFAULT,
+    );
+    expect(groups.map((g) => g.repoPath)).toEqual(['/repos/a', '/repos/b']);
+    for (const group of groups) {
+      expect(group.decision.parallel).toBe(false);
+      expect(group.decision.placements).toHaveLength(1);
+      expect(group.decision.placements[0].placement).toEqual({ kind: 'main' });
+    }
+  });
+
+  it('isolates 2+ Runs in the SAME repo exactly as decideIsolation does', () => {
+    const groups = decideIsolationByRepo(
+      [
+        { issueId: 2, slug: '02-b', repoPath: '/repos/a' },
+        { issueId: 1, slug: '01-a', repoPath: '/repos/a' },
+      ],
+      DEFAULT,
+    );
+    expect(groups).toHaveLength(1);
+    const { decision } = groups[0];
+    expect(decision.parallel).toBe(true);
+    expect(decision.placements.map((p) => p.placement)).toEqual([
+      { kind: 'worktree', branch: 'afk/01-a' },
+      { kind: 'worktree', branch: 'afk/02-b' },
+    ]);
+  });
+
+  it('mixes per-repo: the contended repo isolates, the lone repo stays solo', () => {
+    const groups = decideIsolationByRepo(
+      [
+        { issueId: 1, slug: '01-a', repoPath: '/repos/a' },
+        { issueId: 2, slug: '02-b', repoPath: '/repos/a' },
+        { issueId: 3, slug: '03-c', repoPath: '/repos/b' },
+      ],
+      DEFAULT,
+    );
+    expect(groups).toHaveLength(2);
+    const [a, b] = groups;
+    expect(a.repoPath).toBe('/repos/a');
+    expect(a.decision.parallel).toBe(true);
+    expect(b.repoPath).toBe('/repos/b');
+    expect(b.decision.parallel).toBe(false);
+  });
+
+  it('groups Runs without a repoPath into the default repo (legacy behavior)', () => {
+    const groups = decideIsolationByRepo(
+      [
+        { issueId: 1, slug: '01-a' },
+        { issueId: 2, slug: '02-b' },
+      ],
+      DEFAULT,
+    );
+    expect(groups).toHaveLength(1);
+    expect(groups[0].repoPath).toBe(DEFAULT);
+    expect(groups[0].decision.parallel).toBe(true);
+  });
+
+  it('is deterministic: groups sorted by repoPath, runs ascending by issueId', () => {
+    const groups = decideIsolationByRepo(
+      [
+        { issueId: 9, slug: '09-z', repoPath: '/repos/b' },
+        { issueId: 3, slug: '03-c', repoPath: '/repos/a' },
+        { issueId: 1, slug: '01-a', repoPath: '/repos/b' },
+      ],
+      DEFAULT,
+    );
+    expect(groups.map((g) => g.repoPath)).toEqual(['/repos/a', '/repos/b']);
+    expect(groups[1].runs.map((r) => r.issueId)).toEqual([1, 9]);
   });
 });

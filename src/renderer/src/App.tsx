@@ -82,6 +82,11 @@ import {
 import { planDrain, type ActiveRun } from '../../shared/run-coordinator';
 import { hasInFlightRun } from '../../shared/run-eligibility';
 import {
+  repoForIssue,
+  unknownRepoKeyNote,
+  type IssueRepoResolution,
+} from '../../shared/run-targeting';
+import {
   canFallBackToMain,
   isolationRunSetWith,
   type IsolationRun,
@@ -615,20 +620,82 @@ export function App(): JSX.Element {
     if (path) setNewRepoPath(path);
   }, []);
 
-  // The repo the active Project's Runs actually execute in (issue 71): a
-  // workbench Project's Runs live in its default repo, not in the workbench
-  // dir its key names. For a legacy Project this IS the key, so nothing
+  // The active Project's resolved view (issue 71/72): its layout kind, its
+  // repos map, and where its issues/completions live. Null while no Project.
+  const activeProject = useMemo(
+    () => projects.find((p) => p.key === projectPath) ?? null,
+    [projects, projectPath],
+  );
+
+  // The repo a Run WITHOUT a `repo:` key executes in (issue 71): a workbench
+  // Project's default repo; for a legacy Project this IS the key, so nothing
   // changes. Null exactly while `projectPath` is null.
   const activeDefaultRepo = useMemo(
-    () => projects.find((p) => p.key === projectPath)?.defaultRepoPath ?? projectPath,
-    [projects, projectPath],
+    () => activeProject?.defaultRepoPath ?? projectPath,
+    [activeProject, projectPath],
+  );
+
+  // Per-issue repo targeting (issue 72, ADR-0015): each backlog issue resolves
+  // through the pure `repoForIssue` — its declared `repo:` key in the
+  // project's repos map, else the default repo; an unknown key is an explicit
+  // error (that Run is blocked, siblings unaffected). Legacy Projects have no
+  // keys, so every issue resolves to the repo itself — unchanged.
+  const issueRepoResolutions = useMemo(() => {
+    // (`Map` the identifier is the Map view component here.)
+    const map = new globalThis.Map<number, IssueRepoResolution>();
+    if (!backlog) return map;
+    const project = {
+      repos: activeProject?.repos ?? {},
+      defaultRepoPath: activeDefaultRepo ?? projectPath ?? '',
+    };
+    for (const issue of backlog.issues) {
+      // `repo:` keys are a WORKBENCH concept (ADR-0015). A legacy Project has
+      // no repos map, so a stray `repo:` line in a legacy issue stays ignored
+      // — byte-identical to today — rather than becoming a blocker.
+      map.set(
+        issue.id,
+        activeProject?.kind === 'workbench'
+          ? repoForIssue(project, issue.repoKey)
+          : { ok: true, repoPath: project.defaultRepoPath },
+      );
+    }
+    return map;
+  }, [backlog, activeProject, activeDefaultRepo, projectPath]);
+
+  /** The repo an issue's Run targets; the default repo when unresolvable. */
+  const repoForIssueId = useCallback(
+    (issueId: number): string => {
+      const resolution = issueRepoResolutions.get(issueId);
+      return resolution?.ok ? resolution.repoPath : (activeDefaultRepo ?? '');
+    },
+    [issueRepoResolutions, activeDefaultRepo],
+  );
+
+  /**
+   * The workbench paths a Run target must carry in its spawn prompt (issue
+   * 72) — present exactly for a workbench Project, null for legacy.
+   */
+  const workbenchPathsForRun = useMemo(
+    () =>
+      activeProject?.kind === 'workbench'
+        ? {
+            issuesRoot: activeProject.issuesRoot,
+            completionsRoot: activeProject.completionsRoot,
+          }
+        : null,
+    [activeProject],
   );
 
   /** True when a Run works in a worktree on an `afk/` branch (not `main`). */
   const isIsolated = useCallback(
-    (run: TrackedRun): boolean =>
-      activeDefaultRepo !== null && run.target.projectPath !== activeDefaultRepo,
-    [activeDefaultRepo],
+    (run: TrackedRun): boolean => {
+      // A Run is isolated when its cwd is not ITS OWN target repo (issue 72):
+      // for a legacy Project every issue's repo is the default repo, so this
+      // is exactly the old `cwd !== defaultRepoPath` test.
+      const repo = repoForIssueId(run.target.issueId);
+      return repo !== '' && run.target.projectPath !== repo;
+    },
+    [repoForIssueId],
   );
 
   /** The issue's current status on disk, or null if not observed yet. */
@@ -666,7 +733,12 @@ export function App(): JSX.Element {
         sessionAlive: run.sessionAlive,
         stoppedByUser: run.stoppedByUser,
         issueStatus: observedIssueStatus({
-          isolated: isIsolated(run),
+          // A workbench Project's claim surface IS the workbench (issue 72,
+          // ADR-0015): Workers flip statuses there directly — worktree or not
+          // — and the backlog watch reads it, so the "main" source is
+          // authoritative for every workbench Run. Legacy isolated Runs keep
+          // reading their own worktree/branch, exactly as before.
+          isolated: activeProject?.kind === 'workbench' ? false : isIsolated(run),
           mainStatus: issueStatusOf(run.target.issueId),
           worktreeStatus: committedStatusById[run.target.issueId] ?? null,
         }),
@@ -676,7 +748,7 @@ export function App(): JSX.Element {
         // longer read as `running` forever and wedge the drain's slot.
         receiptOutcome: latestReceiptOutcomeFor(runLog, run.target.issueId),
       }),
-    [issueStatusOf, isIsolated, committedStatusById, runLog],
+    [issueStatusOf, isIsolated, committedStatusById, runLog, activeProject],
   );
 
   // Commit a solo Run's finished work on `main` via the adapter, moving its
@@ -689,7 +761,12 @@ export function App(): JSX.Element {
       const prior = soloCommitPhases.current[id] ?? 'unstarted';
       soloCommitPhases.current[id] = nextPhase;
       void window.mc
-        .commitFinishedMain({ projectPath, slug: slugOf(run.target.issueFileName) })
+        .commitFinishedMain({
+          projectPath,
+          slug: slugOf(run.target.issueFileName),
+          // The Run's own target repo (issue 72) — the default for legacy.
+          repoPath: repoForIssueId(run.target.issueId),
+        })
         .then((outcome) => {
           // Stray Receipts adopted alongside the run commit (issue 62) — queue
           // them for a passive `receipt-adopt` note (the log effect below).
@@ -703,7 +780,7 @@ export function App(): JSX.Element {
           soloCommitPhases.current[id] = prior;
         });
     },
-    [projectPath],
+    [projectPath, repoForIssueId],
   );
 
   // Auto-commit a finished SOLO Run's work on `main` (issue 25), Receipt-aware
@@ -785,7 +862,9 @@ export function App(): JSX.Element {
       committedWorktreeIds.current.add(id);
       const slug = b.slug;
       void window.mc
-        .commitFinishedWorktree({ projectPath, slug })
+        // The branch's own repo (issue 72): the scan tags each fact with the
+        // member repo it lives in; absent (older shape) = the default repo.
+        .commitFinishedWorktree({ projectPath, slug, repoPath: b.repoPath })
         .then((res) => {
           if (res.committed) {
             // Reflect the committed `done` at once so there is no commit-failed
@@ -977,26 +1056,49 @@ export function App(): JSX.Element {
       soloGraceElapsed.current.delete(target.issueId);
       committedWorktreeIds.current.delete(target.issueId);
 
+      // The workbench-aware target (issue 72): a workbench Project's spawn
+      // prompt carries the explicit workbench paths; legacy adds nothing.
+      const enriched: RunTarget = { ...target, workbench: workbenchPathsForRun };
+
       // No resolved Project path yet: can't reconcile isolation, so fall back to
       // spawning on the target's given path (a lone Run). Never blocks the Pane.
       if (projectPath === null) {
         setRuns((prev) =>
           prev.some((r) => r.target.issueId === target.issueId)
             ? prev
-            : [...prev, newRun(target)],
+            : [...prev, newRun(enriched)],
+        );
+        return;
+      }
+
+      // The issue's TARGET repo (issue 72): its `repo:` key resolved through
+      // the project CONFIG, else the default. An unknown key is an explicit
+      // error — never a guessed path — so the Run is refused with the reason.
+      const resolution = issueRepoResolutions.get(target.issueId);
+      if (resolution !== undefined && !resolution.ok) {
+        window.alert(
+          unknownRepoKeyNote(
+            target.issueId,
+            resolution.unknownKey,
+            Object.keys(activeProject?.repos ?? {}),
+          ),
         );
         return;
       }
 
       // The Runs that need isolation once this one joins = the ones still live
       // (running or in a worktree) plus the new target, deduped by issueId.
+      // Each carries its own target repo so isolation keys per repo (issue 72).
       const active: IsolationRun[] = runs.filter(needsIsolation).map((r) => ({
         issueId: r.target.issueId,
         slug: slugOf(r.target.issueFileName),
+        repoPath: repoForIssueId(r.target.issueId),
       }));
+      const issueRepo = repoForIssueId(target.issueId);
       const isolationRuns = isolationRunSetWith(active, {
         issueId: target.issueId,
         slug: slugOf(target.issueFileName),
+        repoPath: issueRepo,
       });
 
       // Apply the resolved placements: re-point every tracked Run to its cwd —
@@ -1014,13 +1116,9 @@ export function App(): JSX.Element {
           if (repointed.some((r) => r.target.issueId === target.issueId)) {
             return repointed;
           }
-          return [...repointed, newRun({ ...target, projectPath: cwdOf(target.issueId) })];
+          return [...repointed, newRun({ ...enriched, projectPath: cwdOf(target.issueId) })];
         });
       };
-
-      // Runs execute in the Project's (default) repo — identical to the key
-      // for a legacy Project (issue 71).
-      const runRepo = activeDefaultRepo ?? projectPath;
 
       void window.mc
         .applyIsolation({ projectPath, runs: isolationRuns })
@@ -1028,16 +1126,20 @@ export function App(): JSX.Element {
           const cwdById: Record<number, string> = {};
           for (const p of result.placements) cwdById[p.issueId] = p.cwd;
           // A Run not in the placement set keeps its current cwd (fall back to
-          // `main`); every isolated/new Run gets its resolved worktree/main cwd.
-          place((id) => cwdById[id] ?? runRepo);
+          // its own repo); every isolated/new Run gets its resolved cwd.
+          place((id) => cwdById[id] ?? repoForIssueId(id));
         })
         .catch(() => {
           // Isolation failed (a git worktree error, a partial reconcile). Falling
-          // back to `main` is safe only when this would be the LONE Run; if other
-          // Runs are already live (the set is 2+), opening this one on `main` is
-          // the concurrent-main collision isolation exists to prevent (issue 28).
+          // back to the repo checkout is safe only when this would be the LONE
+          // Run IN ITS REPO (issue 72 keys concurrency per repo); if other Runs
+          // are live in the SAME repo, opening this one on its checkout is the
+          // concurrent-main collision isolation exists to prevent (issue 28).
           // Surface the error and leave the live Runs untouched — don't spawn.
-          if (!canFallBackToMain(isolationRuns.length)) {
+          const sameRepoCount = isolationRuns.filter(
+            (r) => (r.repoPath ?? issueRepo) === issueRepo,
+          ).length;
+          if (!canFallBackToMain(sameRepoCount)) {
             setFocusedId((cur) => (cur === target.issueId ? null : cur));
             window.alert(
               'Could not isolate this Run into its own worktree, and other Runs ' +
@@ -1047,24 +1149,27 @@ export function App(): JSX.Element {
             );
             return;
           }
-          // A lone Run: safe to open the new Pane on `main` so it still starts.
+          // A lone Run in its repo: safe to open the Pane on that checkout.
           setRuns((prev) =>
             prev.some((r) => r.target.issueId === target.issueId)
               ? prev
-              : [...prev, newRun({ ...target, projectPath: runRepo })],
+              : [...prev, newRun({ ...enriched, projectPath: issueRepo })],
           );
         });
     },
     [
       runs,
       projectPath,
-      activeDefaultRepo,
       needsIsolation,
       midMerge,
       worktreeRunningIds,
       finishedUnmergedIds,
       strandedIds,
       commitFailedIds,
+      issueRepoResolutions,
+      repoForIssueId,
+      workbenchPathsForRun,
+      activeProject,
     ],
   );
 
@@ -1111,8 +1216,10 @@ export function App(): JSX.Element {
     (issueId: number, slug: string): void => {
       if (projectPath === null) return;
       const label = String(issueId).padStart(2, '0');
+      // The branch's own repo (issue 72), read from the scan fact when known.
+      const repoPath = activeScan.branches.find((b) => b.slug === slug)?.repoPath;
       void window.mc
-        .discardAfkRun({ projectPath, slug })
+        .discardAfkRun({ projectPath, slug, repoPath })
         .then((res) => {
           if (!res.ok) {
             window.alert(
@@ -1145,7 +1252,7 @@ export function App(): JSX.Element {
           );
         });
     },
-    [projectPath],
+    [projectPath, activeScan],
   );
 
   const handleRunExit = useCallback((issueId: number): void => {
@@ -1868,6 +1975,25 @@ export function App(): JSX.Element {
   useEffect(() => {
     if (!draining || !backlog || projectPath === null) return;
 
+    // Issues whose `repo:` key doesn't resolve are BLOCKED, not started, and
+    // must not stall their siblings (issue 72): they are excluded from the
+    // plan (their dependents stay blocked naturally — a missing dependency is
+    // an unmet dependency) and surfaced once as an ambient note.
+    const plannable = backlog.issues.filter((issue) => {
+      const resolution = issueRepoResolutions.get(issue.id);
+      if (resolution === undefined || resolution.ok) return true;
+      logNote(
+        `repo-unresolved:${issue.id}:${resolution.unknownKey}`,
+        'relay',
+        unknownRepoKeyNote(
+          issue.id,
+          resolution.unknownKey,
+          Object.keys(activeProject?.repos ?? {}),
+        ),
+      );
+      return false;
+    });
+
     // Each Run carries the outcome its latest Receipt DECLARED (or null when
     // none exists) so the Coordinator can tell a parked HITL Run — a success
     // the drain continues past — from a genuinely blocked one that halts it
@@ -1877,7 +2003,7 @@ export function App(): JSX.Element {
       status: runStatusOf(r),
       receiptOutcome: latestReceiptOutcomeFor(runLog, r.target.issueId),
     }));
-    const plan = planDrain({ issues: backlog.issues, maxConcurrent: cap, activeRuns, midMerge });
+    const plan = planDrain({ issues: plannable, maxConcurrent: cap, activeRuns, midMerge });
 
     if (plan.drain.stop) {
       setDraining(false);
@@ -1898,21 +2024,23 @@ export function App(): JSX.Element {
     if (startableIssues.length === 0) return;
 
     // The set of Runs that need isolation = every tracked Run plus the ones
-    // about to start. The adapter creates a worktree per Run when this set is
-    // 2+, else keeps the lone Run on main. Idempotent, so re-planning is safe.
+    // about to start, each carrying its own target repo (issue 72): isolation
+    // keys on concurrency PER REPO, so two startable issues in different repos
+    // each stay solo in their own repo while 2+ in one repo get worktrees.
     const isolationRuns: IsolationRun[] = [
       ...runs.map((r) => ({
         issueId: r.target.issueId,
         slug: slugOf(r.target.issueFileName),
+        repoPath: repoForIssueId(r.target.issueId),
       })),
-      ...startableIssues.map((i) => ({ issueId: i.id, slug: slugOf(i.fileName) })),
+      ...startableIssues.map((i) => ({
+        issueId: i.id,
+        slug: slugOf(i.fileName),
+        repoPath: repoForIssueId(i.id),
+      })),
     ];
 
     let cancelled = false;
-
-    // Runs execute in the Project's (default) repo — identical to the key for
-    // a legacy Project (issue 71).
-    const runRepo = activeDefaultRepo ?? projectPath;
 
     const addRuns = (cwdOf: (issueId: number) => string): void => {
       const additions = startableIssues.map((issue) =>
@@ -1921,6 +2049,9 @@ export function App(): JSX.Element {
           issueFileName: issue.fileName,
           issueTitle: issue.title,
           projectPath: cwdOf(issue.id),
+          // Workbench Runs carry the explicit workbench paths in the spawn
+          // prompt (issue 72); null for a legacy Project.
+          workbench: workbenchPathsForRun,
         }),
       );
       setRuns((prev) => {
@@ -1939,27 +2070,36 @@ export function App(): JSX.Element {
         const cwdById: Record<number, string> = {};
         for (const p of result.placements) cwdById[p.issueId] = p.cwd;
         // Newly-started Runs spawn in their resolved cwd (a worktree in parallel
-        // mode). Already-live Panes keep the cwd they spawned in — a running PTY
-        // can't be re-parented; that live solo→parallel re-parent is left to the
-        // batch QA walkthrough / Merge slice.
-        addRuns((id) => cwdById[id] ?? runRepo);
+        // mode; the issue's own target repo when solo). Already-live Panes keep
+        // the cwd they spawned in — a running PTY can't be re-parented; that
+        // live solo→parallel re-parent is left to the batch QA walkthrough /
+        // Merge slice.
+        addRuns((id) => cwdById[id] ?? repoForIssueId(id));
       })
       .catch(() => {
         if (cancelled) return;
         // Isolation failed (a git worktree error, a disk error, a partial
-        // reconcile that threw mid-apply). Falling back to `main` is safe ONLY
-        // for a lone Run; spawning every startable Run on the shared checkout
-        // while others are live is the concurrent-main collision isolation
-        // exists to prevent (issue 28). Count the Runs that would end up live on
-        // `main`: the startable ones (all fall back to `main`) plus any Run
-        // already running solo on `main` (an isolated Run keeps its worktree, so
-        // it doesn't count). If that is 2+, STOP the drain and surface the error
-        // for the user to retry/resolve rather than run multiple agents unsafely.
-        const runningOnMain = runs.filter(
-          (r) => runStatusOf(r) === 'running' && !isIsolated(r),
-        ).length;
-        if (canFallBackToMain(runningOnMain + startableIssues.length)) {
-          addRuns(() => runRepo);
+        // reconcile that threw mid-apply). Falling back to the checkout is safe
+        // ONLY for a lone Run per repo; spawning startable Runs on a shared
+        // checkout while others are live in the SAME repo is the concurrent-main
+        // collision isolation exists to prevent (issue 28). Count, per repo, the
+        // Runs that would end up live on that checkout: the startable ones
+        // (all fall back to their repo checkout) plus any Run already running
+        // solo there (an isolated Run keeps its worktree, so it doesn't count).
+        // If ANY repo would hold 2+, STOP the drain and surface the error.
+        const liveOnCheckout = new globalThis.Map<string, number>();
+        for (const r of runs) {
+          if (runStatusOf(r) !== 'running' || isIsolated(r)) continue;
+          const repo = repoForIssueId(r.target.issueId);
+          liveOnCheckout.set(repo, (liveOnCheckout.get(repo) ?? 0) + 1);
+        }
+        for (const issue of startableIssues) {
+          const repo = repoForIssueId(issue.id);
+          liveOnCheckout.set(repo, (liveOnCheckout.get(repo) ?? 0) + 1);
+        }
+        const safe = [...liveOnCheckout.values()].every((count) => canFallBackToMain(count));
+        if (safe) {
+          addRuns((id) => repoForIssueId(id));
         } else {
           setDraining(false);
           const message =
@@ -1982,7 +2122,7 @@ export function App(): JSX.Element {
     };
     // `runLog` is a dependency so a Receipt that lands a beat after its session
     // exits re-plans the drain with the park now visible (issue 64).
-  }, [draining, backlog, runs, cap, projectPath, activeDefaultRepo, midMerge, runStatusOf, isIsolated, runLog, surfaceNarrative]);
+  }, [draining, backlog, runs, cap, projectPath, midMerge, runStatusOf, isIsolated, runLog, surfaceNarrative, issueRepoResolutions, repoForIssueId, workbenchPathsForRun, activeProject, logNote]);
 
   // --- Merge readiness (issue 08, ADR-0002; issue 16) ---------------------
   // Whether a human-triggered Merge is offered — and which branches it targets —
@@ -2002,7 +2142,17 @@ export function App(): JSX.Element {
   // auto-resolved). The pure `decideDispatcherMerge` makes that auto-vs-gate call.
   const runMergeCore = useCallback((auto: boolean): void => {
     if (projectPath === null || merging) return;
-    const candidates = mergePlan.mergeable;
+    // Merge stays PER REPO (issue 72): one afk-merge invocation integrates one
+    // repo's branches. Group the mergeable set by the repo each branch lives
+    // in (from the scan facts) and merge the FIRST group this invocation; a
+    // remaining group re-derives as ready once the scan refreshes, so the next
+    // click / auto-proceed round integrates it — sequential by construction.
+    // A legacy Project has one repo, so the "first group" is the whole set,
+    // byte-identical to before.
+    const repoOf = (slug: string): string =>
+      activeScan.branches.find((b) => b.slug === slug)?.repoPath ?? '';
+    const firstRepo = mergePlan.mergeable.length > 0 ? repoOf(mergePlan.mergeable[0].slug) : '';
+    const candidates = mergePlan.mergeable.filter((c) => repoOf(c.slug) === firstRepo);
     if (candidates.length === 0) {
       // Triggered with nothing mergeable on disk (e.g. stale in-memory
       // readiness after the branches were removed): say so plainly rather than
@@ -2018,7 +2168,7 @@ export function App(): JSX.Element {
     setMerging(true);
     setMergeDisplay(pendingMergeDisplay(slugs.length));
     void window.mc
-      .mergeRuns({ projectPath, slugs })
+      .mergeRuns({ projectPath, slugs, repoPath: firstRepo === '' ? undefined : firstRepo })
       .then((result) => {
         setMergeDisplay(mergeResultDisplay(result));
         if (auto) {
@@ -2100,7 +2250,7 @@ export function App(): JSX.Element {
         );
       })
       .finally(() => setMerging(false));
-  }, [projectPath, merging, mergePlan, logNote, surfaceEvent, surfaceNarrative]);
+  }, [projectPath, merging, mergePlan, activeScan, logNote, surfaceEvent, surfaceNarrative]);
 
   // The manual Map Merge button — the unchanged, human-triggered path (ADR-0002).
   const runMerge = useCallback((): void => runMergeCore(false), [runMergeCore]);

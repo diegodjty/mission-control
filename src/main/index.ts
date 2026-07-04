@@ -19,12 +19,23 @@ import {
   discardWorktree,
   isMidMerge,
   readIsolatedIssueStatus,
+  readIssueStatusAt,
   scanAfkBranches,
   worktreePathFor,
 } from './git-worktree-adapter';
 import { mergeRuns, abortMerge } from './run-merge';
 import { RunLogStore } from './run-log-store';
 import { ReceiptWatcher } from './receipt-watcher';
+import { commitWorkbenchProject } from './workbench-git';
+import {
+  claimEventsBetween,
+  receiptRunEvent,
+  statusSnapshot,
+  workbenchCommitMessage,
+  type WorkbenchRunEvent,
+} from '../shared/workbench-run-events';
+import type { IssueStatus } from '../shared/backlog-model';
+import type { AfkBranchFacts } from '../shared/worktree-scan';
 import {
   IpcChannel,
   type AfkScanRequest,
@@ -126,12 +137,67 @@ function issuesRootFor(projectKey: string): string {
 
 /**
  * The git repo the project's repo-flavored operations (scan, commit, worktree,
- * merge, Run cwd) target: the identity's default repo — for a legacy Project
- * that IS the key, so behavior is unchanged; a workbench Project acts on its
- * CONFIG's default repo until issue 72 makes Runs repo-targeted per issue.
+ * merge, Run cwd) target when the request names none: the identity's default
+ * repo — for a legacy Project that IS the key, so behavior is unchanged.
  */
 function gitRepoFor(projectKey: string): string {
   return identityFor(projectKey)?.defaultRepoPath ?? normalizeProjectKey(projectKey);
+}
+
+/**
+ * The git repo one repo-flavored request targets (issue 72): the request's
+ * explicit `repoPath` when it names one of the Project's member repos, else
+ * the default repo. Clamped to the identity's known repos so a stale/foreign
+ * renderer path can never point a git mutation outside the Project.
+ */
+function requestRepoFor(projectKey: string, repoPath: string | undefined): string {
+  const fallback = gitRepoFor(projectKey);
+  if (repoPath === undefined || repoPath === '') return fallback;
+  const identity = identityFor(projectKey);
+  if (identity === null) return fallback;
+  const requested = normalizeProjectKey(repoPath);
+  if (requested === identity.defaultRepoPath || identity.repoPaths.includes(requested)) {
+    return requested;
+  }
+  return fallback;
+}
+
+/**
+ * Every member repo a workbench Project's scan must cover (issue 72): the
+ * CONFIG's repos (deduped), else just the default repo. Legacy: the repo.
+ */
+function scanReposFor(projectKey: string): string[] {
+  const identity = identityFor(projectKey);
+  if (identity === null) return [gitRepoFor(projectKey)];
+  const repos = identity.repoPaths.length > 0 ? identity.repoPaths : [identity.defaultRepoPath];
+  return [...new Set(repos)];
+}
+
+// --- Workbench auto-commit (issue 72, ADR-0015) ----------------------------
+// MC auto-commits the WORKBENCH repo after each Run event — claim observed
+// (backlog watcher diff), park / done + Receipt / blocked (Receipt ingest) —
+// with `<project>: issue NN <event>` messages. Pure decisions (which events,
+// which message) live in shared/workbench-run-events; the git side effect in
+// workbench-git. Serialized through the repo serializer on the PROJECT key so
+// a backlog-driven and a Receipt-driven commit never race in one repo. Code
+// repos never receive these commits; legacy Projects never enter here.
+
+/** The last-observed per-issue statuses per project key (claim-diff state). */
+const workbenchStatusSnapshots = new Map<string, Map<number, IssueStatus>>();
+
+function commitWorkbenchEvents(projectKey: string, events: WorkbenchRunEvent[]): void {
+  const identity = identityFor(projectKey);
+  if (identity === null || identity.kind !== 'workbench' || events.length === 0) return;
+  for (const event of events) {
+    const message = workbenchCommitMessage(identity.label, event);
+    // Quiet by design: an idempotent no-op or a failed commit must never
+    // interrupt a Run. The commit outcome is observable in the workbench log.
+    void repoSerializer
+      .run(normalizeProjectKey(identity.key), () =>
+        commitWorkbenchProject(identity.key, message),
+      )
+      .catch(() => {});
+  }
 }
 
 // Per-repo serializer (issue 31): even the single owning Window can fire
@@ -210,7 +276,11 @@ function projectViewsFor(windowId: string): ProjectView[] {
       kind: identity?.kind ?? 'legacy',
       label: identity?.label ?? p.key.split('/').filter(Boolean).pop() ?? p.key,
       issuesRoot: issuesRootFor(p.key),
+      completionsRoot:
+        identity?.completionsRoot ??
+        join(normalizeProjectKey(p.key), 'issues', 'completions'),
       defaultRepoPath: gitRepoFor(p.key),
+      repos: identity?.repos ?? {},
       stage: p.stage,
       ownership:
         p.ownerWindowId === null ? 'free' : p.ownerWindowId === windowId ? 'you' : 'other',
@@ -317,12 +387,41 @@ function registerIpc(): void {
   ipcMain.on(IpcChannel.BacklogWatch, (event, req: BacklogWatchRequest) => {
     const sender = event.sender;
     const key = String(sender.id);
+    const projectKey = normalizeProjectKey(req.projectPath);
+    const issuesRoot = issuesRootFor(req.projectPath);
+    const isWorkbench = identityFor(req.projectPath)?.kind === 'workbench';
+    // Seed the workbench claim-diff snapshot from the CURRENT on-disk state
+    // (issue 72): an MC (re)start over an already-claimed backlog must observe
+    // no events. Only the first watch of a project seeds; later re-points keep
+    // the running diff state.
+    if (isWorkbench && !workbenchStatusSnapshots.has(projectKey)) {
+      void readBacklogAt(issuesRoot)
+        .then((backlog) => {
+          // A change push may have installed a FRESHER snapshot while this
+          // seed read ran — never overwrite it with the older state.
+          if (!workbenchStatusSnapshots.has(projectKey)) {
+            workbenchStatusSnapshots.set(projectKey, statusSnapshot(backlog));
+          }
+        })
+        .catch(() => {});
+    }
     // Watch the Project's RESOLVED issues root (issue 71) — the watcher keys
     // on the Project identity, not on a repo path.
     backlogWatcher.watch(
       key,
-      { projectPath: req.projectPath, issuesRoot: issuesRootFor(req.projectPath) },
+      { projectPath: req.projectPath, issuesRoot },
       (result) => {
+        // Workbench auto-commit on claim observed (issue 72): diff the pushed
+        // backlog against the last snapshot; each fresh `wip` is one claim
+        // event → one `<project>: issue NN claim` commit. Diff-based, so a
+        // re-observation of unchanged statuses commits nothing. An error push
+        // (backlog null) keeps the old snapshot — never mistaken for change.
+        if (isWorkbench && result.backlog !== null) {
+          const next = statusSnapshot(result.backlog);
+          const prev = workbenchStatusSnapshots.get(projectKey) ?? null;
+          workbenchStatusSnapshots.set(projectKey, next);
+          commitWorkbenchEvents(req.projectPath, claimEventsBetween(prev, next));
+        }
         if (!sender.isDestroyed()) sender.send(IpcChannel.BacklogChanged, result);
       },
     );
@@ -340,7 +439,7 @@ function registerIpc(): void {
     async (event, req: IssueStatusObserveRequest): Promise<IssueStatusObserveResult> => {
       const denied = ownershipError(event, req.projectPath);
       if (denied) return { status: null, commitError: denied };
-      return readIsolatedIssueStatus(gitRepoFor(req.projectPath), req.slug);
+      return readIsolatedIssueStatus(requestRepoFor(req.projectPath, req.repoPath), req.slug);
     },
   );
 
@@ -355,9 +454,21 @@ function registerIpc(): void {
     async (event, req: MainCommitRequest): Promise<MainCommitResult> => {
       const denied = ownershipError(event, req.projectPath);
       if (denied) return { committed: false, error: denied };
-      const repo = gitRepoFor(req.projectPath);
+      const repo = requestRepoFor(req.projectPath, req.repoPath);
+      const identity = identityFor(req.projectPath);
+      // A workbench Project's claim surface is the WORKBENCH (issue 72): the
+      // `done` flip lands there, not in the code repo — read it there and
+      // hand it to the adapter, and BYPASS the stray-Receipt adoption (no
+      // Receipt ever belongs in a workbench Project's code repo).
+      const workbenchOpts =
+        identity?.kind === 'workbench'
+          ? {
+              statusOverride: await readIssueStatusAt(identity.issuesRoot, req.slug),
+              adoptStrays: false,
+            }
+          : {};
       return repoSerializer.run(normalizeProjectKey(repo), () =>
-        commitFinishedMain(repo, req.slug),
+        commitFinishedMain(repo, req.slug, workbenchOpts),
       );
     },
   );
@@ -373,9 +484,16 @@ function registerIpc(): void {
     async (event, req: WorktreeCommitRequest): Promise<WorktreeCommitResult> => {
       const denied = ownershipError(event, req.projectPath);
       if (denied) return { committed: false, error: denied };
-      const repo = gitRepoFor(req.projectPath);
+      const repo = requestRepoFor(req.projectPath, req.repoPath);
+      const identity = identityFor(req.projectPath);
+      // Workbench (issue 72): the agent's `done` flip lives in the workbench,
+      // not the worktree's own `issues/` — read the claim surface instead.
+      const workbenchOpts =
+        identity?.kind === 'workbench'
+          ? { statusOverride: await readIssueStatusAt(identity.issuesRoot, req.slug) }
+          : {};
       return repoSerializer.run(normalizeProjectKey(repo), () =>
-        commitFinishedWorktree(repo, req.slug),
+        commitFinishedWorktree(repo, req.slug, workbenchOpts),
       );
     },
   );
@@ -390,12 +508,30 @@ function registerIpc(): void {
       // A Window that doesn't own this repo gets an empty scan — it must not
       // derive a Merge affordance or block drains off a repo it doesn't drive.
       if (ownershipError(event, req.projectPath)) return { branches: [], midMerge: false };
-      const repo = gitRepoFor(req.projectPath);
+      const identity = identityFor(req.projectPath);
+      // A workbench Project's scan spans EVERY member repo (issue 72) —
+      // isolation is per repo, so in-flight/finished-unmerged Runs may live in
+      // any of them — with the issue-status facts read from the workbench
+      // claim surface. Legacy: the one repo, in-repo reads, unchanged.
+      const repos = scanReposFor(req.projectPath);
+      const scanOpts =
+        identity?.kind === 'workbench' ? { workbenchIssuesRoot: identity.issuesRoot } : {};
+      const perRepo = await Promise.all(
+        repos.map(async (repo) => ({
+          branches: (await scanAfkBranches(repo, scanOpts)).map(
+            (b): AfkBranchFacts => ({ ...b, repoPath: repo }),
+          ),
+          // Also report whether a repo is left mid-merge by a partial merge
+          // conflict (issue 24) so the renderer can block a new drain/Run and
+          // offer an Abort.
+          midMerge: await isMidMerge(repo),
+        })),
+      );
       return {
-        branches: await scanAfkBranches(repo),
-        // Also report whether `main` is left mid-merge by a partial merge conflict
-        // (issue 24) so the renderer can block a new drain/Run and offer an Abort.
-        midMerge: await isMidMerge(repo),
+        branches: perRepo
+          .flatMap((r) => r.branches)
+          .sort((a, b) => a.issueId - b.issueId),
+        midMerge: perRepo.some((r) => r.midMerge),
       };
     },
   );
@@ -410,7 +546,7 @@ function registerIpc(): void {
     async (event, req: AfkDiscardRequest): Promise<AfkDiscardResult> => {
       const denied = ownershipError(event, req.projectPath);
       if (denied) return { ok: false, error: denied };
-      const repo = gitRepoFor(req.projectPath);
+      const repo = requestRepoFor(req.projectPath, req.repoPath);
       return repoSerializer.run(normalizeProjectKey(repo), async () => {
         try {
           await discardWorktree(repo, req.slug);
@@ -427,16 +563,45 @@ function registerIpc(): void {
   // Run's cwd for the PTY spawn below.
   ipcMain.handle(
     IpcChannel.IsolationApply,
-    (event, req: IsolationApplyRequest): Promise<IsolationApplyResult> => {
+    async (event, req: IsolationApplyRequest): Promise<IsolationApplyResult> => {
       // Reject a non-owner: a stale renderer must not create/tear down worktrees
       // on a repo the real owner is driving. Empty placements ⇒ no mutation.
       if (ownershipError(event, req.projectPath)) {
-        return Promise.resolve({ parallel: false, placements: [] });
+        return { parallel: false, placements: [] };
       }
-      const repo = gitRepoFor(req.projectPath);
-      return repoSerializer.run(normalizeProjectKey(repo), () =>
-        applyIsolation(repo, req.runs),
+      // Isolation keys on concurrency PER REPO (issue 72, ADR-0015): group the
+      // Runs by the repo each targets (a Run without one falls into the
+      // Project default — every legacy Run, byte-identical to today) and
+      // reconcile each repo independently. Two concurrent Runs in different
+      // repos are each solo in their own repo — no worktrees; 2+ in one repo
+      // isolate exactly as always. Same-repo work serializes; different repos
+      // reconcile in parallel.
+      const defaultRepo = gitRepoFor(req.projectPath);
+      const byRepo = new Map<string, typeof req.runs>();
+      for (const run of req.runs) {
+        const repo = requestRepoFor(req.projectPath, run.repoPath) || defaultRepo;
+        const group = byRepo.get(repo);
+        if (group) group.push(run);
+        else byRepo.set(repo, [run]);
+      }
+      if (byRepo.size === 0) {
+        // No Runs at all: reconcile the default repo to its solo ground state,
+        // exactly as the single-repo path always did.
+        return repoSerializer.run(normalizeProjectKey(defaultRepo), () =>
+          applyIsolation(defaultRepo, []),
+        );
+      }
+      const results = await Promise.all(
+        [...byRepo.entries()].map(([repo, runs]) =>
+          repoSerializer.run(normalizeProjectKey(repo), () => applyIsolation(repo, runs)),
+        ),
       );
+      return {
+        parallel: results.some((r) => r.parallel),
+        placements: results
+          .flatMap((r) => r.placements)
+          .sort((a, b) => a.issueId - b.issueId),
+      };
     },
   );
 
@@ -457,9 +622,19 @@ function registerIpc(): void {
           output: '',
         });
       }
-      const repo = gitRepoFor(req.projectPath);
+      const repo = requestRepoFor(req.projectPath, req.repoPath);
+      const identity = identityFor(req.projectPath);
+      // Merge stays PER REPO (issue 72): a workbench Project's request names
+      // which member repo's branches to integrate. Its stray-Receipt adoption
+      // is BYPASSED (Receipts never live in a workbench Project's code repo —
+      // dirt there is unknown state and keeps the truthful preflight halt),
+      // and the merged-worktree sweep reads the workbench claim surface.
+      const mergeOpts =
+        identity?.kind === 'workbench'
+          ? { adoptStrays: false, workbenchIssuesRoot: identity.issuesRoot }
+          : {};
       return repoSerializer.run(normalizeProjectKey(repo), () =>
-        mergeRuns(repo, req.slugs),
+        mergeRuns(repo, req.slugs, mergeOpts),
       );
     },
   );
@@ -472,7 +647,7 @@ function registerIpc(): void {
     (event, req: MergeAbortRequest): Promise<MergeAbortResult> => {
       const denied = ownershipError(event, req.projectPath);
       if (denied) return Promise.resolve({ ok: false, error: denied });
-      const repo = gitRepoFor(req.projectPath);
+      const repo = requestRepoFor(req.projectPath, req.repoPath);
       return repoSerializer.run(normalizeProjectKey(repo), () =>
         abortMerge(repo),
       );
@@ -637,14 +812,21 @@ function registerIpc(): void {
       receiptWatcher.unwatch(key);
       return;
     }
-    // Receipts still land where Runs run — the identity's (default) repo —
-    // until issue 72 moves workbench Receipts to the workbench completions
-    // root. For a legacy Project this is the repo checkout, unchanged.
+    // WHERE Receipts land (issue 72, ADR-0015): a workbench Project's
+    // Receipts live in `~/Workbench/<project>/completions/` — ONE watch root
+    // (the project root; the watcher looks for `completions/*.md` beneath it),
+    // no per-worktree Receipt roots, whatever repo or worktree the Worker ran
+    // in. A legacy Project keeps today's roots exactly: the repo checkout's
+    // `issues/` plus each live worktree's copy.
+    const identity = identityFor(req.projectPath);
+    const isWorkbench = identity?.kind === 'workbench';
     const runRepo = gitRepoFor(req.projectPath);
-    const roots = [
-      join(runRepo, 'issues'),
-      ...req.worktreeSlugs.map((slug) => join(worktreePathFor(runRepo, slug), 'issues')),
-    ];
+    const roots = isWorkbench
+      ? [identity!.key]
+      : [
+          join(runRepo, 'issues'),
+          ...req.worktreeSlugs.map((slug) => join(worktreePathFor(runRepo, slug), 'issues')),
+        ];
     void seenReceiptsFor(req.projectPath).then((seen) => {
       // The Window may have gone away while the seed read ran.
       if (sender.isDestroyed()) return;
@@ -652,6 +834,13 @@ function registerIpc(): void {
         // Persist first (the durable Run log is the record of truth, ADR-0009);
         // a failed append still surfaces the record live rather than dropping it.
         void runLogStore.append(req.projectPath, record).catch(() => {});
+        // Workbench auto-commit on the Receipt-declared Run event (issue 72):
+        // done (flip + Receipt as ONE commit), park, or blocked. Deduped by
+        // the ingest edge (issue + finished), so a re-scan re-fires nothing.
+        if (isWorkbench) {
+          const runEvent = receiptRunEvent(record.issueId, record.outcome);
+          if (runEvent !== null) commitWorkbenchEvents(req.projectPath, [runEvent]);
+        }
         if (!sender.isDestroyed()) {
           sender.send(IpcChannel.ReceiptCaptured, { projectPath: req.projectPath, record });
         }

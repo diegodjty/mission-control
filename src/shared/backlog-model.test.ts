@@ -167,3 +167,43 @@ describe('buildBacklog — in-batch vs. standalone classification', () => {
     expect(issues[0].standalone).toBe(false);
   });
 });
+
+describe('buildBacklog — issue repo targeting (issue 72, ADR-0015)', () => {
+  it('parses the repo: frontmatter key', () => {
+    const files = [
+      issue(
+        '05-worker.md',
+        '---\nstatus: open\ndepends_on: []\nrepo: api\n---\n\n# 05 — Worker\n',
+      ),
+    ];
+    const { issues } = buildBacklog(files, CONFIG);
+    expect(issues[0].repoKey).toBe('api');
+  });
+
+  it('unquotes a quoted repo value', () => {
+    const files = [
+      issue('06-x.md', "---\nstatus: open\nrepo: 'web'\n---\n\n# 06 — X\n"),
+    ];
+    expect(buildBacklog(files, CONFIG).issues[0].repoKey).toBe('web');
+  });
+
+  it('defaults repoKey to null when the key is absent or empty', () => {
+    const files = [
+      issue('07-a.md', '---\nstatus: open\n---\n\n# 07 — A\n'),
+      issue('08-b.md', '---\nstatus: open\nrepo:\n---\n\n# 08 — B\n'),
+    ];
+    const { issues } = buildBacklog(files, CONFIG);
+    expect(issues[0].repoKey).toBeNull();
+    expect(issues[1].repoKey).toBeNull();
+  });
+
+  it('ignores a repo: line in the body (prose, not a declaration)', () => {
+    const files = [
+      issue(
+        '09-c.md',
+        '---\nstatus: open\n---\n\n# 09 — C\n\nThe CONFIG maps\nrepo: api\nto a path.\n',
+      ),
+    ];
+    expect(buildBacklog(files, CONFIG).issues[0].repoKey).toBeNull();
+  });
+});

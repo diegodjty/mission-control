@@ -55,6 +55,14 @@ export interface AfkBranchFacts {
    * deletes the branch, so this mainly guards a leftover already-merged branch.)
    */
   mergedIntoMain: boolean;
+  /**
+   * The code repo this branch lives in (issue 72): a workbench Project's scan
+   * spans every member repo, so per-branch operations (worktree commit,
+   * discard, merge) must know which repo to target. Absent from legacy
+   * adapter output (one repo, supplied out-of-band) — the main-process scan
+   * handler tags it for both layouts.
+   */
+  repoPath?: string;
 }
 
 /**
@@ -205,7 +213,8 @@ function branchFactsEqual(a: AfkBranchFacts, b: AfkBranchFacts): boolean {
     a.hasWorktree === b.hasWorktree &&
     a.committedStatus === b.committedStatus &&
     a.worktreeStatus === b.worktreeStatus &&
-    a.mergedIntoMain === b.mergedIntoMain
+    a.mergedIntoMain === b.mergedIntoMain &&
+    a.repoPath === b.repoPath
   );
 }
 

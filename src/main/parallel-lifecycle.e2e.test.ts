@@ -339,6 +339,7 @@ function mkIssue(id: number, status: 'open' | 'wip' | 'done', dependsOn: number[
     parent: null,
     source: null,
     hitl: false,
+    repoKey: null,
     inBatch: false,
     standalone: true,
     body: '',

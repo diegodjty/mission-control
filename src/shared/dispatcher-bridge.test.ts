@@ -17,6 +17,7 @@ function issue(id: number, status: BacklogIssue['status'], dependsOn: number[] =
     parent: 'docs/PRD.md',
     source: null,
     hitl: false,
+    repoKey: null,
     inBatch: true,
     standalone: false,
     body: '',

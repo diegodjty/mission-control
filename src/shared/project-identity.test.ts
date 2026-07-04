@@ -139,6 +139,7 @@ describe('projectIdentityFor', () => {
       completionsRoot: '/repos/repo-a/issues/completions',
       defaultRepoPath: '/repos/repo-a',
       repoPaths: ['/repos/repo-a'],
+      repos: {},
     });
   });
 
@@ -156,7 +157,18 @@ describe('projectIdentityFor', () => {
       completionsRoot: `${WB}/billing/completions`,
       defaultRepoPath: '/Users/dev/code/api', // tilde-expanded
       repoPaths: ['/Users/dev/code/api', '/Users/dev/code/web'],
+      repos: { api: '/Users/dev/code/api', web: '/Users/dev/code/web' },
     });
+  });
+
+  it('exposes the keyed repos map, expanded, for issue repo: lookups (issue 72)', () => {
+    const id = projectIdentityFor(
+      { kind: 'workbench', project: 'billing', root: `${WB}/billing` },
+      CONFIG,
+      HOME,
+    );
+    expect(id.repos['api']).toBe('/Users/dev/code/api');
+    expect(id.repos['web']).toBe('/Users/dev/code/web');
   });
 
   it('degrades a missing CONFIG to defaultRepoPath = key (Map still opens)', () => {

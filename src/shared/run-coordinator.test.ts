@@ -19,6 +19,7 @@ function mk(
     parent: 'docs/PRD.md',
     source: null,
     hitl,
+    repoKey: null,
     inBatch: true,
     standalone: false,
     body: '',

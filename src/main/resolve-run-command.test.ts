@@ -75,3 +75,41 @@ describe('resolveRunCommand', () => {
     expect(cmd.file).toBe('claude');
   });
 });
+
+describe('workbench Runs (issue 72, ADR-0015)', () => {
+  const WB_ISSUE = {
+    ...ISSUE,
+    cwd: '/repos/api',
+    workbench: {
+      issuesRoot: '/Users/dev/Workbench/billing/issues',
+      completionsRoot: '/Users/dev/Workbench/billing/completions',
+    },
+  };
+
+  it('receiptPathFor points at the workbench completions root — never the cwd', () => {
+    expect(receiptPathFor(WB_ISSUE)).toBe(
+      '/Users/dev/Workbench/billing/completions/03-run-issue-in-pane.md',
+    );
+  });
+
+  it('the prompt carries the explicit workbench paths (discovery order step 1)', () => {
+    const prompt = buildRunPrompt(WB_ISSUE);
+    expect(prompt).toContain('issue 03');
+    expect(prompt).toContain('/Users/dev/Workbench/billing/issues');
+    expect(prompt).toContain('/Users/dev/Workbench/billing/CONFIG.md');
+    expect(prompt).toContain(
+      '/Users/dev/Workbench/billing/completions/03-run-issue-in-pane.md',
+    );
+    // The Worker's cwd is the issue's target repo, named explicitly.
+    expect(prompt).toContain('/repos/api');
+    // And it must NOT point the Receipt at the cwd's issues/completions.
+    expect(prompt).not.toContain('/repos/api/issues/completions');
+  });
+
+  it('a legacy Run (no workbench field) keeps the exact legacy prompt shape', () => {
+    const prompt = buildRunPrompt(ISSUE);
+    expect(prompt).toContain('issues/CONFIG.md');
+    expect(prompt).toContain('/repos/project/issues/completions/03-run-issue-in-pane.md');
+    expect(prompt).not.toContain('Workbench');
+  });
+});

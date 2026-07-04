@@ -65,14 +65,21 @@ export interface ProjectIdentity {
   /** Where this Project's Receipts land. */
   completionsRoot: string;
   /**
-   * The repo git/Run operations target until issue 72 makes Runs repo-
-   * targeted per issue: the workbench CONFIG's default repo (tilde-expanded),
-   * or — legacy — the repo itself. Falls back to `key` when a workbench
-   * CONFIG names no usable repo, so callers always get *a* path, never null.
+   * The repo a Run WITHOUT a `repo:` key targets (issue 72 makes Runs
+   * repo-targeted per issue): the workbench CONFIG's default repo
+   * (tilde-expanded), or — legacy — the repo itself. Falls back to `key` when
+   * a workbench CONFIG names no usable repo, so callers always get *a* path,
+   * never null.
    */
   defaultRepoPath: string;
   /** Every member repo path (expanded, normalized). Legacy: just the repo. */
   repoPaths: string[];
+  /**
+   * The CONFIG's `repos:` map with each path expanded/normalized — the lookup
+   * an issue's `repo:` key resolves through (issue 72). Legacy: empty (no
+   * keys exist; every Run targets the repo itself via `defaultRepoPath`).
+   */
+  repos: Record<string, string>;
 }
 
 /** Where an opened path was matched: which resolution produced the identity. */
@@ -165,11 +172,16 @@ export function projectIdentityFor(
       completionsRoot: `${root}/issues/completions`,
       defaultRepoPath: root,
       repoPaths: [root],
+      repos: {},
     };
   }
 
   const config = parseProjectConfig(configContent);
-  const repoPaths = Object.values(config.repos).map((p) => normalize(expandTilde(p, homeDir)));
+  const repos: Record<string, string> = {};
+  for (const [key, path] of Object.entries(config.repos)) {
+    repos[key] = normalize(expandTilde(path, homeDir));
+  }
+  const repoPaths = Object.values(repos);
   const defaultRepo = repoPathForIssue(config, null);
 
   return {
@@ -182,6 +194,7 @@ export function projectIdentityFor(
       ? normalize(expandTilde(defaultRepo.path, homeDir))
       : root,
     repoPaths,
+    repos,
   };
 }
 

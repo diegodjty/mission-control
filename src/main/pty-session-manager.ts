@@ -54,10 +54,14 @@ export class PtySessionManager {
           id: req.run.issueId,
           fileName: req.run.issueFileName,
           title: req.run.issueTitle,
-          // The Run's RESOLVED cwd (worktree in parallel mode, repo in solo) —
-          // the prompt spells out the absolute per-Run Receipt path from it
+          // The Run's RESOLVED cwd (worktree in parallel mode, repo in solo;
+          // the issue's TARGET repo for a workbench Project, issue 72) — the
+          // prompt spells out the absolute per-Run Receipt path from it
           // (issue 62), so a Worker's cwd confusion can't misplace the write.
           cwd: req.run.projectPath,
+          // Workbench Runs carry the explicit workbench paths in the prompt
+          // (ADR-0015's discovery order); absent = legacy, prompt unchanged.
+          workbench: req.run.workbench ?? null,
         })
       : req.dispatcher
         ? resolveDispatcherCommand(process.env, {

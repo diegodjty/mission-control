@@ -29,6 +29,14 @@ export interface IsolationRun {
    * afk-merge.sh's branch/worktree key so a Merge (issue 08) can find them.
    */
   slug: string;
+  /**
+   * The code repo this Run targets (issue 72, ADR-0015): a workbench Project's
+   * issues may declare different `repo:` targets, and isolation keys on
+   * concurrency PER REPO — two concurrent Runs in different repos don't contend
+   * and need no mutual worktrees. Absent for a legacy Project (every Run in
+   * the one repo), where the caller supplies the repo out-of-band as before.
+   */
+  repoPath?: string;
 }
 
 /** Where a Run does its work. */
@@ -95,6 +103,46 @@ export function decideIsolation(runs: IsolationRun[]): IsolationDecision {
       : { kind: 'main' },
   }));
   return { parallel, placements };
+}
+
+/** One repo's slice of a per-repo isolation decision (issue 72, ADR-0015). */
+export interface RepoIsolationGroup {
+  /** The code repo these Runs execute in. */
+  repoPath: string;
+  /** The Runs targeting this repo, ascending by issueId. */
+  runs: IsolationRun[];
+  /** The isolation decision for THIS repo's concurrency alone. */
+  decision: IsolationDecision;
+}
+
+/**
+ * Decide isolation PER REPO (issue 72, ADR-0015): group the Runs by the repo
+ * each targets and make the concurrency decision independently for each group.
+ * Two concurrent Runs in different repos don't contend — each is the lone Run
+ * in its own repo and stays solo on that repo's default branch, no worktree —
+ * while 2+ Runs in the SAME repo isolate into worktrees exactly as
+ * `decideIsolation` always decided. A Run without a `repoPath` falls into the
+ * caller-supplied `defaultRepoPath` group (the legacy single-repo behavior).
+ * Groups are returned sorted by repoPath; deterministic, like the per-repo
+ * decisions themselves.
+ */
+export function decideIsolationByRepo(
+  runs: IsolationRun[],
+  defaultRepoPath: string,
+): RepoIsolationGroup[] {
+  const byRepo = new Map<string, IsolationRun[]>();
+  for (const run of runs) {
+    const repo = run.repoPath ?? defaultRepoPath;
+    const group = byRepo.get(repo);
+    if (group) group.push(run);
+    else byRepo.set(repo, [run]);
+  }
+  return [...byRepo.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([repoPath, group]) => {
+      const sorted = [...group].sort((a, b) => a.issueId - b.issueId);
+      return { repoPath, runs: sorted, decision: decideIsolation(sorted) };
+    });
 }
 
 /**

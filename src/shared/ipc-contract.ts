@@ -179,8 +179,24 @@ export interface RunTarget {
   issueFileName: string;
   /** Issue title, for the Pane banner. */
   issueTitle: string;
-  /** The Project repo path the session runs in (its cwd). Solo mode: `main`. */
+  /**
+   * The resolved cwd the session runs in. Legacy: the Project repo (solo) or
+   * the Run's worktree (parallel). Workbench (issue 72): the issue's TARGET
+   * repo — its `repo:` key resolved through the project CONFIG, else the
+   * default repo — or a worktree of it under same-repo concurrency.
+   */
   projectPath: string;
+  /**
+   * Present exactly for a workbench Project's Run (issue 72, ADR-0015): the
+   * explicit workbench paths the spawn prompt must carry — the issues root
+   * (where the Worker finds/flips its issue and reads CONFIG.md beside it)
+   * and the completions root its absolute Receipt path lives under. Absent
+   * for a legacy Project: the prompt stays byte-identical to today's.
+   */
+  workbench?: {
+    issuesRoot: string;
+    completionsRoot: string;
+  } | null;
 }
 
 /**
@@ -277,6 +293,14 @@ export interface BacklogWatchRequest {
 export type BacklogChangedMessage = BacklogLoadResult;
 
 export interface IssueStatusObserveRequest {
+  /**
+   * The CODE REPO this operation targets (issue 72): a workbench Project's
+   * Runs may live in different member repos, so the git-flavored handlers
+   * can no longer assume the project default. Absent (legacy callers, or a
+   * workbench Run in the default repo when unspecified) ⇒ main falls back to
+   * the identity's default repo — byte-identical to today.
+   */
+  repoPath?: string;
   /** The Project repo path (`main` checkout — the worktree base derives from it). */
   projectPath: string;
   /** The `NN-slug` of the isolated Run whose `afk/NN-slug` branch to observe. */
@@ -295,6 +319,14 @@ export interface IssueStatusObserveResult {
 }
 
 export interface MainCommitRequest {
+  /**
+   * The CODE REPO this operation targets (issue 72): a workbench Project's
+   * Runs may live in different member repos, so the git-flavored handlers
+   * can no longer assume the project default. Absent (legacy callers, or a
+   * workbench Run in the default repo when unspecified) ⇒ main falls back to
+   * the identity's default repo — byte-identical to today.
+   */
+  repoPath?: string;
   /** The Project repo path (`main` checkout) where the solo Run did its work. */
   projectPath: string;
   /** The `NN-slug` of the finished solo Run, used for the commit message. */
@@ -319,6 +351,14 @@ export interface MainCommitResult {
 }
 
 export interface WorktreeCommitRequest {
+  /**
+   * The CODE REPO this operation targets (issue 72): a workbench Project's
+   * Runs may live in different member repos, so the git-flavored handlers
+   * can no longer assume the project default. Absent (legacy callers, or a
+   * workbench Run in the default repo when unspecified) ⇒ main falls back to
+   * the identity's default repo — byte-identical to today.
+   */
+  repoPath?: string;
   /** The Project repo path (`main` checkout); the worktree base derives from it. */
   projectPath: string;
   /** The `NN-slug` of the finished isolated Run whose worktree to commit. */
@@ -354,6 +394,14 @@ export interface AfkScanResult {
 }
 
 export interface AfkDiscardRequest {
+  /**
+   * The CODE REPO this operation targets (issue 72): a workbench Project's
+   * Runs may live in different member repos, so the git-flavored handlers
+   * can no longer assume the project default. Absent (legacy callers, or a
+   * workbench Run in the default repo when unspecified) ⇒ main falls back to
+   * the identity's default repo — byte-identical to today.
+   */
+  repoPath?: string;
   /** The Project repo path (`main` checkout); the worktree base derives from it. */
   projectPath: string;
   /** The `NN-slug` of the stranded Run whose worktree + `afk/` branch to discard. */
@@ -392,6 +440,14 @@ export interface IsolationApplyResult {
 }
 
 export interface MergeRunsRequest {
+  /**
+   * The CODE REPO this operation targets (issue 72): a workbench Project's
+   * Runs may live in different member repos, so the git-flavored handlers
+   * can no longer assume the project default. Absent (legacy callers, or a
+   * workbench Run in the default repo when unspecified) ⇒ main falls back to
+   * the identity's default repo — byte-identical to today.
+   */
+  repoPath?: string;
   /** The Project repo path (`main` checkout). */
   projectPath: string;
   /** The `NN-slug`s whose `afk/NN-slug` branches to merge into `main`. */
@@ -435,6 +491,14 @@ export interface MergeRunsResult {
 }
 
 export interface MergeAbortRequest {
+  /**
+   * The CODE REPO this operation targets (issue 72): a workbench Project's
+   * Runs may live in different member repos, so the git-flavored handlers
+   * can no longer assume the project default. Absent (legacy callers, or a
+   * workbench Run in the default repo when unspecified) ⇒ main falls back to
+   * the identity's default repo — byte-identical to today.
+   */
+  repoPath?: string;
   /** The Project repo path (`main` checkout) to run `git merge --abort` in. */
   projectPath: string;
 }
@@ -468,10 +532,20 @@ export interface ProjectView {
   /** Where this Project's issue files live (in-workbench or in-repo). */
   issuesRoot: string;
   /**
-   * The repo git/Run operations target: the workbench CONFIG's default repo,
-   * or — legacy — the repo itself. (Per-issue `repo:` targeting is issue 72.)
+   * Where this Project's Receipts land (issue 72): the workbench completions
+   * root, or — legacy — `<repo>/issues/completions`.
+   */
+  completionsRoot: string;
+  /**
+   * The repo a Run without a `repo:` key targets: the workbench CONFIG's
+   * default repo, or — legacy — the repo itself.
    */
   defaultRepoPath: string;
+  /**
+   * The CONFIG's `repos:` map, tilde-expanded (issue 72) — what an issue's
+   * `repo:` key resolves through. Empty for a legacy Project.
+   */
+  repos: Record<string, string>;
   stage: PipelineStage;
   ownership: 'you' | 'other' | 'free';
 }

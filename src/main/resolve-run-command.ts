@@ -11,6 +11,19 @@
  */
 import type { ShellCommand } from './resolve-shell';
 
+/**
+ * The workbench paths a workbench Project's Run carries in its prompt (issue
+ * 72, ADR-0015): explicit paths are the FIRST step of the skill's discovery
+ * order, so a Worker spawned with them never has to guess where the backlog
+ * lives — its cwd is a code repo that holds no `issues/` at all.
+ */
+export interface RunWorkbenchPaths {
+  /** Where the project's `NN-slug.md` issue files live. */
+  issuesRoot: string;
+  /** Where Receipts land: `~/Workbench/<project>/completions`. */
+  completionsRoot: string;
+}
+
 /** The subset of a backlog issue a Run needs to scope itself. */
 export interface RunIssueRef {
   id: number;
@@ -18,19 +31,36 @@ export interface RunIssueRef {
   title: string;
   /**
    * The Run's RESOLVED working directory — its own worktree in parallel mode,
-   * the Project repo in solo mode. Used to spell out the Run's absolute Receipt
-   * path in the prompt (issue 62): Workers are LLMs, and a parallel Worker once
-   * wrote its Receipt into the MAIN checkout's `issues/completions/` instead of
-   * its worktree's copy (cwd confusion), dirtying `main` and blocking every
-   * merge. The skill's relative-path wording stays the general contract; the
-   * per-Run absolute path is Mission Control being defensive.
+   * the Project repo in solo mode; for a workbench Project, the issue's TARGET
+   * repo (its `repo:` key, else the project default — issue 72). Used to spell
+   * out the Run's absolute Receipt path in the prompt (issue 62): Workers are
+   * LLMs, and a parallel Worker once wrote its Receipt into the MAIN checkout's
+   * `issues/completions/` instead of its worktree's copy (cwd confusion),
+   * dirtying `main` and blocking every merge. The skill's relative-path wording
+   * stays the general contract; the per-Run absolute path is Mission Control
+   * being defensive.
    */
   cwd: string;
+  /**
+   * Present exactly when this is a workbench Project's Run: the explicit
+   * workbench paths the prompt must carry (ADR-0015's discovery order — the
+   * spawning prompt's paths win outright). Absent for a legacy Project, whose
+   * prompt is byte-identical to what it always was.
+   */
+  workbench?: RunWorkbenchPaths | null;
 }
 
-/** The Run's absolute Receipt path: `<cwd>/issues/completions/<NN-slug>.md`. */
-export function receiptPathFor(issue: Pick<RunIssueRef, 'fileName' | 'cwd'>): string {
+/**
+ * The Run's absolute Receipt path: the workbench completions root when the
+ * Run belongs to a workbench Project (ONE Receipt root, never per-worktree —
+ * issue 72), else `<cwd>/issues/completions/<NN-slug>.md` as always.
+ */
+export function receiptPathFor(
+  issue: Pick<RunIssueRef, 'fileName' | 'cwd' | 'workbench'>,
+): string {
   const stem = issue.fileName.replace(/\.md$/, '');
+  const workbench = issue.workbench ?? null;
+  if (workbench !== null) return `${workbench.completionsRoot}/${stem}.md`;
   return `${issue.cwd}/issues/completions/${stem}.md`;
 }
 
@@ -38,9 +68,39 @@ export function receiptPathFor(issue: Pick<RunIssueRef, 'fileName' | 'cwd'>): st
  * The initial prompt handed to `claude` so it works EXACTLY this one issue via
  * the afk-issue-runner skill (non-drain, single-issue mode). Pure and
  * deterministic so it can be asserted in tests.
+ *
+ * A workbench Run's prompt (issue 72) carries the EXPLICIT workbench paths per
+ * ADR-0015's discovery order: the issues root (where to find and flip the
+ * issue file and read CONFIG.md beside it) and the absolute Receipt path in
+ * the workbench completions root. The Worker's cwd is the issue's target code
+ * repo, which holds no pipeline artifacts of its own.
  */
 export function buildRunPrompt(issue: RunIssueRef): string {
   const num = String(issue.id).padStart(2, '0');
+  const workbench = issue.workbench ?? null;
+
+  if (workbench !== null) {
+    const projectRoot = workbench.issuesRoot.includes('/')
+      ? workbench.issuesRoot.slice(0, workbench.issuesRoot.lastIndexOf('/'))
+      : workbench.issuesRoot;
+    return (
+      `Use the afk-issue-runner skill in normal single-issue (non-drain) mode to ` +
+      `work EXACTLY issue ${num} (${issue.fileName}). ` +
+      `Read ~/.claude/skills/afk-issue-runner/SKILL.md. This project's pipeline ` +
+      `artifacts live in its Workbench, not in this repo (ADR-0015): its issue ` +
+      `files are in ${workbench.issuesRoot} and its project config is ` +
+      `${projectRoot}/CONFIG.md — use these explicit paths; do not look for an ` +
+      `issues/ directory in your cwd. Claim issue ${num} by flipping ` +
+      `${workbench.issuesRoot}/${issue.fileName} to wip, do the code work in ` +
+      `your cwd (${issue.cwd} — this issue's target repo), complete it per its ` +
+      `acceptance criteria, and stop after that one issue. Do not pick any ` +
+      `other issue. Your Receipt path for this Run is exactly ` +
+      `${receiptPathFor(issue)} (the workbench completions root — an absolute ` +
+      `path so a cwd mixup cannot misplace it); write your Receipt to that ` +
+      `path and nowhere else.`
+    );
+  }
+
   return (
     `Use the afk-issue-runner skill in normal single-issue (non-drain) mode to ` +
     `work EXACTLY issue ${num} (${issue.fileName}). ` +

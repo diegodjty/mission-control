@@ -40,6 +40,13 @@ export interface BacklogIssue {
   source: string | null;
   /** True if `hitl: true` in frontmatter, or `(HITL)` is in the heading. */
   hitl: boolean;
+  /**
+   * The issue's declared `repo:` frontmatter key — a key into its workbench
+   * project CONFIG's `repos:` map (ADR-0015, issue 72). Null when omitted
+   * (= the project's default repo; every legacy issue). One issue targets
+   * exactly one repo.
+   */
+  repoKey: string | null;
   /** True when `parent` matches the active PRD from CONFIG. */
   inBatch: boolean;
   /** True when the issue has no `## Parent` section at all. */
@@ -125,6 +132,10 @@ function parseIssue(file: RawFile, id: number, slug: string): BacklogIssue {
 
   const dependsOn = parseNumberList(frontmatterValue(frontmatter, 'depends_on'));
   const hitlFrontmatter = frontmatterValue(frontmatter, 'hitl') === 'true';
+  // The optional `repo:` target (issue 72). Frontmatter only — a `repo:` line
+  // in the body is prose. An empty value degrades to null (= default repo).
+  const repoRaw = frontmatterValue(frontmatter, 'repo')?.replace(/^['"]|['"]$/g, '').trim();
+  const repoKey = repoRaw !== undefined && repoRaw.length > 0 ? repoRaw : null;
 
   const heading = firstHeading(body);
   const title = heading ?? slug;
@@ -148,6 +159,7 @@ function parseIssue(file: RawFile, id: number, slug: string): BacklogIssue {
     parent,
     source,
     hitl,
+    repoKey,
     inBatch: false, // set once we know the active PRD (below)
     standalone,
     body,

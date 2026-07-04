@@ -19,6 +19,7 @@ function mk(id: number, status: IssueStatus, dependsOn: number[] = []): BacklogI
     parent: 'docs/PRD.md',
     source: null,
     hitl: false,
+    repoKey: null,
     inBatch: true,
     standalone: false,
     body: '',

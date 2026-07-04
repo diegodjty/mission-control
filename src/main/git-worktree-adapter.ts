@@ -189,26 +189,59 @@ export async function isMergedIntoDefaultBranch(
  * Merge affordance — a source of truth that survives closing every Pane, unlike
  * the renderer's in-memory tracked Runs. Sorted ascending by issue id.
  */
-export async function scanAfkBranches(projectPath: string): Promise<AfkBranchFacts[]> {
+export interface ScanOptions {
+  /**
+   * A workbench Project's issues root (issue 72, ADR-0015). When present, the
+   * issue-status facts come from the WORKBENCH — the claim surface Workers
+   * actually flip — instead of `issues/<slug>.md` inside the repo/worktree
+   * (which doesn't exist for a workbench Project):
+   *   - `worktreeStatus` (the "agent finished" signal) is the workbench
+   *     status while a worktree exists;
+   *   - `committedStatus` reads `done` once the workbench says done AND the
+   *     Run's work is actually committed on its branch (worktree clean, or
+   *     already removed) — so "finished ⇒ mergeable" keeps meaning committed.
+   * Absent for a legacy Project: byte-identical to the in-repo reads.
+   */
+  workbenchIssuesRoot?: string;
+}
+
+export async function scanAfkBranches(
+  projectPath: string,
+  options: ScanOptions = {},
+): Promise<AfkBranchFacts[]> {
   const slugs = await listAfkBranchSlugs(projectPath);
   const worktreeSlugs = new Set(await listWorktreeSlugs(projectPath));
   // Detect the repo's default branch once (issue 27) and reuse it for every
   // slug's merged check — cheaper than re-reading per branch, and consistent.
   const defaultBranch = await detectDefaultBranch(projectPath);
+  const workbenchIssuesRoot = options.workbenchIssuesRoot ?? null;
   const facts = await Promise.all(
     slugs.map(async (slug) => {
       const hasWorktree = worktreeSlugs.has(slug);
+      let committedStatus: IssueStatus | null;
+      let worktreeStatus: IssueStatus | null;
+      if (workbenchIssuesRoot !== null) {
+        const status = await readIssueStatusAt(workbenchIssuesRoot, slug);
+        worktreeStatus = hasWorktree ? status : null;
+        committedStatus =
+          status === 'done' && (!hasWorktree || (await isWorktreeClean(projectPath, slug)))
+            ? 'done'
+            : null;
+      } else {
+        committedStatus = await readCommittedIssueStatus(projectPath, slug);
+        // Only meaningful while a worktree exists — the working-tree `done` flip
+        // vs. the committed tip is what distinguishes a commit-failure from a
+        // Run in progress (issue 22). No worktree ⇒ no working tree to read.
+        worktreeStatus = hasWorktree
+          ? await readWorktreeIssueStatus(projectPath, slug)
+          : null;
+      }
       return {
         issueId: issueIdFromSlug(slug),
         slug,
         hasWorktree,
-        committedStatus: await readCommittedIssueStatus(projectPath, slug),
-        // Only meaningful while a worktree exists — the working-tree `done` flip
-        // vs. the committed tip is what distinguishes a commit-failure from a
-        // Run in progress (issue 22). No worktree ⇒ no working tree to read.
-        worktreeStatus: hasWorktree
-          ? await readWorktreeIssueStatus(projectPath, slug)
-          : null,
+        committedStatus,
+        worktreeStatus,
         mergedIntoMain: await isMergedIntoDefaultBranch(projectPath, slug, defaultBranch),
       };
     }),
@@ -316,8 +349,9 @@ export interface ReconcileMergedResult {
  */
 export async function reconcileMergedWorktrees(
   projectPath: string,
+  options: ScanOptions = {},
 ): Promise<ReconcileMergedResult> {
-  const facts = await scanAfkBranches(projectPath);
+  const facts = await scanAfkBranches(projectPath, options);
   const hasWorktree = new Set(facts.filter((f) => f.hasWorktree).map((f) => f.slug));
   const reclaimed: string[] = [];
   const leftBehind: string[] = [];
@@ -455,6 +489,36 @@ async function readMainIssueStatus(
   }
 }
 
+/**
+ * Read an issue's status from an EXPLICIT issues root (issue 72, ADR-0015):
+ * for a workbench Project the claim surface is `~/Workbench/<project>/issues/`,
+ * not any code repo — Workers flip statuses there directly. Null when the
+ * file is missing/unreadable.
+ */
+export async function readIssueStatusAt(
+  issuesRoot: string,
+  slug: string,
+): Promise<IssueStatus | null> {
+  try {
+    return statusOf(slug, await readFile(join(issuesRoot, `${slug}.md`), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/** Is a Run's worktree working tree clean vs. its branch tip? False on error. */
+async function isWorktreeClean(projectPath: string, slug: string): Promise<boolean> {
+  try {
+    const porcelain = await git(worktreePathFor(projectPath, slug), [
+      'status',
+      '--porcelain',
+    ]);
+    return porcelain.trim().length === 0;
+  } catch {
+    return false;
+  }
+}
+
 /** Read an isolated Run's issue status from its worktree working tree, or null. */
 async function readWorktreeIssueStatus(
   projectPath: string,
@@ -524,14 +588,37 @@ export interface WorktreeCommitOutcome {
   adopted?: string[];
 }
 
+export interface FinishedCommitOptions {
+  /**
+   * The issue's status as read from an EXPLICIT issues root (issue 72): for a
+   * workbench Project the flip lands in the workbench, so the in-repo status
+   * read would never see `done` and the finished work would never commit. The
+   * caller (main's IPC handler) reads the workbench status and passes it here;
+   * absent for a legacy Project (in-repo read, unchanged).
+   */
+  statusOverride?: IssueStatus | null;
+  /**
+   * Whether to run the stray-Receipt adoption sweep before a solo commit
+   * (issue 62). Default true (legacy). A workbench Project's Receipts live in
+   * the workbench — nothing Receipt-shaped ever lands in a code repo — so its
+   * commits BYPASS adoption (issue 72): a dirty `issues/completions/` in a
+   * workbench Project's code repo is unknown state, not a known artifact.
+   */
+  adoptStrays?: boolean;
+}
+
 export async function commitFinishedWorktree(
   projectPath: string,
   slug: string,
+  options: FinishedCommitOptions = {},
 ): Promise<WorktreeCommitOutcome> {
   const worktreePath = worktreePathFor(projectPath, slug);
   if (!existsSync(worktreePath)) return { committed: false, error: null };
 
-  const worktreeStatus = await readWorktreeIssueStatus(projectPath, slug);
+  const worktreeStatus =
+    options.statusOverride !== undefined
+      ? options.statusOverride
+      : await readWorktreeIssueStatus(projectPath, slug);
   if (!shouldCommitWorktree({ isolated: true, worktreeStatus })) {
     return { committed: false, error: null };
   }
@@ -643,8 +730,12 @@ export async function adoptStrayReceipts(
 export async function commitFinishedMain(
   projectPath: string,
   slug: string,
+  options: FinishedCommitOptions = {},
 ): Promise<WorktreeCommitOutcome> {
-  const mainStatus = await readMainIssueStatus(projectPath, slug);
+  const mainStatus =
+    options.statusOverride !== undefined
+      ? options.statusOverride
+      : await readMainIssueStatus(projectPath, slug);
   if (!shouldCommitMain({ isolated: false, mainStatus })) {
     return { committed: false, error: null };
   }
@@ -657,7 +748,13 @@ export async function commitFinishedMain(
   // Receipt (issue 59's one-commit contract). Best-effort: if the adoption
   // itself fails, the `git add -A` run commit below still sweeps the stray in
   // (the pre-issue-62 behavior), so `main` ends clean either way.
-  const adoption = await adoptStrayReceipts(projectPath, { excludeSlug: slug });
+  // Workbench Projects BYPASS this sweep (issue 72, `adoptStrays: false`):
+  // their Receipts never live in a code repo, so there is nothing known to
+  // adopt — anything dirty under `issues/completions/` there is unknown state.
+  const adoption =
+    options.adoptStrays === false
+      ? { adopted: [], error: null }
+      : await adoptStrayReceipts(projectPath, { excludeSlug: slug });
 
   try {
     // Idempotency guard: with a clean working tree there is nothing to commit

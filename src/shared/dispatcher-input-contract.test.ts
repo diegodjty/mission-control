@@ -45,6 +45,7 @@ function backlog(): Backlog {
         parent: 'docs/PRD.md',
         source: null,
         hitl: false,
+        repoKey: null,
         inBatch: true,
         standalone: false,
         // A body full of scroll-like noise — the assembler must not carry it.

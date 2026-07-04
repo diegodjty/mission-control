@@ -86,6 +86,7 @@ describe('resolveProjectIdentity (real filesystem)', () => {
       completionsRoot: join(sandbox, 'issues', 'completions'),
       defaultRepoPath: sandbox,
       repoPaths: [sandbox],
+      repos: {},
     });
   });
 
