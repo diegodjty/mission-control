@@ -1,5 +1,5 @@
 ---
-status: open
+status: done
 depends_on: [72, 73]
 ---
 

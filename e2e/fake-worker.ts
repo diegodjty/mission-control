@@ -27,6 +27,12 @@
  *   - `die-mid-exit`               — flips `done`, then stops: no Receipt, no
  *                                    commit. The drain must not stall on it.
  *
+ * Workbench mode (issue 75, ADR-0015): when the task carries `workbench`
+ * paths, the claim flip and the Receipt go to the WORKBENCH (the one shared
+ * claim surface) while the code work happens in `repo` — the issue's target
+ * repo, which holds no `issues/` at all. Absent, everything above is
+ * byte-identical to the legacy layout.
+ *
  * Linger mode (issue 65): a REAL claude Pane never exits — it finishes its
  * final message and sits at its prompt. `linger: true` models exactly that:
  * the Worker writes everything its exit requires, then keeps its session
@@ -51,8 +57,20 @@ export type Misbehavior =
   | 'receipt-before-commit'
   | 'die-mid-exit';
 
+/**
+ * The explicit workbench paths a workbench Run's prompt carries (issue 72,
+ * ADR-0015). Present ⇒ the Worker flips its claim and writes its Receipt in
+ * the WORKBENCH while doing code work in `repo` (its issue's target repo,
+ * which holds no pipeline artifacts at all).
+ */
+export interface WorkerWorkbenchPaths {
+  issuesRoot: string;
+  completionsRoot: string;
+}
+
 export interface WorkerTask {
-  /** The shared Project checkout (`main`). */
+  /** The shared Project checkout (`main`) — for a workbench Run, the issue's
+   *  TARGET code repo (its `repo:` key resolved, issue 72). */
   repo: string;
   /** The Run's own worktree — present means PARALLEL mode (Worker commits). */
   worktree?: string;
@@ -68,9 +86,29 @@ export interface WorkerTask {
    * `deriveRunStatus` the fact a live Pane would present.
    */
   linger?: boolean;
+  /**
+   * Workbench mode (issue 75, ADR-0015): claim flips and the Receipt go to
+   * these workbench paths — the ONE shared claim surface — never into the code
+   * repo, which holds no `issues/` at all. Absent = the legacy layout,
+   * byte-identical to before.
+   */
+  workbench?: WorkerWorkbenchPaths | null;
+  /**
+   * Awaited right after the claim flip lands on disk — the observation window
+   * Mission Control's backlog watcher has in reality (it sees `wip` while the
+   * Worker works). Scenarios use it to drive the per-event workbench
+   * auto-commit exactly at the app's observation point.
+   */
+  onClaimed?: () => void | Promise<void>;
 }
 
 export interface WorkerTrace {
+  /**
+   * Where the Worker did its CODE work — its worktree in parallel mode, else
+   * the repo it was handed. Scenario (a) of issue 75 asserts this per Run: a
+   * workbench issue's Worker must land in its `repo:`-declared target repo.
+   */
+  cwd: string;
   /** Where the deliverable landed, or null (a blocked Worker builds nothing). */
   deliverablePath: string | null;
   /** Where the Receipt landed, or null when the mode suppressed it. */
@@ -140,10 +178,19 @@ export async function runFakeWorker(task: WorkerTask): Promise<WorkerTrace> {
   const misbehavior = task.misbehavior ?? 'none';
   const finished = task.finished ?? new Date().toISOString();
   const root = worktree ?? repo;
-  const issueFile = join(root, 'issues', `${issue.slug}.md`);
+  const workbench = task.workbench ?? null;
+  // Workbench mode (issue 75): the claim surface is the WORKBENCH's issues
+  // root; the code repo holds no issue files at all (ADR-0015's boundary).
+  const issueFile = workbench
+    ? join(workbench.issuesRoot, `${issue.slug}.md`)
+    : join(root, 'issues', `${issue.slug}.md`);
 
   // Claim: flip open → wip (the skill's section-1 claim marker).
   await writeFile(issueFile, issueFileContent(issue, 'wip'));
+  // The claim is now observable on disk — MC's watcher window (issue 75 uses
+  // this to fire the per-event workbench auto-commit at the real observation
+  // point, mid-Run, exactly when the app's backlog watcher would see it).
+  await task.onClaimed?.();
 
   // Do the work: a blocked Worker built nothing; the others leave a deliverable.
   let deliverablePath: string | null = null;
@@ -160,12 +207,16 @@ export async function runFakeWorker(task: WorkerTask): Promise<WorkerTrace> {
   }
 
   // Receipt — one save, last (the skill's Receipts section) — unless the mode
-  // suppresses it or redirects it to the wrong checkout.
+  // suppresses it or redirects it to the wrong checkout. A workbench Run has
+  // ONE Receipt root — the workbench completions dir — never a per-checkout
+  // copy (issue 72), so the wrong-checkout redirect is a legacy-only mode.
   let receiptPath: string | null = null;
   if (misbehavior !== 'no-receipt' && misbehavior !== 'die-mid-exit') {
-    const receiptRoot = misbehavior === 'receipt-to-wrong-checkout' ? repo : root;
-    receiptPath = join(receiptRoot, 'issues', 'completions', `${issue.slug}.md`);
-    await mkdir(join(receiptRoot, 'issues', 'completions'), { recursive: true });
+    const completionsDir = workbench
+      ? workbench.completionsRoot
+      : join(misbehavior === 'receipt-to-wrong-checkout' ? repo : root, 'issues', 'completions');
+    receiptPath = join(completionsDir, `${issue.slug}.md`);
+    await mkdir(completionsDir, { recursive: true });
     await writeFile(receiptPath, receiptText(issue, exit, finished));
   }
 
@@ -184,5 +235,5 @@ export async function runFakeWorker(task: WorkerTask): Promise<WorkerTrace> {
     committed = true;
   }
 
-  return { deliverablePath, receiptPath, committed, sessionAlive: task.linger ?? false };
+  return { cwd: root, deliverablePath, receiptPath, committed, sessionAlive: task.linger ?? false };
 }

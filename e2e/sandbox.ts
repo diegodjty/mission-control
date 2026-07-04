@@ -21,6 +21,12 @@
  *
  * No LLM anywhere: Workers are driven by `fake-worker.ts`, and the "Dispatcher
  * chat" is the FakePty below.
+ *
+ * Issue 75 adds the WORKBENCH fixture beside the legacy one (ADR-0015): a temp
+ * `workbench/` git repo (registry.md, a `proj/` project with a two-repo
+ * `repos:` CONFIG, the WORKBENCH_ISSUES backlog, a memory skeleton) plus two
+ * temp code repos that hold no pipeline artifacts at all. The legacy seeding
+ * above is untouched — both layouts stay exercised, per the ADR's consequence.
  */
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -45,6 +51,13 @@ export interface SandboxIssue {
   status: 'open' | 'wip' | 'done';
   dependsOn: number[];
   hitl: boolean;
+  /**
+   * The issue's declared `repo:` frontmatter key (ADR-0015, issue 72) — a key
+   * into its workbench project CONFIG's `repos:` map. Absent/null = the
+   * project's default repo (and every legacy issue, whose files carry no
+   * `repo:` line at all — byte-identical to before the workbench existed).
+   */
+  repoKey?: string | null;
 }
 
 /** The QA-sandbox-shaped backlog (see file header). */
@@ -73,12 +86,16 @@ export function sandboxIssue(id: number): SandboxIssue {
  * seeded issue is drain-eligible the way repo-a's are.
  */
 export function issueFileContent(
-  issue: Pick<SandboxIssue, 'id' | 'title' | 'dependsOn' | 'hitl'>,
+  issue: Pick<SandboxIssue, 'id' | 'title' | 'dependsOn' | 'hitl'> &
+    Partial<Pick<SandboxIssue, 'repoKey'>>,
   status: 'open' | 'wip' | 'done',
 ): string {
   const hitlLine = issue.hitl ? 'hitl: true\n' : '';
+  // The optional `repo:` target (issue 72). Legacy issues never set it, so
+  // their files stay byte-identical to the pre-workbench fixture.
+  const repoLine = issue.repoKey ? `repo: ${issue.repoKey}\n` : '';
   return (
-    `---\nstatus: ${status}\ndepends_on: [${issue.dependsOn.join(', ')}]\n${hitlLine}---\n\n` +
+    `---\nstatus: ${status}\ndepends_on: [${issue.dependsOn.join(', ')}]\n${hitlLine}${repoLine}---\n\n` +
     `# ${issue.id} — ${issue.title}\n\nScripted sandbox issue for the e2e drain harness.\n`
   );
 }
@@ -109,6 +126,143 @@ export async function seedSandbox(): Promise<Sandbox> {
   await git(repo, 'add', '.');
   await git(repo, 'commit', '-m', 'initial: seeded QA-sandbox backlog');
   return { scratch, repo, issuesDir };
+}
+
+// --- Workbench fixture (issue 75, ADR-0015) ------------------------------------
+
+/**
+ * The workbench-shaped backlog (issue 75): a two-repo project whose issues
+ * declare `repo:` targets, with a cross-repo `depends_on` chain (02 in repo-a
+ * unblocks 03 in repo-b), an HITL park (05), an issue naming an UNKNOWN repo
+ * key (06 — its Run must block without stalling siblings; 07 depends on it and
+ * stays blocked naturally), and a post-park sibling (08) proving the drain
+ * continues past both the park and the unknown-key block.
+ */
+export const WORKBENCH_ISSUES: readonly SandboxIssue[] = [
+  { id: 1, slug: '01-foundation', title: 'Foundation', status: 'done', dependsOn: [], hitl: false },
+  { id: 2, slug: '02-core-api', title: 'Core API', status: 'open', dependsOn: [], hitl: false, repoKey: 'a' },
+  { id: 3, slug: '03-b-consumes-core', title: 'B consumes core', status: 'open', dependsOn: [2], hitl: false, repoKey: 'b' },
+  { id: 4, slug: '04-b-independent', title: 'B independent', status: 'open', dependsOn: [], hitl: false, repoKey: 'b' },
+  { id: 5, slug: '05-manual-check', title: 'Manual check (HITL)', status: 'open', dependsOn: [], hitl: true, repoKey: 'a' },
+  { id: 6, slug: '06-unknown-repo', title: 'Unknown repo target', status: 'open', dependsOn: [], hitl: false, repoKey: 'rogue' },
+  { id: 7, slug: '07-blocked-on-unknown', title: 'Blocked on unknown-repo 06', status: 'open', dependsOn: [6], hitl: false },
+  { id: 8, slug: '08-a-followup', title: 'A followup', status: 'open', dependsOn: [], hitl: false, repoKey: 'a' },
+];
+
+/** Look up a seeded workbench issue by id (throws on a bad id — a test bug). */
+export function workbenchIssue(id: number): SandboxIssue {
+  const issue = WORKBENCH_ISSUES.find((i) => i.id === id);
+  if (!issue) throw new Error(`no workbench sandbox issue ${id}`);
+  return issue;
+}
+
+/** The distinctive CORE.md fact the memory scenarios assert rides the prompts. */
+export const WORKBENCH_CORE_FACT =
+  'The fixture tab width is exactly 7 spaces (distinctive workbench core fact).';
+
+export interface WorkbenchSandbox {
+  /** The scratch dir holding everything (rm -rf this in afterEach). */
+  scratch: string;
+  /** The Workbench root — ONE private git repo (`~/Workbench/` in real life). */
+  workbenchRoot: string;
+  /** The fixture project's directory: `<workbenchRoot>/proj`. */
+  projectRoot: string;
+  /** `<projectRoot>/issues` — where the `NN-slug.md` files live. */
+  issuesRoot: string;
+  /** `<projectRoot>/completions` — the ONE Receipt root for the project. */
+  completionsRoot: string;
+  /** `<projectRoot>/memory` — CORE.md + journal/. */
+  memoryRoot: string;
+  /** Code repo `a` (the CONFIG's default repo). Holds NO issues/ at all. */
+  repoA: string;
+  /** Code repo `b`. Holds NO issues/ at all. */
+  repoB: string;
+  /** The raw `registry.md` content, as the identity layer reads it. */
+  registryContent: string;
+  /** The raw project `CONFIG.md` content. */
+  configContent: string;
+}
+
+/** Init a plain seeded code repo (README committed on `main`, no issues/). */
+async function seedCodeRepo(path: string, name: string): Promise<void> {
+  await mkdir(path, { recursive: true });
+  await git(path, 'init', '-b', 'main');
+  await git(path, 'config', 'user.email', 'e2e@example.com');
+  await git(path, 'config', 'user.name', 'MC Drain E2E');
+  await git(path, 'config', 'commit.gpgsign', 'false');
+  await writeFile(join(path, 'README.md'), `# e2e code repo ${name}\n`);
+  await git(path, 'add', '.');
+  await git(path, 'commit', '-m', `initial: seed ${name}`);
+}
+
+/**
+ * Create and seed the workbench fixture: a temp Workbench git repo (registry,
+ * project CONFIG with a two-repo `repos:` map, the WORKBENCH_ISSUES backlog,
+ * a memory skeleton) plus two temp code repos that hold code ONLY — the
+ * pipeline artifacts live exclusively in the workbench (ADR-0015's boundary).
+ */
+export async function seedWorkbenchSandbox(): Promise<WorkbenchSandbox> {
+  const scratch = await mkdtemp(join(tmpdir(), 'mc-workbench-e2e-'));
+  const repoA = join(scratch, 'repo-a');
+  const repoB = join(scratch, 'repo-b');
+  await seedCodeRepo(repoA, 'repo-a');
+  await seedCodeRepo(repoB, 'repo-b');
+
+  const workbenchRoot = join(scratch, 'workbench');
+  const projectRoot = join(workbenchRoot, 'proj');
+  const issuesRoot = join(projectRoot, 'issues');
+  const completionsRoot = join(projectRoot, 'completions');
+  const memoryRoot = join(projectRoot, 'memory');
+  await mkdir(issuesRoot, { recursive: true });
+  await mkdir(memoryRoot, { recursive: true });
+
+  const registryContent =
+    `# Workbench registry\n\n` +
+    `Repo path → project mapping (bare-session discovery, ADR-0015).\n\n` +
+    `- repo: ${repoA}\n` +
+    `  project: proj\n` +
+    `  status: active\n` +
+    `- repo: ${repoB}\n` +
+    `  project: proj\n` +
+    `  status: active\n`;
+  await writeFile(join(workbenchRoot, 'registry.md'), registryContent);
+
+  const configContent =
+    `---\n` +
+    `repos:\n` +
+    `  a: ${repoA}\n` +
+    `  b: ${repoB}\n` +
+    `default_repo: a\n` +
+    `---\n\n` +
+    `# proj — e2e workbench fixture project\n\n` +
+    `## Test commands\n\n` +
+    `(scripted fixture — no tests to run)\n`;
+  await writeFile(join(projectRoot, 'CONFIG.md'), configContent);
+
+  for (const issue of WORKBENCH_ISSUES) {
+    await writeFile(join(issuesRoot, `${issue.slug}.md`), issueFileContent(issue, issue.status));
+  }
+  await writeFile(join(memoryRoot, 'CORE.md'), `- ${WORKBENCH_CORE_FACT}\n`);
+
+  await git(workbenchRoot, 'init', '-b', 'main');
+  await git(workbenchRoot, 'config', 'user.email', 'e2e@example.com');
+  await git(workbenchRoot, 'config', 'user.name', 'MC Drain E2E');
+  await git(workbenchRoot, 'config', 'commit.gpgsign', 'false');
+  await git(workbenchRoot, 'add', '.');
+  await git(workbenchRoot, 'commit', '-m', 'initial: seeded workbench fixture');
+
+  return {
+    scratch,
+    workbenchRoot,
+    projectRoot,
+    issuesRoot,
+    completionsRoot,
+    memoryRoot,
+    repoA,
+    repoB,
+    registryContent,
+    configContent,
+  };
 }
 
 // --- Fake PTY -----------------------------------------------------------------
