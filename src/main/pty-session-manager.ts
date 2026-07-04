@@ -27,6 +27,15 @@ export interface PtySessionManagerCallbacks {
   onExit: (msg: PtyExitMessage) => void;
 }
 
+/**
+ * Edge-gathered facts a spawn's prompt needs but the renderer never holds:
+ * the workbench project's `memory/CORE.md` content (issue 73), read by the
+ * IPC handler in main. Absent/null for legacy spawns and plain shells.
+ */
+export interface SpawnContext {
+  memoryCore?: string | null;
+}
+
 // Keep at most this many trailing chars of a Run's output. Tail-truncating
 // (drop from the front) keeps the most recent activity while bounding memory
 // over a long session.
@@ -43,7 +52,7 @@ export class PtySessionManager {
 
   constructor(private readonly callbacks: PtySessionManagerCallbacks) {}
 
-  spawn(req: PtySpawnRequest): PtySpawnResult {
+  spawn(req: PtySpawnRequest, context: SpawnContext = {}): PtySpawnResult {
     // A Run spawns a fresh interactive `claude` scoped to one issue, in the
     // Project repo (solo mode → directly on `main`, no worktree). A Dispatcher
     // spawns the conversational orchestrator `claude` for a drain, in the
@@ -62,11 +71,16 @@ export class PtySessionManager {
           // Workbench Runs carry the explicit workbench paths in the prompt
           // (ADR-0015's discovery order); absent = legacy, prompt unchanged.
           workbench: req.run.workbench ?? null,
+          // A workbench project's CORE.md, read at the IPC edge (issue 73);
+          // null for legacy Runs and memory-less projects — nothing injected.
+          memoryCore: context.memoryCore ?? null,
         })
       : req.dispatcher
         ? resolveDispatcherCommand(process.env, {
             projectPath: req.dispatcher.projectPath,
             activePrd: req.dispatcher.activePrd,
+            // Same CORE.md injection for the Dispatcher seed (issue 73).
+            memoryCore: context.memoryCore ?? null,
           })
         : resolveShell(process.env, process.platform);
     const cwd =

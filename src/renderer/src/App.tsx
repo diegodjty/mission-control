@@ -80,6 +80,7 @@ import {
   mismatchKey,
 } from '../../shared/receipt-audit';
 import { planDrain, type ActiveRun } from '../../shared/run-coordinator';
+import { isNotableDrainActivity } from '../../shared/workbench-memory';
 import { hasInFlightRun } from '../../shared/run-eligibility';
 import {
   repoForIssue,
@@ -354,6 +355,15 @@ export function App(): JSX.Element {
   // Monotonic per-drain sequence, so each drain's stopped/halted narrative fact
   // gets a stable, deduped delivery key (issue 66).
   const drainSeq = useRef<number>(0);
+  // --- Drain journal state (issue 73, ADR-0015) ----------------------------
+  // What was ALREADY in the Run log / activity strip when the current drain
+  // started, so the journal entry carries exactly THIS drain's story — the
+  // delta — not the Project's whole history. Snapshotted in `startDrain`.
+  const drainLogBaseline = useRef<Set<string>>(new Set<string>());
+  const drainNotableBaseline = useRef<Set<string>>(new Set<string>());
+  // The last drain sequence whose journal write was scheduled — "written once
+  // per drain": the user-stop and Coordinator-stop paths can't both fire it.
+  const drainJournalSeq = useRef<number>(0);
   // The Dispatcher rail's width (issue 44): user-adjustable by dragging the
   // divider between the Map and the panel, within a sensible min/max, persisted
   // app-wide so it survives closing/reopening the panel and the app. Changing it
@@ -388,6 +398,14 @@ export function App(): JSX.Element {
   // sign-off — shown with one-click approve/reject that don't execute until
   // approved).
   const [dispatcherActivities, setDispatcherActivities] = useState<DispatcherActivity[]>([]);
+  // Live mirror of `dispatcherActivities` for the drain-journal write (issue
+  // 73): its grace-window timer must read the CURRENT strip (a notable event —
+  // an adoption, a finished-without-receipt note — may land after the drain's
+  // stop was observed), not the render it was scheduled in.
+  const dispatcherActivitiesRef = useRef<DispatcherActivity[]>([]);
+  useEffect(() => {
+    dispatcherActivitiesRef.current = dispatcherActivities;
+  }, [dispatcherActivities]);
   // Delivery observability (issue 60, rule 3): each chat item's queued → typed →
   // submitted (or requeued / write-failed) state renders as ONE quiet ambient-log
   // line per item, updated in place — so the next walkthrough can SEE where a
@@ -1786,6 +1804,39 @@ export function App(): JSX.Element {
     }
   }, [runLog, debouncedStatusModel, projectPath, surfaceNarrative]);
 
+  // Write the drain's journal entry (issue 73, ADR-0015): when a drain ends —
+  // any stop reason — ONE dated summary lands in the workbench project's
+  // `memory/journal/`, built from THIS drain's Run-log delta plus its notable
+  // events (adoptions, finished-without-receipt), and auto-committed in main.
+  // Once per drain (both stop paths funnel here), after one Receipt grace
+  // window — a drain often ends on the `done` flip a beat before the final
+  // Run's Receipt is ingested, and the journal should name that Run too.
+  // Legacy Projects: no memory dir; the guard makes both halves inert.
+  const writeDrainJournalFor = useCallback(
+    (reason: string): void => {
+      if (projectPath === null || activeProject?.kind !== 'workbench') return;
+      const seq = drainSeq.current;
+      if (drainJournalSeq.current >= seq) return;
+      drainJournalSeq.current = seq;
+      const journalPath = projectPath;
+      const logBaseline = drainLogBaseline.current;
+      const notableBaseline = drainNotableBaseline.current;
+      setTimeout(() => {
+        // A Project switch mid-window: this journal belongs to the old
+        // Project; writing it against the new one would be a lie — skip.
+        if (projectPathRef.current !== journalPath) return;
+        const records = runLogRef.current.filter((rec) => !logBaseline.has(rec.id));
+        const notables = dispatcherActivitiesRef.current
+          .filter((a) => !notableBaseline.has(a.id) && isNotableDrainActivity(a.id))
+          .map((a) => a.label);
+        void window.mc
+          .writeDrainJournal({ projectPath: journalPath, reason, records, notables })
+          .catch(() => {});
+      }, RECEIPT_AUDIT_GRACE_MS);
+    },
+    [projectPath, activeProject],
+  );
+
   const startDrain = useCallback(
     (chosenCap: number): void => {
       // Refuse to drain onto a mid-merge main (issue 24) — resolve/abort first.
@@ -1801,6 +1852,12 @@ export function App(): JSX.Element {
       // Each drain gets its own sequence so its stopped/halted narrative fact
       // (issue 66) carries a stable, deduped delivery key.
       drainSeq.current += 1;
+      // Journal baselines (issue 73): what predates this drain is not this
+      // drain's story — the entry is built from the delta past these sets.
+      drainLogBaseline.current = new Set(runLogRef.current.map((rec) => rec.id));
+      drainNotableBaseline.current = new Set(
+        dispatcherActivitiesRef.current.map((a) => a.id),
+      );
       // Starting a drain spins up the Dispatcher for this Project (ADR-0010):
       // the conversational orchestrator that drives the drain and that you talk
       // to instead of watching every Pane. A single manual Run (startRun) does
@@ -1840,7 +1897,9 @@ export function App(): JSX.Element {
     // A drain stop is a lifecycle fact worth telling (ADR-0014, issue 66): a
     // message in the Dispatcher conversation, plus the history line.
     surfaceNarrative('drain-stopped', `drain-stopped:${drainSeq.current}`, 'relay', message);
-  }, [surfaceNarrative]);
+    // A user stop is a drain end like any other (issue 73): journal it.
+    writeDrainJournalFor(message);
+  }, [surfaceNarrative, writeDrainJournalFor]);
 
   // Record the Dispatcher session's PTY id once its chat Pane spawns (issue 35),
   // so the ingest effect below can feed each Run's Completion block into it.
@@ -2012,6 +2071,9 @@ export function App(): JSX.Element {
       // 66): a message in the Dispatcher conversation (why it ended — a blocked
       // Run, nothing eligible, a mid-merge main), plus the history line.
       surfaceNarrative('drain-halted', `drain-halted:${drainSeq.current}`, 'relay', plan.drain.message);
+      // The drain ended (issue 73): one journal entry into the workbench
+      // memory, whatever the stop reason.
+      writeDrainJournalFor(plan.drain.message);
       return;
     }
 
@@ -2122,7 +2184,7 @@ export function App(): JSX.Element {
     };
     // `runLog` is a dependency so a Receipt that lands a beat after its session
     // exits re-plans the drain with the park now visible (issue 64).
-  }, [draining, backlog, runs, cap, projectPath, midMerge, runStatusOf, isIsolated, runLog, surfaceNarrative, issueRepoResolutions, repoForIssueId, workbenchPathsForRun, activeProject, logNote]);
+  }, [draining, backlog, runs, cap, projectPath, midMerge, runStatusOf, isIsolated, runLog, surfaceNarrative, writeDrainJournalFor, issueRepoResolutions, repoForIssueId, workbenchPathsForRun, activeProject, logNote]);
 
   // --- Merge readiness (issue 08, ADR-0002; issue 16) ---------------------
   // Whether a human-triggered Merge is offered — and which branches it targets —

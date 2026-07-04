@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { buildRunPrompt, receiptPathFor, resolveRunCommand } from './resolve-run-command';
+import {
+  CORE_MEMORY_CHAR_CAP,
+  CORE_MEMORY_LABEL,
+  CORE_TRUNCATION_MARKER,
+} from '../shared/workbench-memory';
 
 const ISSUE = {
   id: 3,
@@ -111,5 +116,48 @@ describe('workbench Runs (issue 72, ADR-0015)', () => {
     expect(prompt).toContain('issues/CONFIG.md');
     expect(prompt).toContain('/repos/project/issues/completions/03-run-issue-in-pane.md');
     expect(prompt).not.toContain('Workbench');
+  });
+});
+
+describe('memory injection (issue 73, ADR-0015)', () => {
+  const WB_ISSUE = {
+    ...ISSUE,
+    cwd: '/repos/api',
+    workbench: {
+      issuesRoot: '/Users/dev/Workbench/billing/issues',
+      completionsRoot: '/Users/dev/Workbench/billing/completions',
+    },
+  };
+
+  it('a workbench Run prompt carries CORE.md content, labeled', () => {
+    const prompt = buildRunPrompt({
+      ...WB_ISSUE,
+      memoryCore: '- The billing repo deploys via Fastlane.',
+    });
+    expect(prompt).toContain(CORE_MEMORY_LABEL);
+    expect(prompt).toContain('- The billing repo deploys via Fastlane.');
+  });
+
+  it('an oversized CORE is capped with the truncation marker — never unbounded', () => {
+    const prompt = buildRunPrompt({
+      ...WB_ISSUE,
+      memoryCore: 'x'.repeat(CORE_MEMORY_CHAR_CAP * 4),
+    });
+    expect(prompt).toContain(CORE_TRUNCATION_MARKER);
+    expect(prompt.length).toBeLessThan(CORE_MEMORY_CHAR_CAP * 2);
+  });
+
+  it('an absent/empty CORE injects nothing — the prompt is byte-identical', () => {
+    const bare = buildRunPrompt(WB_ISSUE);
+    expect(buildRunPrompt({ ...WB_ISSUE, memoryCore: null })).toBe(bare);
+    expect(buildRunPrompt({ ...WB_ISSUE, memoryCore: '' })).toBe(bare);
+    expect(buildRunPrompt({ ...WB_ISSUE, memoryCore: '  \n ' })).toBe(bare);
+    expect(bare).not.toContain(CORE_MEMORY_LABEL);
+  });
+
+  it('a legacy Run never carries memory, even if a caller passes it', () => {
+    const prompt = buildRunPrompt({ ...ISSUE, memoryCore: 'should not appear' });
+    expect(prompt).toBe(buildRunPrompt(ISSUE));
+    expect(prompt).not.toContain('should not appear');
   });
 });

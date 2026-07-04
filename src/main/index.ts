@@ -7,7 +7,7 @@
  */
 import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent } from 'electron';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { PtySessionManager } from './pty-session-manager';
 import { readBacklogAt } from './backlog-reader';
 import { BacklogWatcher } from './backlog-watcher';
@@ -27,6 +27,7 @@ import { mergeRuns, abortMerge } from './run-merge';
 import { RunLogStore } from './run-log-store';
 import { ReceiptWatcher } from './receipt-watcher';
 import { commitWorkbenchProject } from './workbench-git';
+import { readCoreMemory, writeDrainJournal } from './memory-files';
 import {
   claimEventsBetween,
   receiptRunEvent,
@@ -45,6 +46,8 @@ import {
   type BacklogLoadRequest,
   type BacklogLoadResult,
   type BacklogWatchRequest,
+  type DrainJournalRequest,
+  type DrainJournalResult,
   type IsolationApplyRequest,
   type IsolationApplyResult,
   type IssueStatusObserveRequest,
@@ -654,9 +657,25 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(IpcChannel.PtySpawn, (_event, req: PtySpawnRequest) =>
-    ptyManager.spawn(req),
-  );
+  ipcMain.handle(IpcChannel.PtySpawn, async (_event, req: PtySpawnRequest) => {
+    // Memory injection (issue 73, ADR-0015): a workbench Project's Worker
+    // prompt and Dispatcher seed carry the project's curated `memory/CORE.md`,
+    // read here at the edge (the renderer never holds file content). The pure
+    // prompt builders cap and label it; a missing/empty CORE — and every
+    // legacy or plain-shell spawn — injects nothing and spawns exactly as
+    // before. The memory root is the workbench project dir's `memory/`,
+    // beside the issues root the Run already carries.
+    let memoryCore: string | null = null;
+    if (req.run?.workbench) {
+      memoryCore = await readCoreMemory(join(dirname(req.run.workbench.issuesRoot), 'memory'));
+    } else if (req.dispatcher) {
+      const identity = identityFor(req.dispatcher.projectPath);
+      if (identity?.kind === 'workbench') {
+        memoryCore = await readCoreMemory(join(identity.key, 'memory'));
+      }
+    }
+    return ptyManager.spawn(req, { memoryCore });
+  });
 
   ipcMain.on(IpcChannel.PtyWrite, (_event, msg: PtyWriteMessage) => {
     ptyManager.write(msg.sessionId, msg.data);
@@ -850,6 +869,46 @@ function registerIpc(): void {
     // watchers never outlive the Window that needed them.
     sender.once('destroyed', () => receiptWatcher.unwatch(key));
   });
+
+  // Drain journal (issue 73, ADR-0015): when a drain ends (any stop reason),
+  // ONE dated summary entry lands in the workbench project's `memory/journal/`
+  // — every Run with its declared outcome, doc-drift flags, notable events —
+  // built by the pure `shared/workbench-memory` from THIS drain's Run-log
+  // records, written once (no clobber; a second drain the same day gets its
+  // own file), then auto-committed via the issue-72 workbench commit path.
+  // A legacy Project has no memory dir: the call is a quiet no-op.
+  ipcMain.handle(
+    IpcChannel.DrainJournal,
+    async (event, req: DrainJournalRequest): Promise<DrainJournalResult> => {
+      const denied = ownershipError(event, req.projectPath);
+      if (denied) return { written: false, path: null, error: denied };
+      const identity = identityFor(req.projectPath);
+      if (identity === null || identity.kind !== 'workbench') {
+        return { written: false, path: null, error: null };
+      }
+      const outcome = await writeDrainJournal({
+        memoryRoot: join(identity.key, 'memory'),
+        endedAt: new Date().toISOString(),
+        reason: req.reason,
+        records: req.records,
+        notables: req.notables,
+      });
+      if (outcome.written && outcome.fileName !== null) {
+        // Same quiet, serialized commit discipline as the Run-event commits:
+        // an idempotent no-op or a failed commit must never surface as a
+        // drain error — the outcome is observable in the workbench log.
+        void repoSerializer
+          .run(normalizeProjectKey(identity.key), () =>
+            commitWorkbenchProject(
+              identity.key,
+              `${identity.label}: drain journal ${outcome.fileName}`,
+            ),
+          )
+          .catch(() => {});
+      }
+      return { written: outcome.written, path: outcome.path, error: outcome.error };
+    },
+  );
 }
 
 app.whenReady().then(() => {

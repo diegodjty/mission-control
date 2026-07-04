@@ -23,6 +23,7 @@
  * spawn (cwd = the Project repo) happens in the PTY Session Manager adapter.
  */
 import type { ShellCommand } from './resolve-shell';
+import { coreMemorySection } from '../shared/workbench-memory';
 
 /** The subset a Dispatcher session needs to scope itself to one Project. */
 export interface DispatcherRef {
@@ -30,6 +31,13 @@ export interface DispatcherRef {
   projectPath: string;
   /** The active PRD path (seed context), or null when none is set. */
   activePrd: string | null;
+  /**
+   * The workbench project's `memory/CORE.md` content (issue 73, ADR-0015),
+   * read at the spawn edge, or null/absent when the project has none — a
+   * legacy Project's seed never carries it. Injected capped and labeled by
+   * the pure `shared/workbench-memory` module.
+   */
+  memoryCore?: string | null;
 }
 
 /**
@@ -63,7 +71,12 @@ export function buildDispatcherPrompt(ref: DispatcherRef): string {
     `patterns — several Runs touching the same seam, or a recurring class of ` +
     `finding — and consolidate related findings from multiple Runs into ONE ` +
     `summary rather than relisting each raw block. Wait for the first Completion ` +
-    `block before summarizing.`
+    `block before summarizing.` +
+    // Memory injection (issue 73): a workbench Project's seed carries the
+    // curated CORE.md as a clearly-labeled context section, capped at the
+    // ADR-0015 ~1.5k-token budget. Absent/empty CORE appends '' — the seed
+    // stays byte-identical to a memory-less one.
+    coreMemorySection(ref.memoryCore)
   );
 }
 

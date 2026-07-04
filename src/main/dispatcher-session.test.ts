@@ -3,6 +3,11 @@ import {
   buildDispatcherPrompt,
   resolveDispatcherCommand,
 } from './dispatcher-session';
+import {
+  CORE_MEMORY_CHAR_CAP,
+  CORE_MEMORY_LABEL,
+  CORE_TRUNCATION_MARKER,
+} from '../shared/workbench-memory';
 
 const REF = { projectPath: '/repo', activePrd: 'docs/PRD-dispatcher.md' };
 
@@ -43,6 +48,29 @@ describe('buildDispatcherPrompt', () => {
   it('omits the PRD clause when none is set', () => {
     const prompt = buildDispatcherPrompt({ projectPath: '/repo', activePrd: null });
     expect(prompt).not.toContain('active PRD is');
+  });
+
+  it('a workbench seed carries CORE.md content, labeled and capped (issue 73)', () => {
+    const prompt = buildDispatcherPrompt({
+      ...REF,
+      memoryCore: '- Ship behind the feature flag.',
+    });
+    expect(prompt).toContain(CORE_MEMORY_LABEL);
+    expect(prompt).toContain('- Ship behind the feature flag.');
+
+    const capped = buildDispatcherPrompt({
+      ...REF,
+      memoryCore: 'y'.repeat(CORE_MEMORY_CHAR_CAP * 4),
+    });
+    expect(capped).toContain(CORE_TRUNCATION_MARKER);
+    expect(capped.length).toBeLessThan(CORE_MEMORY_CHAR_CAP * 2);
+  });
+
+  it('an absent/empty CORE injects nothing — the seed is byte-identical (issue 73)', () => {
+    const bare = buildDispatcherPrompt(REF);
+    expect(buildDispatcherPrompt({ ...REF, memoryCore: null })).toBe(bare);
+    expect(buildDispatcherPrompt({ ...REF, memoryCore: '' })).toBe(bare);
+    expect(bare).not.toContain(CORE_MEMORY_LABEL);
   });
 });
 

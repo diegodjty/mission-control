@@ -160,6 +160,15 @@ export const IpcChannel = {
    * card) — no bespoke path.
    */
   ReceiptCaptured: 'receipt:captured',
+  /**
+   * renderer → main (invoke): write ONE dated drain-journal entry into the
+   * workbench project's `memory/journal/` (issue 73, ADR-0015) when a drain
+   * ends (any stop reason), assembled from THIS drain's Run-log records by the
+   * pure builder and auto-committed via the issue-72 workbench commit path.
+   * Inert (a quiet no-op) for a legacy Project — no memory dir exists there.
+   * Resolves to a DrainJournalResult.
+   */
+  DrainJournal: 'drain:journal',
 } as const;
 
 export type IpcChannel = (typeof IpcChannel)[keyof typeof IpcChannel];
@@ -681,6 +690,30 @@ export interface ReceiptCapturedMessage {
 }
 
 /**
+ * A drain ended (any stop reason) — write its journal entry into the
+ * workbench project's `memory/journal/` (issue 73, ADR-0015).
+ */
+export interface DrainJournalRequest {
+  /** The Project key whose drain ended. */
+  projectPath: string;
+  /** The drain's stated stop reason (Coordinator message / user stop). */
+  reason: string;
+  /** THIS drain's Run-log records (the delta since the drain started). */
+  records: RunLogRecord[];
+  /** One-line notable events: stray adoptions, finished-without-receipt. */
+  notables: string[];
+}
+
+export interface DrainJournalResult {
+  /** True when a journal entry landed on disk (workbench Projects only). */
+  written: boolean;
+  /** The absolute path of the entry, when written. */
+  path: string | null;
+  /** The failure when the write was attempted and failed; null otherwise. */
+  error: string | null;
+}
+
+/**
  * The surface preload exposes on `window.mc`. Declared here so main, preload,
  * and renderer all agree on one shape.
  */
@@ -762,6 +795,12 @@ export interface MissionControlApi {
   watchReceipts(req: ReceiptWatchRequest): void;
   /** Subscribe to ingested Receipts; returns an unsubscribe function. */
   onReceiptCaptured(listener: (msg: ReceiptCapturedMessage) => void): () => void;
+  /**
+   * Write a finished drain's journal entry into the workbench project's
+   * `memory/journal/` (issue 73) — one dated entry per drain, auto-committed.
+   * A quiet no-op for legacy Projects.
+   */
+  writeDrainJournal(req: DrainJournalRequest): Promise<DrainJournalResult>;
   spawnPty(req: PtySpawnRequest): Promise<PtySpawnResult>;
   writePty(msg: PtyWriteMessage): void;
   resizePty(msg: PtyResizeMessage): void;

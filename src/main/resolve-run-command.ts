@@ -10,6 +10,7 @@
  * adapter.
  */
 import type { ShellCommand } from './resolve-shell';
+import { coreMemorySection } from '../shared/workbench-memory';
 
 /**
  * The workbench paths a workbench Project's Run carries in its prompt (issue
@@ -48,6 +49,13 @@ export interface RunIssueRef {
    * prompt is byte-identical to what it always was.
    */
   workbench?: RunWorkbenchPaths | null;
+  /**
+   * The workbench project's `memory/CORE.md` content (issue 73, ADR-0015),
+   * read at the spawn edge, or null/absent when the project has none. Injected
+   * ONLY into a workbench Run's prompt, capped and labeled by the pure
+   * `shared/workbench-memory` module; a legacy Run's prompt never carries it.
+   */
+  memoryCore?: string | null;
 }
 
 /**
@@ -97,7 +105,11 @@ export function buildRunPrompt(issue: RunIssueRef): string {
       `other issue. Your Receipt path for this Run is exactly ` +
       `${receiptPathFor(issue)} (the workbench completions root — an absolute ` +
       `path so a cwd mixup cannot misplace it); write your Receipt to that ` +
-      `path and nowhere else.`
+      `path and nowhere else.` +
+      // Memory injection (issue 73): the project's curated CORE.md rides the
+      // prompt as a clearly-labeled context section, capped at the ADR-0015
+      // ~1.5k-token budget. Absent/empty CORE appends '' — byte-identical.
+      coreMemorySection(issue.memoryCore)
     );
   }
 

@@ -14,6 +14,8 @@ import {
   type AfkScanResult,
   type AfkDiscardRequest,
   type AfkDiscardResult,
+  type DrainJournalRequest,
+  type DrainJournalResult,
   type IsolationApplyRequest,
   type IsolationApplyResult,
   type IssueStatusObserveRequest,
@@ -128,6 +130,9 @@ const api: MissionControlApi = {
     ipcRenderer.on(IpcChannel.ReceiptCaptured, handler);
     return () => ipcRenderer.removeListener(IpcChannel.ReceiptCaptured, handler);
   },
+
+  writeDrainJournal: (req: DrainJournalRequest): Promise<DrainJournalResult> =>
+    ipcRenderer.invoke(IpcChannel.DrainJournal, req),
 
   spawnPty: (req: PtySpawnRequest): Promise<PtySpawnResult> =>
     ipcRenderer.invoke(IpcChannel.PtySpawn, req),

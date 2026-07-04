@@ -41,13 +41,18 @@
  *                            surviving a mid-drain session replacement; the
  *                            on-ask digest never repeats what the session saw
  *                            live, and a replacement session catches up via it.
+ *   8. Memory loop         — issue 73 (ADR-0015): a workbench project's
+ *                            CORE.md rides the real prompt builders via the
+ *                            real file read; a fixture drain's end writes ONE
+ *                            dated journal artifact into the workbench memory
+ *                            (a second drain the same day gets its own file).
  *
  * Checklist items that genuinely need the live Electron shell are declared
  * `manual-only` at the bottom (as named, skipped specs) — zero silent gaps.
  * Run this suite (`npm run test:e2e`) BEFORE any human walkthrough.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { rm, appendFile } from 'node:fs/promises';
+import { rm, appendFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { ReceiptWatcher } from '../src/main/receipt-watcher';
@@ -63,6 +68,10 @@ import {
   isMidMerge,
 } from '../src/main/git-worktree-adapter';
 import { mergeRuns, defaultMergeScriptPath } from '../src/main/run-merge';
+import { readCoreMemory, writeDrainJournal } from '../src/main/memory-files';
+import { buildRunPrompt } from '../src/main/resolve-run-command';
+import { buildDispatcherPrompt } from '../src/main/dispatcher-session';
+import { CORE_MEMORY_LABEL } from '../src/shared/workbench-memory';
 import { branchFor } from '../src/shared/isolation-policy';
 import { planDrain, type ActiveRun, type DrainPlan } from '../src/shared/run-coordinator';
 import { deriveRunStatus } from '../src/shared/run-state';
@@ -996,6 +1005,97 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
     // Once given, a further ask repeats nothing.
     for (const id of digest.digestedIds) sessionSeen.add(id);
     expect(buildRunDigest(newestFirst, sessionSeen).text).toBeNull();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Scenario 8 — the memory loop's MC half (issue 73, ADR-0015): a workbench
+  // project's CORE.md rides the REAL prompt builders via the REAL file read,
+  // and a fixture drain's end writes ONE dated journal artifact into the
+  // workbench memory — a second drain the same day gets its OWN entry. The
+  // full two-repo workbench fixture (cross-repo drain, registry resolution)
+  // is issue 75's; this drives exactly the issue-73 seam.
+  // ---------------------------------------------------------------------------
+  it('Scenario 8: CORE.md rides the spawn prompts; a fixture drain writes one dated journal artifact (issue 73)', async () => {
+    ingestFrom(sandbox.issuesDir);
+
+    // A workbench-shaped memory skeleton for the fixture project.
+    const memoryRoot = join(sandbox.scratch, 'workbench', 'proj', 'memory');
+    await mkdir(memoryRoot, { recursive: true });
+    await writeFile(
+      join(memoryRoot, 'CORE.md'),
+      '- The sandbox resets via git reset --hard (distinctive fixture fact).\n',
+      'utf8',
+    );
+
+    // --- In: the REAL CORE.md read feeds the REAL prompt builders ----------
+    const core = await readCoreMemory(memoryRoot);
+    const workerPrompt = buildRunPrompt({
+      id: 2,
+      fileName: '02-second-step.md',
+      title: 'Second step',
+      cwd: repo,
+      workbench: {
+        issuesRoot: join(sandbox.scratch, 'workbench', 'proj', 'issues'),
+        completionsRoot: join(sandbox.scratch, 'workbench', 'proj', 'completions'),
+      },
+      memoryCore: core,
+    });
+    expect(workerPrompt).toContain(CORE_MEMORY_LABEL);
+    expect(workerPrompt).toContain('distinctive fixture fact');
+    const seed = buildDispatcherPrompt({ projectPath: repo, activePrd: null, memoryCore: core });
+    expect(seed).toContain(CORE_MEMORY_LABEL);
+    expect(seed).toContain('distinctive fixture fact');
+    // Absent CORE injects nothing (the missing-memory read resolves null).
+    const noCore = await readCoreMemory(join(sandbox.scratch, 'nowhere'));
+    expect(noCore).toBeNull();
+    expect(
+      buildDispatcherPrompt({ projectPath: repo, activePrd: null, memoryCore: noCore }),
+    ).not.toContain(CORE_MEMORY_LABEL);
+
+    // --- A compact real drain: 02 completes, 05 parks HITL, user stops -----
+    const two = sandboxIssue(2);
+    await runFakeWorker({ repo, issue: two, exit: 'completed' });
+    await waitForReceipt(2);
+    await commitFinishedMain(repo, two.slug);
+    const five = sandboxIssue(5);
+    await runFakeWorker({ repo, issue: five, exit: 'needs-verification' });
+    await waitForReceipt(5);
+    await Promise.all(appends);
+    const persisted = await store.read(repo);
+    expect(persisted).toHaveLength(2);
+
+    // --- Out: the drain end writes exactly ONE dated journal entry ---------
+    const first = await writeDrainJournal({
+      memoryRoot,
+      endedAt: '2026-07-04T18:00:00.000Z',
+      reason: 'Drain stopped by you — in-flight Runs keep going.',
+      records: persisted,
+      notables: [],
+    });
+    expect(first.written).toBe(true);
+    expect(first.error).toBeNull();
+    const journalRoot = join(memoryRoot, 'journal');
+    expect(await readdir(journalRoot)).toEqual(['2026-07-04.md']);
+    const entry = await readFile(first.path!, 'utf8');
+    // The entry names every Run with its declared outcome.
+    expect(entry).toContain(`${two.slug}: completed`);
+    expect(entry).toContain(`${five.slug}: parked (needs manual verification)`);
+    expect(entry).toContain('Drain stopped by you');
+
+    // A second drain the same day gets its OWN entry; the first is untouched.
+    const second = await writeDrainJournal({
+      memoryRoot,
+      endedAt: '2026-07-04T21:00:00.000Z',
+      reason: 'Drain complete: no eligible issue remains.',
+      records: [],
+      notables: ['Adopted stray Receipt(s) on main: 06-parallel-a.md'],
+    });
+    expect(second.written).toBe(true);
+    expect((await readdir(journalRoot)).sort()).toEqual(['2026-07-04-2.md', '2026-07-04.md']);
+    expect(await readFile(first.path!, 'utf8')).toBe(entry);
+    const secondEntry = await readFile(second.path!, 'utf8');
+    expect(secondEntry).toContain('no Run reported a Receipt this drain');
+    expect(secondEntry).toContain('Adopted stray Receipt(s) on main');
   });
 });
 
