@@ -4,7 +4,7 @@ Per-project specifics for the [AFK Issue Runner skill](~/.claude/skills/afk-issu
 
 ## Active PRD
 
-`docs/adr/0013-receipt-files-replace-tui-capture.md` and its refinement `docs/adr/0014-run-narrative-lands-in-the-dispatcher-conversation.md` — the Receipt pipeline batch (issues 54–66). An issue is **in the active batch** when its `## Parent` links to either.
+`docs/adr/0015-the-workbench.md` — the Workbench batch (issues 69–77). An issue is **in the active batch** when its `## Parent` links to it.
 
 ## Repo
 
