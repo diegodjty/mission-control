@@ -20,7 +20,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, appendFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { normalizeRepoPath } from '../shared/project-registry';
+import { normalizeProjectKey } from '../shared/project-registry';
 import type { RunLogRecord } from '../shared/ipc-contract';
 
 export class RunLogStore {
@@ -31,7 +31,7 @@ export class RunLogStore {
     // Hash the normalised path so the filename is filesystem-safe and stable
     // across runs; per-Project isolation falls straight out of a distinct key.
     const key = createHash('sha256')
-      .update(normalizeRepoPath(projectPath))
+      .update(normalizeProjectKey(projectPath))
       .digest('hex')
       .slice(0, 40);
     return join(this.baseDir, 'run-logs', `${key}.jsonl`);

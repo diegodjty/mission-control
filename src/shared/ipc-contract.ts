@@ -245,12 +245,15 @@ export interface PtyExitMessage {
 }
 
 export interface BacklogLoadRequest {
-  /** Repo path to read. Omit/empty to use the backend's own cwd (dev default). */
+  /**
+   * The Project key (workbench project dir or legacy repo path) whose resolved
+   * issues root to read. Omit/empty to use the backend's own cwd (dev default).
+   */
   projectPath?: string;
 }
 
 export interface BacklogLoadResult {
-  /** The path that was actually read (resolved from the request). */
+  /** The Project key the read was for (echoed so pushes can be matched). */
   projectPath: string;
   /** The structured backlog, or null when reading failed. */
   backlog: Backlog | null;
@@ -259,7 +262,10 @@ export interface BacklogLoadResult {
 }
 
 export interface BacklogWatchRequest {
-  /** The resolved repo path to watch for live `issues/` changes. */
+  /**
+   * The Project key whose resolved issues root to watch for live changes —
+   * in-workbench or in-repo, the watcher follows the identity (issue 71).
+   */
   projectPath: string;
 }
 
@@ -442,25 +448,44 @@ export interface MergeAbortResult {
 }
 
 /**
- * One Project as seen from a particular Window: its repo path and pipeline
- * stage, plus who owns it *relative to the asking Window* — `you` (this
- * Window), `other` (a different Window; not switchable-to), or `free`.
+ * One Project as seen from a particular Window (issue 71, ADR-0015): its
+ * resolved identity — a workbench entry referencing one or more repos, or a
+ * legacy repo — its pipeline stage, plus who owns it *relative to the asking
+ * Window* — `you` (this Window), `other` (a different Window; not
+ * switchable-to), or `free`.
  */
 export interface ProjectView {
-  repoPath: string;
+  /**
+   * The Project's identity and ownership key: the workbench project directory
+   * for a workbench Project, the repo path for a legacy one. This — never a
+   * raw repo path — is what every per-Project IPC request names.
+   */
+  key: string;
+  /** Which layout the identity resolved through. */
+  kind: 'workbench' | 'legacy';
+  /** Compact display name (workbench project name / repo basename). */
+  label: string;
+  /** Where this Project's issue files live (in-workbench or in-repo). */
+  issuesRoot: string;
+  /**
+   * The repo git/Run operations target: the workbench CONFIG's default repo,
+   * or — legacy — the repo itself. (Per-issue `repo:` targeting is issue 72.)
+   */
+  defaultRepoPath: string;
   stage: PipelineStage;
   ownership: 'you' | 'other' | 'free';
 }
 
 /** The calling Window's view of the Project registry. */
 export interface ProjectListResult {
-  /** Every registered Project, ascending by path, tagged with ownership. */
+  /** Every registered Project, ascending by key, tagged with ownership. */
   projects: ProjectView[];
-  /** The repo this Window actively manages, or null if none yet. */
-  activeRepoPath: string | null;
+  /** The key of the Project this Window actively manages, or null if none yet. */
+  activeProjectKey: string | null;
   /**
-   * A repo the opener queued for this (freshly-created) Window to auto-open on
-   * bootstrap, consumed on read; null once consumed or for a normal Window.
+   * A path the opener queued for this (freshly-created) Window to auto-open on
+   * bootstrap (resolved to an identity when opened), consumed once acted on;
+   * null once consumed or for a normal Window.
    */
   pendingOpen: string | null;
 }
@@ -471,27 +496,32 @@ export interface ProjectActionResult {
   ok: boolean;
   /** A clear, user-facing message when `ok` is false; null on success. */
   error: string | null;
-  /** The Window's active repo after the op (unchanged on failure), or null. */
-  activeRepoPath: string | null;
+  /** The Window's active Project key after the op (unchanged on failure), or null. */
+  activeProjectKey: string | null;
   /** The refreshed Project list from this Window's perspective. */
   projects: ProjectView[];
 }
 
 export interface ProjectOpenRequest {
-  /** The repo path to open in the calling Window. */
-  repoPath: string;
+  /**
+   * The handle to open in the calling Window: a repo path OR a workbench
+   * project directory. Main resolves it (explicit dir → registry lookup →
+   * legacy, ADR-0015) to one canonical Project identity, so either alias of
+   * the same Project lands on the same ownership key.
+   */
+  path: string;
   /** Initial pipeline stage when the Project is registered for the first time. */
   initialStage?: PipelineStage;
 }
 
 export interface ProjectSwitchRequest {
-  /** The already-registered repo to switch the calling Window to. */
-  repoPath: string;
+  /** The already-registered Project (by key) to switch the calling Window to. */
+  key: string;
 }
 
 export interface ProjectTransitionRequest {
-  /** The Project to move. */
-  repoPath: string;
+  /** The Project (by key) to move. */
+  key: string;
   /** The stage to move it to (must be adjacent to its current stage). */
   toStage: PipelineStage;
 }
@@ -506,8 +536,11 @@ export interface ProjectPickFolderResult {
 }
 
 export interface WindowOpenRequest {
-  /** A repo the new Window should auto-open on bootstrap, if any. */
-  repoPath?: string;
+  /**
+   * A path (repo or workbench dir) the new Window should auto-open on
+   * bootstrap, if any. Resolved to a Project identity when the Window opens it.
+   */
+  path?: string;
 }
 
 export interface WindowOpenResult {

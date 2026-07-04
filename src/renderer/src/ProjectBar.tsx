@@ -10,13 +10,13 @@ import type { ProjectView } from '../../shared/ipc-contract';
 export interface ProjectBarProps {
   /** Every registered Project, with ownership relative to this Window. */
   projects: ProjectView[];
-  /** The repo this Window actively manages, or null while bootstrapping. */
-  activeRepoPath: string | null;
-  /** The repo-path text in the "open" input. */
+  /** The key of the Project this Window manages, or null while bootstrapping. */
+  activeProjectKey: string | null;
+  /** The path text in the "open" input (a repo or a workbench project dir). */
   newRepoPath: string;
   onNewRepoPathChange: (value: string) => void;
-  /** Switch this Window to an already-registered repo. */
-  onSwitch: (repoPath: string) => void;
+  /** Switch this Window to an already-registered Project (by key). */
+  onSwitch: (key: string) => void;
   /**
    * Open the native OS folder chooser to Browse… for a repo (issue 19); the
    * chosen path lands in the input via `onNewRepoPathChange`, so Open here /
@@ -40,7 +40,7 @@ const STAGE_LABEL: Record<ProjectView['stage'], string> = {
 
 export function ProjectBar({
   projects,
-  activeRepoPath,
+  activeProjectKey,
   newRepoPath,
   onNewRepoPathChange,
   onSwitch,
@@ -49,7 +49,7 @@ export function ProjectBar({
   onOpenNewWindow,
   error,
 }: ProjectBarProps): JSX.Element {
-  const active = projects.find((p) => p.repoPath === activeRepoPath) ?? null;
+  const active = projects.find((p) => p.key === activeProjectKey) ?? null;
 
   return (
     <div className="projectbar">
@@ -57,30 +57,30 @@ export function ProjectBar({
 
       <select
         className="projectbar__select"
-        value={activeRepoPath ?? ''}
+        value={activeProjectKey ?? ''}
         onChange={(e) => {
           const next = e.target.value;
-          if (next && next !== activeRepoPath) onSwitch(next);
+          if (next && next !== activeProjectKey) onSwitch(next);
         }}
         title="Switch the active Project in this Window"
       >
-        {activeRepoPath === null && <option value="">(no Project open)</option>}
+        {activeProjectKey === null && <option value="">(no Project open)</option>}
         {projects.map((p) => (
           <option
-            key={p.repoPath}
-            value={p.repoPath}
-            // A repo owned by ANOTHER Window can't be switched to — that's the
-            // no-double-managing rule surfaced in the UI.
+            key={p.key}
+            value={p.key}
+            // A Project owned by ANOTHER Window can't be switched to — that's
+            // the no-double-managing rule surfaced in the UI.
             disabled={p.ownership === 'other'}
           >
-            {basename(p.repoPath)} — {STAGE_LABEL[p.stage]}
+            {p.label || basename(p.key)} — {STAGE_LABEL[p.stage]}
             {p.ownership === 'other' ? ' (open elsewhere)' : ''}
           </option>
         ))}
       </select>
 
       {active && (
-        <span className="projectbar__stage" title={active.repoPath}>
+        <span className="projectbar__stage" title={active.key}>
           {STAGE_LABEL[active.stage]}
         </span>
       )}
@@ -120,7 +120,7 @@ export function ProjectBar({
 }
 
 /** Last path segment for a compact label; falls back to the whole path. */
-function basename(repoPath: string): string {
-  const parts = repoPath.replace(/\/+$/, '').split('/');
-  return parts[parts.length - 1] || repoPath;
+function basename(key: string): string {
+  const parts = key.replace(/\/+$/, '').split('/');
+  return parts[parts.length - 1] || key;
 }

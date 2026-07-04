@@ -28,34 +28,37 @@
 
 /** The registry facts a Window has on bootstrap (from a `ProjectList` read). */
 export interface WindowBootstrapInput {
-  /** A repo the opener queued for this Window to auto-open, or null. */
+  /**
+   * A path (repo or workbench dir) the opener queued for this Window to
+   * auto-open, or null. Resolved to a Project identity when opened.
+   */
   pendingOpen: string | null;
-  /** The repo this Window already owns/manages, or null if none yet. */
-  activeRepoPath: string | null;
+  /** The key of the Project this Window already owns, or null if none yet. */
+  activeProjectKey: string | null;
 }
 
 /** What the Window should do on bootstrap. */
 export type WindowBootstrapDecision =
-  /** Open (register + claim) the queued target repo. */
-  | { kind: 'open'; repoPath: string }
-  /** Re-attach to the repo this Window already owns. */
-  | { kind: 'reattach'; repoPath: string }
+  /** Open (resolve + register + claim) the queued target path. */
+  | { kind: 'open'; path: string }
+  /** Re-attach to the Project this Window already owns (by key). */
+  | { kind: 'reattach'; key: string }
   /** Open no Project; show the empty "open a Project" state. */
   | { kind: 'empty' };
 
 /**
  * Decide what a freshly-loaded Window opens. A queued target wins; failing
- * that, an already-owned repo; failing that, nothing (empty state). Never the
- * backend cwd — a blank/whitespace `pendingOpen` is treated as "no target",
- * not as "open here".
+ * that, an already-owned Project; failing that, nothing (empty state). Never
+ * the backend cwd — a blank/whitespace `pendingOpen` is treated as "no
+ * target", not as "open here".
  */
 export function decideWindowBootstrap(
   input: WindowBootstrapInput,
 ): WindowBootstrapDecision {
   const pending = input.pendingOpen?.trim();
-  if (pending) return { kind: 'open', repoPath: pending };
-  if (input.activeRepoPath !== null) {
-    return { kind: 'reattach', repoPath: input.activeRepoPath };
+  if (pending) return { kind: 'open', path: pending };
+  if (input.activeProjectKey !== null) {
+    return { kind: 'reattach', key: input.activeProjectKey };
   }
   return { kind: 'empty' };
 }

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   emptyRegistry,
-  normalizeRepoPath,
+  normalizeProjectKey,
   findProject,
   registerProject,
   claimProject,
@@ -10,8 +10,8 @@ import {
   transitionStage,
   canTransition,
   closeWindow,
-  ownsRepo,
-  checkRepoOwnership,
+  ownsProject,
+  checkProjectOwnership,
   PIPELINE_STAGES,
   type ProjectRegistry,
 } from './project-registry';
@@ -24,21 +24,21 @@ function withProjects(...paths: string[]): ProjectRegistry {
   );
 }
 
-describe('normalizeRepoPath', () => {
+describe('normalizeProjectKey', () => {
   it('trims whitespace and strips trailing slashes', () => {
-    expect(normalizeRepoPath('  /Users/dev/billing/  ')).toBe('/Users/dev/billing');
-    expect(normalizeRepoPath('/Users/dev/billing///')).toBe('/Users/dev/billing');
-    expect(normalizeRepoPath('/Users/dev/billing')).toBe('/Users/dev/billing');
+    expect(normalizeProjectKey('  /Users/dev/billing/  ')).toBe('/Users/dev/billing');
+    expect(normalizeProjectKey('/Users/dev/billing///')).toBe('/Users/dev/billing');
+    expect(normalizeProjectKey('/Users/dev/billing')).toBe('/Users/dev/billing');
   });
 
   it('keeps a lone root slash', () => {
-    expect(normalizeRepoPath('/')).toBe('/');
-    expect(normalizeRepoPath('///')).toBe('/');
+    expect(normalizeProjectKey('/')).toBe('/');
+    expect(normalizeProjectKey('///')).toBe('/');
   });
 
   it('an empty/blank path normalizes to empty', () => {
-    expect(normalizeRepoPath('')).toBe('');
-    expect(normalizeRepoPath('   ')).toBe('');
+    expect(normalizeProjectKey('')).toBe('');
+    expect(normalizeProjectKey('   ')).toBe('');
   });
 });
 
@@ -47,7 +47,7 @@ describe('registerProject — the registry of Projects', () => {
     const res = registerProject(emptyRegistry(), '/repo/a');
     expect(res.ok).toBe(true);
     expect(res.project).toEqual({
-      repoPath: '/repo/a',
+      key: '/repo/a',
       stage: 'backlog',
       ownerWindowId: null,
     });
@@ -56,7 +56,7 @@ describe('registerProject — the registry of Projects', () => {
 
   it('can register multiple distinct Projects', () => {
     const reg = withProjects('/repo/a', '/repo/b', '/repo/c');
-    expect(reg.projects.map((p) => p.repoPath)).toEqual(['/repo/a', '/repo/b', '/repo/c']);
+    expect(reg.projects.map((p) => p.key)).toEqual(['/repo/a', '/repo/b', '/repo/c']);
   });
 
   it('honours a chosen initial stage', () => {
@@ -81,14 +81,14 @@ describe('registerProject — the registry of Projects', () => {
   it('rejects an empty repo path', () => {
     const res = registerProject(emptyRegistry(), '   ');
     expect(res.ok).toBe(false);
-    expect(res.error).toContain('repo path');
+    expect(res.error).toContain('path');
   });
 });
 
 describe('findProject', () => {
   it('finds a Project by any spelling of its path', () => {
     const reg = withProjects('/repo/a');
-    expect(findProject(reg, '/repo/a/')?.repoPath).toBe('/repo/a');
+    expect(findProject(reg, '/repo/a/')?.key).toBe('/repo/a');
     expect(findProject(reg, '/repo/missing')).toBeUndefined();
   });
 });
@@ -257,58 +257,58 @@ describe('immutability — operations never mutate the input registry', () => {
   });
 });
 
-describe('ownsRepo — does a Window own a repo right now', () => {
+describe('ownsProject — does a Window own a repo right now', () => {
   it('true only for the exact owning Window', () => {
     const reg = claimProject(withProjects('/repo/a'), '/repo/a', 'win-1').registry;
-    expect(ownsRepo(reg, '/repo/a', 'win-1')).toBe(true);
-    expect(ownsRepo(reg, '/repo/a', 'win-2')).toBe(false);
+    expect(ownsProject(reg, '/repo/a', 'win-1')).toBe(true);
+    expect(ownsProject(reg, '/repo/a', 'win-2')).toBe(false);
   });
 
   it('false for an unowned repo', () => {
     const reg = withProjects('/repo/a');
-    expect(ownsRepo(reg, '/repo/a', 'win-1')).toBe(false);
+    expect(ownsProject(reg, '/repo/a', 'win-1')).toBe(false);
   });
 
   it('false for an unregistered repo', () => {
-    expect(ownsRepo(emptyRegistry(), '/repo/missing', 'win-1')).toBe(false);
+    expect(ownsProject(emptyRegistry(), '/repo/missing', 'win-1')).toBe(false);
   });
 
   it('matches on normalized path (trailing slash / whitespace)', () => {
     const reg = claimProject(withProjects('/repo/a'), '/repo/a', 'win-1').registry;
-    expect(ownsRepo(reg, '  /repo/a/  ', 'win-1')).toBe(true);
+    expect(ownsProject(reg, '  /repo/a/  ', 'win-1')).toBe(true);
   });
 
   it('goes false the instant the owner releases (the mid-release case)', () => {
     let reg = claimProject(withProjects('/repo/a'), '/repo/a', 'win-1').registry;
     reg = releaseProject(reg, '/repo/a', 'win-1').registry;
-    expect(ownsRepo(reg, '/repo/a', 'win-1')).toBe(false);
+    expect(ownsProject(reg, '/repo/a', 'win-1')).toBe(false);
   });
 });
 
-describe('checkRepoOwnership — the action-time ownership guard', () => {
+describe('checkProjectOwnership — the action-time ownership guard', () => {
   it('allows the owning Window', () => {
     const reg = claimProject(withProjects('/repo/a'), '/repo/a', 'win-1').registry;
-    const res = checkRepoOwnership(reg, '/repo/a', 'win-1');
+    const res = checkProjectOwnership(reg, '/repo/a', 'win-1');
     expect(res.ok).toBe(true);
     expect(res.error).toBeNull();
   });
 
   it('rejects a Window that does not own the repo, with a reason', () => {
     const reg = claimProject(withProjects('/repo/a'), '/repo/a', 'win-1').registry;
-    const res = checkRepoOwnership(reg, '/repo/a', 'win-2');
+    const res = checkProjectOwnership(reg, '/repo/a', 'win-2');
     expect(res.ok).toBe(false);
     expect(res.error).toMatch(/another Window/);
   });
 
   it('rejects an unowned (registered but not open) repo', () => {
     const reg = withProjects('/repo/a');
-    const res = checkRepoOwnership(reg, '/repo/a', 'win-1');
+    const res = checkProjectOwnership(reg, '/repo/a', 'win-1');
     expect(res.ok).toBe(false);
     expect(res.error).toMatch(/not open in any Window/);
   });
 
   it('rejects an unregistered repo', () => {
-    const res = checkRepoOwnership(emptyRegistry(), '/repo/missing', 'win-1');
+    const res = checkProjectOwnership(emptyRegistry(), '/repo/missing', 'win-1');
     expect(res.ok).toBe(false);
     expect(res.error).toMatch(/No Project is registered/);
   });
@@ -318,7 +318,7 @@ describe('checkRepoOwnership — the action-time ownership guard', () => {
     // The releasing Window still holds a stale projectPath in its renderer...
     reg = releaseProject(reg, '/repo/a', 'win-1').registry;
     // ...but the live registry now rejects it acting on that repo.
-    expect(checkRepoOwnership(reg, '/repo/a', 'win-1').ok).toBe(false);
+    expect(checkProjectOwnership(reg, '/repo/a', 'win-1').ok).toBe(false);
   });
 
   it('after a switch, only the new owner passes for the target repo', () => {
@@ -326,14 +326,14 @@ describe('checkRepoOwnership — the action-time ownership guard', () => {
     reg = claimProject(reg, '/repo/a', 'win-1').registry;
     reg = switchActiveProject(reg, 'win-1', '/repo/b').registry;
     // win-1 released /repo/a during the switch, so it can no longer act on it.
-    expect(checkRepoOwnership(reg, '/repo/a', 'win-1').ok).toBe(false);
-    expect(checkRepoOwnership(reg, '/repo/b', 'win-1').ok).toBe(true);
+    expect(checkProjectOwnership(reg, '/repo/a', 'win-1').ok).toBe(false);
+    expect(checkProjectOwnership(reg, '/repo/b', 'win-1').ok).toBe(true);
   });
 
   it('two different Windows can never both pass for the same repo', () => {
     const reg = claimProject(withProjects('/repo/a'), '/repo/a', 'win-1').registry;
-    const a = checkRepoOwnership(reg, '/repo/a', 'win-1').ok;
-    const b = checkRepoOwnership(reg, '/repo/a', 'win-2').ok;
+    const a = checkProjectOwnership(reg, '/repo/a', 'win-1').ok;
+    const b = checkProjectOwnership(reg, '/repo/a', 'win-2').ok;
     expect([a, b]).toEqual([true, false]);
   });
 });

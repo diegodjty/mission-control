@@ -20,8 +20,7 @@
  * exercised against a real temp directory in unit tests.
  */
 import { watch, type FSWatcher } from 'node:fs';
-import { join } from 'node:path';
-import { readBacklog } from './backlog-reader';
+import { readBacklogAt } from './backlog-reader';
 import type { Backlog } from '../shared/backlog-model';
 import type { BacklogLoadResult } from '../shared/ipc-contract';
 import { backlogChanged, isRelevantChange } from '../shared/backlog-watch';
@@ -29,8 +28,20 @@ import { backlogChanged, isRelevantChange } from '../shared/backlog-watch';
 /** Coalesce a burst of `fs.watch` events into one re-read after this quiet gap. */
 const DEFAULT_DEBOUNCE_MS = 200;
 
-interface WatchEntry {
+/** What one watch points at: the Project's key + its resolved issues root. */
+export interface BacklogWatchTarget {
+  /**
+   * The Project key (workbench project dir or legacy repo path), echoed in
+   * every pushed result so the renderer can match pushes to the Project it is
+   * showing. The IDENTITY, not necessarily where the files live.
+   */
   projectPath: string;
+  /** The resolved issues directory to watch and read (issue 71, ADR-0015). */
+  issuesRoot: string;
+}
+
+interface WatchEntry {
+  target: BacklogWatchTarget;
   watcher: FSWatcher;
   onChange: (result: BacklogLoadResult) => void;
   /** The last backlog we observed, to diff against (suppresses redundant pushes). */
@@ -47,25 +58,26 @@ export class BacklogWatcher {
   }
 
   /**
-   * Start (or replace) the watcher for `key`, pointed at `<projectPath>/issues/`.
-   * Re-reads and pushes via `onChange` whenever the directory's `.md` files
-   * change. Replacing an existing key closes its previous watcher first, so a
-   * Window that switches Projects never leaks the old one.
+   * Start (or replace) the watcher for `key`, pointed at the target's resolved
+   * `issuesRoot` (issue 71: in-workbench or in-repo — the watcher keys on the
+   * Project, not on a repo path). Re-reads and pushes via `onChange` whenever
+   * the directory's `.md` files change. Replacing an existing key closes its
+   * previous watcher first, so a Window that switches Projects never leaks the
+   * old one.
    */
   watch(
     key: string,
-    projectPath: string,
+    target: BacklogWatchTarget,
     onChange: (result: BacklogLoadResult) => void,
   ): void {
     this.unwatch(key); // idempotent: replacing a key never leaves two watchers
 
-    const issuesDir = join(projectPath, 'issues');
     let watcher: FSWatcher;
     try {
       // persistent:false — the watcher must not by itself keep the process
       // alive (Electron's own loop does); it still delivers events while the
       // app runs, and lets test processes exit cleanly.
-      watcher = watch(issuesDir, { persistent: false });
+      watcher = watch(target.issuesRoot, { persistent: false });
     } catch {
       // Directory missing/unreadable: the initial load already surfaced the
       // error to the user; nothing to watch, so simply don't register.
@@ -73,7 +85,7 @@ export class BacklogWatcher {
     }
 
     const entry: WatchEntry = {
-      projectPath,
+      target,
       watcher,
       onChange,
       last: null,
@@ -125,7 +137,7 @@ export class BacklogWatcher {
 
   private async seed(entry: WatchEntry): Promise<void> {
     try {
-      entry.last = await readBacklog(entry.projectPath);
+      entry.last = await readBacklogAt(entry.target.issuesRoot);
     } catch {
       entry.last = null;
     }
@@ -135,7 +147,7 @@ export class BacklogWatcher {
     const entry = this.entries.get(key);
     if (!entry) return; // unwatched while the timer was pending
 
-    const result = await this.read(entry.projectPath);
+    const result = await this.read(entry.target);
 
     // Only notify when the Map-visible state actually changed.
     if (backlogChanged(entry.last, result.backlog)) {
@@ -147,13 +159,13 @@ export class BacklogWatcher {
     }
   }
 
-  private async read(projectPath: string): Promise<BacklogLoadResult> {
+  private async read(target: BacklogWatchTarget): Promise<BacklogLoadResult> {
     try {
-      const backlog = await readBacklog(projectPath);
-      return { projectPath, backlog, error: null };
+      const backlog = await readBacklogAt(target.issuesRoot);
+      return { projectPath: target.projectPath, backlog, error: null };
     } catch (err) {
       return {
-        projectPath,
+        projectPath: target.projectPath,
         backlog: null,
         error: err instanceof Error ? err.message : String(err),
       };

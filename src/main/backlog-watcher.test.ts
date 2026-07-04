@@ -59,7 +59,7 @@ describe('BacklogWatcher (real filesystem)', () => {
     const root = await makeProject();
     const seen: BacklogLoadResult[] = [];
     const watcher = newWatcher();
-    watcher.watch('w1', root, (r) => seen.push(r));
+    watcher.watch('w1', { projectPath: root, issuesRoot: join(root, 'issues') }, (r) => seen.push(r));
 
     // Let the seed read settle so the first change diffs against real state.
     await new Promise((r) => setTimeout(r, 100));
@@ -76,7 +76,7 @@ describe('BacklogWatcher (real filesystem)', () => {
     const root = await makeProject();
     const seen: BacklogLoadResult[] = [];
     const watcher = newWatcher();
-    watcher.watch('w1', root, (r) => seen.push(r));
+    watcher.watch('w1', { projectPath: root, issuesRoot: join(root, 'issues') }, (r) => seen.push(r));
     await new Promise((r) => setTimeout(r, 100));
 
     await writeFile(join(root, 'issues', '03-third.md'), issueFile(3, 'open'));
@@ -89,7 +89,7 @@ describe('BacklogWatcher (real filesystem)', () => {
     const root = await makeProject();
     const seen: BacklogLoadResult[] = [];
     const watcher = newWatcher();
-    watcher.watch('w1', root, (r) => seen.push(r));
+    watcher.watch('w1', { projectPath: root, issuesRoot: join(root, 'issues') }, (r) => seen.push(r));
     await new Promise((r) => setTimeout(r, 100));
 
     await rm(join(root, 'issues', '02-second.md'));
@@ -102,7 +102,7 @@ describe('BacklogWatcher (real filesystem)', () => {
     const root = await makeProject();
     const seen: BacklogLoadResult[] = [];
     const watcher = newWatcher();
-    watcher.watch('w1', root, (r) => seen.push(r));
+    watcher.watch('w1', { projectPath: root, issuesRoot: join(root, 'issues') }, (r) => seen.push(r));
     await new Promise((r) => setTimeout(r, 100));
 
     expect(watcher.size).toBe(1);
@@ -114,11 +114,38 @@ describe('BacklogWatcher (real filesystem)', () => {
     expect(seen).toHaveLength(0);
   });
 
+  it('watches a workbench-shaped issues root and echoes the PROJECT KEY (issue 71)', async () => {
+    // The Project's identity (key) is the workbench project dir; the issue
+    // files live under it — NOT under any repo. The watcher must follow the
+    // resolved issues root and stamp results with the identity, so the
+    // renderer can match pushes to the Project it shows.
+    const workbenchProject = await mkdtemp(join(tmpdir(), 'mc-wb-'));
+    dirs.push(workbenchProject);
+    const issues = join(workbenchProject, 'issues');
+    await mkdir(issues);
+    await writeFile(join(issues, 'CONFIG.md'), configFile);
+    await writeFile(join(issues, '01-first.md'), issueFile(1, 'open'));
+
+    const seen: BacklogLoadResult[] = [];
+    const watcher = newWatcher();
+    watcher.watch('w1', { projectPath: workbenchProject, issuesRoot: issues }, (r) =>
+      seen.push(r),
+    );
+    await new Promise((r) => setTimeout(r, 100));
+
+    await writeFile(join(issues, '01-first.md'), issueFile(1, 'done'));
+
+    await waitFor(() => seen.length > 0);
+    const last = seen[seen.length - 1];
+    expect(last.projectPath).toBe(workbenchProject);
+    expect(last.backlog?.issues.find((i) => i.id === 1)?.status).toBe('done');
+  });
+
   it('replacing a key closes the old watcher (no double-registration)', async () => {
     const root = await makeProject();
     const watcher = newWatcher();
-    watcher.watch('w1', root, () => {});
-    watcher.watch('w1', root, () => {});
+    watcher.watch('w1', { projectPath: root, issuesRoot: join(root, 'issues') }, () => {});
+    watcher.watch('w1', { projectPath: root, issuesRoot: join(root, 'issues') }, () => {});
     expect(watcher.size).toBe(1);
     watcher.closeAll();
     expect(watcher.size).toBe(0);

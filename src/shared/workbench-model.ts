@@ -321,8 +321,13 @@ export type ProjectResolution =
   | { kind: 'legacy'; issuesRoot: string; completionsRoot: string }
   | { kind: 'unresolved'; reason: string };
 
-/** Rewrite a leading `~/` (or bare `~`) using the edge-supplied home dir. */
-function withHome(path: string, homeDir: string | null): string {
+/**
+ * Rewrite a leading `~/` (or bare `~`) using the edge-supplied home dir.
+ * Exported so the project-identity layer (issue 71) expands CONFIG `repos:`
+ * paths with the SAME rule the resolver applies to registry paths — one
+ * tilde convention, not two.
+ */
+export function expandTilde(path: string, homeDir: string | null): string {
   if (homeDir === null || !path.startsWith('~')) return path;
   if (path === '~') return homeDir;
   if (path.startsWith('~/')) return join(homeDir, path.slice(2));
@@ -376,7 +381,7 @@ export function resolveProject(input: ResolutionInput): ProjectResolution {
   let match: { entry: RegistryEntry; repoPath: string } | null = null;
   for (const entry of entries) {
     if (!entry.active) continue;
-    const repoPath = trimSlash(withHome(entry.repo, homeDir));
+    const repoPath = trimSlash(expandTilde(entry.repo, homeDir));
     if (!within(cwd, repoPath)) continue;
     if (match === null || repoPath.length > match.repoPath.length) {
       match = { entry, repoPath };

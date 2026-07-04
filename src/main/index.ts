@@ -9,8 +9,9 @@ import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent } from 'el
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { PtySessionManager } from './pty-session-manager';
-import { readBacklog } from './backlog-reader';
+import { readBacklogAt } from './backlog-reader';
 import { BacklogWatcher } from './backlog-watcher';
+import { resolveProjectIdentity } from './project-resolver';
 import {
   applyIsolation,
   commitFinishedMain,
@@ -74,11 +75,12 @@ import {
   transitionStage,
   closeWindow,
   findProject,
-  normalizeRepoPath,
-  checkRepoOwnership,
+  normalizeProjectKey,
+  checkProjectOwnership,
   type ProjectRegistry,
   type RegistryResult,
 } from '../shared/project-registry';
+import type { ProjectIdentity } from '../shared/project-identity';
 import { createRepoSerializer } from '../shared/repo-serializer';
 
 // electron-vite injects ELECTRON_RENDERER_URL in dev; load the built file otherwise.
@@ -104,6 +106,34 @@ function loadRenderer(win: BrowserWindow): void {
 let registry: ProjectRegistry = emptyRegistry();
 const pendingOpen = new Map<number, string>();
 
+// Resolved Project identities (issue 71, ADR-0015), keyed by the normalized
+// project key. Every opened handle — a repo path OR a workbench project dir —
+// is resolved to ONE identity before it reaches the ownership registry, so two
+// aliases of one Project always collapse to one key. The identity carries the
+// resolved roots (issues, completions) and the default repo the git-flavored
+// handlers below act on.
+const projectIdentities = new Map<string, ProjectIdentity>();
+
+/** The resolved identity for a project key, or null (defensive fallback). */
+function identityFor(projectKey: string): ProjectIdentity | null {
+  return projectIdentities.get(normalizeProjectKey(projectKey)) ?? null;
+}
+
+/** The resolved issues root for a project key (legacy shape when unknown). */
+function issuesRootFor(projectKey: string): string {
+  return identityFor(projectKey)?.issuesRoot ?? join(normalizeProjectKey(projectKey), 'issues');
+}
+
+/**
+ * The git repo the project's repo-flavored operations (scan, commit, worktree,
+ * merge, Run cwd) target: the identity's default repo — for a legacy Project
+ * that IS the key, so behavior is unchanged; a workbench Project acts on its
+ * CONFIG's default repo until issue 72 makes Runs repo-targeted per issue.
+ */
+function gitRepoFor(projectKey: string): string {
+  return identityFor(projectKey)?.defaultRepoPath ?? normalizeProjectKey(projectKey);
+}
+
 // Per-repo serializer (issue 31): even the single owning Window can fire
 // overlapping repo-mutating IPC calls (a drain applying isolation while a
 // finished Run auto-commits, a Merge racing a scan-driven commit). Git
@@ -122,9 +152,9 @@ const repoSerializer = createRepoSerializer();
  */
 function ownershipError(
   event: IpcMainInvokeEvent,
-  projectPath: string,
+  projectKey: string,
 ): string | null {
-  const check = checkRepoOwnership(registry, projectPath, String(event.sender.id));
+  const check = checkProjectOwnership(registry, projectKey, String(event.sender.id));
   return check.ok ? null : check.error;
 }
 
@@ -173,17 +203,24 @@ function broadcastRegistryChanged(): void {
 
 /** Project list from a given Window's perspective (ownership relative to it). */
 function projectViewsFor(windowId: string): ProjectView[] {
-  return registry.projects.map((p) => ({
-    repoPath: p.repoPath,
-    stage: p.stage,
-    ownership:
-      p.ownerWindowId === null ? 'free' : p.ownerWindowId === windowId ? 'you' : 'other',
-  }));
+  return registry.projects.map((p) => {
+    const identity = identityFor(p.key);
+    return {
+      key: p.key,
+      kind: identity?.kind ?? 'legacy',
+      label: identity?.label ?? p.key.split('/').filter(Boolean).pop() ?? p.key,
+      issuesRoot: issuesRootFor(p.key),
+      defaultRepoPath: gitRepoFor(p.key),
+      stage: p.stage,
+      ownership:
+        p.ownerWindowId === null ? 'free' : p.ownerWindowId === windowId ? 'you' : 'other',
+    };
+  });
 }
 
-/** The repo a Window actively manages right now, or null. */
-function activeRepoFor(windowId: string): string | null {
-  return registry.projects.find((p) => p.ownerWindowId === windowId)?.repoPath ?? null;
+/** The key of the Project a Window actively manages right now, or null. */
+function activeKeyFor(windowId: string): string | null {
+  return registry.projects.find((p) => p.ownerWindowId === windowId)?.key ?? null;
 }
 
 /** Turn a pure RegistryResult into the Window-relative action result + broadcast. */
@@ -195,7 +232,7 @@ function applyResult(result: RegistryResult, windowId: string): ProjectActionRes
   return {
     ok: result.ok,
     error: result.error,
-    activeRepoPath: activeRepoFor(windowId),
+    activeProjectKey: activeKeyFor(windowId),
     projects: projectViewsFor(windowId),
   };
 }
@@ -238,7 +275,7 @@ const receiptWatcher = new ReceiptWatcher();
 const receiptSeenByProject = new Map<string, Promise<Map<string, string | null>>>();
 
 function seenReceiptsFor(projectPath: string): Promise<Map<string, string | null>> {
-  const key = normalizeRepoPath(projectPath);
+  const key = normalizeProjectKey(projectPath);
   let promise = receiptSeenByProject.get(key);
   if (!promise) {
     promise = runLogStore
@@ -260,9 +297,12 @@ function registerIpc(): void {
   ipcMain.handle(
     IpcChannel.BacklogLoad,
     async (_event, req: BacklogLoadRequest): Promise<BacklogLoadResult> => {
+      // The request names the Project KEY; the identity says where its issue
+      // files actually live (in-workbench or in-repo — issue 71). The key is
+      // echoed back so the renderer matches pushes to the Project it shows.
       const projectPath = req.projectPath?.trim() || process.cwd();
       try {
-        const backlog = await readBacklog(projectPath);
+        const backlog = await readBacklogAt(issuesRootFor(projectPath));
         return { projectPath, backlog, error: null };
       } catch (err) {
         return {
@@ -277,9 +317,15 @@ function registerIpc(): void {
   ipcMain.on(IpcChannel.BacklogWatch, (event, req: BacklogWatchRequest) => {
     const sender = event.sender;
     const key = String(sender.id);
-    backlogWatcher.watch(key, req.projectPath, (result) => {
-      if (!sender.isDestroyed()) sender.send(IpcChannel.BacklogChanged, result);
-    });
+    // Watch the Project's RESOLVED issues root (issue 71) — the watcher keys
+    // on the Project identity, not on a repo path.
+    backlogWatcher.watch(
+      key,
+      { projectPath: req.projectPath, issuesRoot: issuesRootFor(req.projectPath) },
+      (result) => {
+        if (!sender.isDestroyed()) sender.send(IpcChannel.BacklogChanged, result);
+      },
+    );
     // Close this Window's watcher when its renderer goes away, so watchers
     // never outlive the Window that needed them.
     sender.once('destroyed', () => backlogWatcher.unwatch(key));
@@ -294,7 +340,7 @@ function registerIpc(): void {
     async (event, req: IssueStatusObserveRequest): Promise<IssueStatusObserveResult> => {
       const denied = ownershipError(event, req.projectPath);
       if (denied) return { status: null, commitError: denied };
-      return readIsolatedIssueStatus(req.projectPath, req.slug);
+      return readIsolatedIssueStatus(gitRepoFor(req.projectPath), req.slug);
     },
   );
 
@@ -309,8 +355,9 @@ function registerIpc(): void {
     async (event, req: MainCommitRequest): Promise<MainCommitResult> => {
       const denied = ownershipError(event, req.projectPath);
       if (denied) return { committed: false, error: denied };
-      return repoSerializer.run(normalizeRepoPath(req.projectPath), () =>
-        commitFinishedMain(req.projectPath, req.slug),
+      const repo = gitRepoFor(req.projectPath);
+      return repoSerializer.run(normalizeProjectKey(repo), () =>
+        commitFinishedMain(repo, req.slug),
       );
     },
   );
@@ -326,8 +373,9 @@ function registerIpc(): void {
     async (event, req: WorktreeCommitRequest): Promise<WorktreeCommitResult> => {
       const denied = ownershipError(event, req.projectPath);
       if (denied) return { committed: false, error: denied };
-      return repoSerializer.run(normalizeRepoPath(req.projectPath), () =>
-        commitFinishedWorktree(req.projectPath, req.slug),
+      const repo = gitRepoFor(req.projectPath);
+      return repoSerializer.run(normalizeProjectKey(repo), () =>
+        commitFinishedWorktree(repo, req.slug),
       );
     },
   );
@@ -342,11 +390,12 @@ function registerIpc(): void {
       // A Window that doesn't own this repo gets an empty scan — it must not
       // derive a Merge affordance or block drains off a repo it doesn't drive.
       if (ownershipError(event, req.projectPath)) return { branches: [], midMerge: false };
+      const repo = gitRepoFor(req.projectPath);
       return {
-        branches: await scanAfkBranches(req.projectPath),
+        branches: await scanAfkBranches(repo),
         // Also report whether `main` is left mid-merge by a partial merge conflict
         // (issue 24) so the renderer can block a new drain/Run and offer an Abort.
-        midMerge: await isMidMerge(req.projectPath),
+        midMerge: await isMidMerge(repo),
       };
     },
   );
@@ -361,9 +410,10 @@ function registerIpc(): void {
     async (event, req: AfkDiscardRequest): Promise<AfkDiscardResult> => {
       const denied = ownershipError(event, req.projectPath);
       if (denied) return { ok: false, error: denied };
-      return repoSerializer.run(normalizeRepoPath(req.projectPath), async () => {
+      const repo = gitRepoFor(req.projectPath);
+      return repoSerializer.run(normalizeProjectKey(repo), async () => {
         try {
-          await discardWorktree(req.projectPath, req.slug);
+          await discardWorktree(repo, req.slug);
           return { ok: true, error: null };
         } catch (err) {
           return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -383,8 +433,9 @@ function registerIpc(): void {
       if (ownershipError(event, req.projectPath)) {
         return Promise.resolve({ parallel: false, placements: [] });
       }
-      return repoSerializer.run(normalizeRepoPath(req.projectPath), () =>
-        applyIsolation(req.projectPath, req.runs),
+      const repo = gitRepoFor(req.projectPath);
+      return repoSerializer.run(normalizeProjectKey(repo), () =>
+        applyIsolation(repo, req.runs),
       );
     },
   );
@@ -406,8 +457,9 @@ function registerIpc(): void {
           output: '',
         });
       }
-      return repoSerializer.run(normalizeRepoPath(req.projectPath), () =>
-        mergeRuns(req.projectPath, req.slugs),
+      const repo = gitRepoFor(req.projectPath);
+      return repoSerializer.run(normalizeProjectKey(repo), () =>
+        mergeRuns(repo, req.slugs),
       );
     },
   );
@@ -420,8 +472,9 @@ function registerIpc(): void {
     (event, req: MergeAbortRequest): Promise<MergeAbortResult> => {
       const denied = ownershipError(event, req.projectPath);
       if (denied) return Promise.resolve({ ok: false, error: denied });
-      return repoSerializer.run(normalizeRepoPath(req.projectPath), () =>
-        abortMerge(req.projectPath),
+      const repo = gitRepoFor(req.projectPath);
+      return repoSerializer.run(normalizeProjectKey(repo), () =>
+        abortMerge(repo),
       );
     },
   );
@@ -449,7 +502,7 @@ function registerIpc(): void {
 
   ipcMain.handle(
     IpcChannel.ProjectOpen,
-    (event, req: ProjectOpenRequest): ProjectActionResult => {
+    async (event, req: ProjectOpenRequest): Promise<ProjectActionResult> => {
       const windowId = String(event.sender.id);
       // The Window is now driving its own Project choice, so any queued auto-open
       // target for it has served its purpose — drop it so a later list read
@@ -460,15 +513,24 @@ function registerIpc(): void {
       // exactly the phantom-claim bug. An empty path fails registration below
       // with a clear message; opening mission-control's own repo requires the
       // user to type that path.
-      const key = normalizeRepoPath(req.repoPath);
-      // Register the repo the first time we see it; then claim it for this
-      // Window. Claiming is what rejects a second Window on the same repo.
-      if (!findProject(registry, key)) {
-        const reg = registerProject(registry, key, req.initialStage);
+      const opened = normalizeProjectKey(req.path);
+      if (opened === '') {
+        return applyResult(registerProject(registry, '', req.initialStage), windowId);
+      }
+      // Resolve the opened handle — a repo path or a workbench project dir —
+      // to ONE canonical identity (issue 71, ADR-0015). Both aliases of a
+      // workbench Project land on the same key here, BEFORE ownership is
+      // decided, so no Project can be double-owned under two names.
+      const identity = await resolveProjectIdentity(opened);
+      projectIdentities.set(identity.key, identity);
+      // Register the Project the first time we see it; then claim it for this
+      // Window. Claiming is what rejects a second Window on the same Project.
+      if (!findProject(registry, identity.key)) {
+        const reg = registerProject(registry, identity.key, req.initialStage);
         if (!reg.ok) return applyResult(reg, windowId);
         registry = reg.registry;
       }
-      return applyResult(claimProject(registry, key, windowId), windowId);
+      return applyResult(claimProject(registry, identity.key, windowId), windowId);
     },
   );
 
@@ -476,7 +538,7 @@ function registerIpc(): void {
     IpcChannel.ProjectSwitch,
     (event, req: ProjectSwitchRequest): ProjectActionResult =>
       applyResult(
-        switchActiveProject(registry, String(event.sender.id), req.repoPath),
+        switchActiveProject(registry, String(event.sender.id), req.key),
         String(event.sender.id),
       ),
   );
@@ -485,7 +547,7 @@ function registerIpc(): void {
     IpcChannel.ProjectTransition,
     (event, req: ProjectTransitionRequest): ProjectActionResult =>
       applyResult(
-        transitionStage(registry, req.repoPath, req.toStage),
+        transitionStage(registry, req.key, req.toStage),
         String(event.sender.id),
       ),
   );
@@ -500,7 +562,7 @@ function registerIpc(): void {
     // it closes — so every racing read sees the same target until it's acted on.
     return {
       projects: projectViewsFor(windowId),
-      activeRepoPath: activeRepoFor(windowId),
+      activeProjectKey: activeKeyFor(windowId),
       pendingOpen: pendingOpen.get(event.sender.id) ?? null,
     };
   });
@@ -538,7 +600,9 @@ function registerIpc(): void {
   ipcMain.handle(
     IpcChannel.WindowOpen,
     (_event, req: WindowOpenRequest): WindowOpenResult => {
-      createWindow(req.repoPath ? normalizeRepoPath(req.repoPath) : undefined);
+      // Queue the raw path; the new Window's bootstrap opens it through
+      // ProjectOpen, where identity resolution happens exactly once.
+      createWindow(req.path ? normalizeProjectKey(req.path) : undefined);
       return { ok: true };
     },
   );
@@ -573,9 +637,13 @@ function registerIpc(): void {
       receiptWatcher.unwatch(key);
       return;
     }
+    // Receipts still land where Runs run — the identity's (default) repo —
+    // until issue 72 moves workbench Receipts to the workbench completions
+    // root. For a legacy Project this is the repo checkout, unchanged.
+    const runRepo = gitRepoFor(req.projectPath);
     const roots = [
-      join(req.projectPath, 'issues'),
-      ...req.worktreeSlugs.map((slug) => join(worktreePathFor(req.projectPath, slug), 'issues')),
+      join(runRepo, 'issues'),
+      ...req.worktreeSlugs.map((slug) => join(worktreePathFor(runRepo, slug), 'issues')),
     ];
     void seenReceiptsFor(req.projectPath).then((seen) => {
       // The Window may have gone away while the seed read ran.

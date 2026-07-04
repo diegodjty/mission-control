@@ -189,22 +189,24 @@ export function App(): JSX.Element {
   const [backlog, setBacklog] = useState<Backlog | null>(null);
   const [projectPath, setProjectPath] = useState<string | null>(null);
 
-  // --- Project Registry state (issue 09, ADR-0004) -------------------------
+  // --- Project Registry state (issue 09, ADR-0004; identity per issue 71) ---
   // This Window shows one Project; the single backend arbitrates ownership so
-  // no two Windows manage the same repo. `activeRepoPath` (from the registry)
-  // is what the Map loads.
+  // no two Windows manage the same Project. `activeProjectKey` (from the
+  // registry) is the Project's resolved identity — a workbench project dir or
+  // a legacy repo path — and is what the Map loads.
   const [projects, setProjects] = useState<ProjectView[]>([]);
-  const [activeRepoPath, setActiveRepoPath] = useState<string | null>(null);
+  const [activeProjectKey, setActiveProjectKey] = useState<string | null>(null);
   const [newRepoPath, setNewRepoPath] = useState('');
   const [projectError, setProjectError] = useState<string | null>(null);
-  // Mirrors `activeRepoPath` for the callbacks/effects that need the CURRENT
-  // active repo without re-subscribing (issue 26): they compare it against an
-  // incoming path via `isProjectSwitch` to decide whether to reset per-Project
-  // state, and a live ref keeps that decision correct without widening deps.
-  const activeRepoPathRef = useRef<string | null>(null);
+  // Mirrors `activeProjectKey` for the callbacks/effects that need the CURRENT
+  // active Project without re-subscribing (issue 26): they compare it against
+  // an incoming key via `isProjectSwitch` to decide whether to reset
+  // per-Project state, and a live ref keeps that decision correct without
+  // widening deps.
+  const activeProjectKeyRef = useRef<string | null>(null);
   useEffect(() => {
-    activeRepoPathRef.current = activeRepoPath;
-  }, [activeRepoPath]);
+    activeProjectKeyRef.current = activeProjectKey;
+  }, [activeProjectKey]);
 
   // Bootstrap this Window exactly once: pick up any repo the opener queued, else
   // re-attach to whatever this Window already owns, else open NO Project (empty
@@ -225,15 +227,15 @@ export function App(): JSX.Element {
       setProjects(list.projects);
       const decision = decideWindowBootstrap({
         pendingOpen: list.pendingOpen,
-        activeRepoPath: list.activeRepoPath,
+        activeProjectKey: list.activeProjectKey,
       });
       if (decision.kind === 'open') {
-        void openProjectHere(decision.repoPath);
+        void openProjectHere(decision.path);
       } else if (decision.kind === 'reattach') {
-        setActiveRepoPath(decision.repoPath);
+        setActiveProjectKey(decision.key);
       }
-      // 'empty' → leave activeRepoPath null; the empty "open a Project" state
-      // renders. We never open the backend cwd here.
+      // 'empty' → leave activeProjectKey null; the empty "open a Project"
+      // state renders. We never open the backend cwd here.
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -248,11 +250,11 @@ export function App(): JSX.Element {
     const off = window.mc.onProjectRegistryChanged(() => {
       void window.mc.listProjects().then((list) => {
         setProjects(list.projects);
-        const next = list.activeRepoPath;
-        if (next !== null && isProjectSwitch(activeRepoPathRef.current, next)) {
+        const next = list.activeProjectKey;
+        if (next !== null && isProjectSwitch(activeProjectKeyRef.current, next)) {
           resetForProjectSwitch();
         }
-        setActiveRepoPath((cur) => next ?? cur);
+        setActiveProjectKey((cur) => next ?? cur);
       });
     });
     return off;
@@ -512,7 +514,7 @@ export function App(): JSX.Element {
   const [afkScan, setAfkScan] = useState<ScopedScan | null>(null);
 
   // Reset ALL per-Project run/scan/merge state (issue 26). Switching the active
-  // Project used to change only `activeRepoPath`, leaving the previous Project's
+  // Project used to change only `activeProjectKey`, leaving the previous Project's
   // Runs (and their Panes), on-disk scan, observed worktree statuses, and merge
   // message in place — which bled indicators across Projects and offered a bogus
   // Merge against branches that don't exist in the new Project. Called on every
@@ -564,41 +566,42 @@ export function App(): JSX.Element {
     setProjectPath(null);
   }, []);
 
-  const openProjectHere = useCallback(async (repoPath: string): Promise<void> => {
+  const openProjectHere = useCallback(async (path: string): Promise<void> => {
     // Only open on an explicit path; an empty path is a no-op, never a claim on
-    // the backend cwd (issue 14).
-    if (!repoPath.trim()) return;
-    const res = await window.mc.openProject({ repoPath });
+    // the backend cwd (issue 14). The path may be a repo OR a workbench project
+    // dir — main resolves either alias to the same Project identity (issue 71).
+    if (!path.trim()) return;
+    const res = await window.mc.openProject({ path });
     setProjects(res.projects);
     setProjectError(res.error);
     if (res.ok) {
       // Opening a different Project than the one active resets its state (issue 26).
-      if (isProjectSwitch(activeRepoPathRef.current, res.activeRepoPath)) {
+      if (isProjectSwitch(activeProjectKeyRef.current, res.activeProjectKey)) {
         resetForProjectSwitch();
       }
-      setActiveRepoPath(res.activeRepoPath);
+      setActiveProjectKey(res.activeProjectKey);
       setNewRepoPath('');
     }
   }, [resetForProjectSwitch]);
 
-  const switchProject = useCallback(async (repoPath: string): Promise<void> => {
-    const res = await window.mc.switchProject({ repoPath });
+  const switchProject = useCallback(async (key: string): Promise<void> => {
+    const res = await window.mc.switchProject({ key });
     setProjects(res.projects);
     setProjectError(res.error);
     if (res.ok) {
       // Clear the previous Project's Runs/scan/merge state before the Map loads
       // the new one, so nothing bleeds across the switch (issue 26).
-      if (isProjectSwitch(activeRepoPathRef.current, res.activeRepoPath)) {
+      if (isProjectSwitch(activeProjectKeyRef.current, res.activeProjectKey)) {
         resetForProjectSwitch();
       }
-      setActiveRepoPath(res.activeRepoPath);
+      setActiveProjectKey(res.activeProjectKey);
     }
   }, [resetForProjectSwitch]);
 
   const openInNewWindow = useCallback((): void => {
-    const repoPath = newRepoPath.trim();
-    if (!repoPath) return;
-    void window.mc.openWindow({ repoPath });
+    const path = newRepoPath.trim();
+    if (!path) return;
+    void window.mc.openWindow({ path });
     setNewRepoPath('');
   }, [newRepoPath]);
 
@@ -612,11 +615,20 @@ export function App(): JSX.Element {
     if (path) setNewRepoPath(path);
   }, []);
 
+  // The repo the active Project's Runs actually execute in (issue 71): a
+  // workbench Project's Runs live in its default repo, not in the workbench
+  // dir its key names. For a legacy Project this IS the key, so nothing
+  // changes. Null exactly while `projectPath` is null.
+  const activeDefaultRepo = useMemo(
+    () => projects.find((p) => p.key === projectPath)?.defaultRepoPath ?? projectPath,
+    [projects, projectPath],
+  );
+
   /** True when a Run works in a worktree on an `afk/` branch (not `main`). */
   const isIsolated = useCallback(
     (run: TrackedRun): boolean =>
-      projectPath !== null && run.target.projectPath !== projectPath,
-    [projectPath],
+      activeDefaultRepo !== null && run.target.projectPath !== activeDefaultRepo,
+    [activeDefaultRepo],
   );
 
   /** The issue's current status on disk, or null if not observed yet. */
@@ -1006,6 +1018,10 @@ export function App(): JSX.Element {
         });
       };
 
+      // Runs execute in the Project's (default) repo — identical to the key
+      // for a legacy Project (issue 71).
+      const runRepo = activeDefaultRepo ?? projectPath;
+
       void window.mc
         .applyIsolation({ projectPath, runs: isolationRuns })
         .then((result) => {
@@ -1013,7 +1029,7 @@ export function App(): JSX.Element {
           for (const p of result.placements) cwdById[p.issueId] = p.cwd;
           // A Run not in the placement set keeps its current cwd (fall back to
           // `main`); every isolated/new Run gets its resolved worktree/main cwd.
-          place((id) => cwdById[id] ?? projectPath);
+          place((id) => cwdById[id] ?? runRepo);
         })
         .catch(() => {
           // Isolation failed (a git worktree error, a partial reconcile). Falling
@@ -1035,13 +1051,14 @@ export function App(): JSX.Element {
           setRuns((prev) =>
             prev.some((r) => r.target.issueId === target.issueId)
               ? prev
-              : [...prev, newRun({ ...target, projectPath })],
+              : [...prev, newRun({ ...target, projectPath: runRepo })],
           );
         });
     },
     [
       runs,
       projectPath,
+      activeDefaultRepo,
       needsIsolation,
       midMerge,
       worktreeRunningIds,
@@ -1893,6 +1910,10 @@ export function App(): JSX.Element {
 
     let cancelled = false;
 
+    // Runs execute in the Project's (default) repo — identical to the key for
+    // a legacy Project (issue 71).
+    const runRepo = activeDefaultRepo ?? projectPath;
+
     const addRuns = (cwdOf: (issueId: number) => string): void => {
       const additions = startableIssues.map((issue) =>
         newRun({
@@ -1921,7 +1942,7 @@ export function App(): JSX.Element {
         // mode). Already-live Panes keep the cwd they spawned in — a running PTY
         // can't be re-parented; that live solo→parallel re-parent is left to the
         // batch QA walkthrough / Merge slice.
-        addRuns((id) => cwdById[id] ?? projectPath);
+        addRuns((id) => cwdById[id] ?? runRepo);
       })
       .catch(() => {
         if (cancelled) return;
@@ -1938,7 +1959,7 @@ export function App(): JSX.Element {
           (r) => runStatusOf(r) === 'running' && !isIsolated(r),
         ).length;
         if (canFallBackToMain(runningOnMain + startableIssues.length)) {
-          addRuns(() => projectPath);
+          addRuns(() => runRepo);
         } else {
           setDraining(false);
           const message =
@@ -1961,7 +1982,7 @@ export function App(): JSX.Element {
     };
     // `runLog` is a dependency so a Receipt that lands a beat after its session
     // exits re-plans the drain with the park now visible (issue 64).
-  }, [draining, backlog, runs, cap, projectPath, midMerge, runStatusOf, isIsolated, runLog, surfaceNarrative]);
+  }, [draining, backlog, runs, cap, projectPath, activeDefaultRepo, midMerge, runStatusOf, isIsolated, runLog, surfaceNarrative]);
 
   // --- Merge readiness (issue 08, ADR-0002; issue 16) ---------------------
   // Whether a human-triggered Merge is offered — and which branches it targets —
@@ -2189,10 +2210,10 @@ export function App(): JSX.Element {
         <strong>Mission Control</strong>
         <ProjectBar
           projects={projects}
-          activeRepoPath={activeRepoPath}
+          activeProjectKey={activeProjectKey}
           newRepoPath={newRepoPath}
           onNewRepoPathChange={setNewRepoPath}
-          onSwitch={(repoPath) => void switchProject(repoPath)}
+          onSwitch={(key) => void switchProject(key)}
           onBrowse={() => void browseForFolder()}
           onOpenHere={() => void openProjectHere(newRepoPath.trim())}
           onOpenNewWindow={openInNewWindow}
@@ -2244,7 +2265,7 @@ export function App(): JSX.Element {
         <div className="app__slot" style={{ display: view === 'map' ? 'flex' : 'none' }}>
           <div className="app__map-col">
           <Map
-            projectPath={activeRepoPath}
+            projectPath={activeProjectKey}
             onRun={startRun}
             onBacklogLoaded={handleBacklogLoaded}
             runLog={runLog}
