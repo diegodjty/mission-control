@@ -55,12 +55,13 @@ The feed of **Completion blocks** read from **Receipts**, one card per Run. The 
 **Dispatcher authority (silent-autonomy default)**:
 The Dispatcher acts **silently and autonomously by default**; interruptions are a small, explicit exception (ADR-0011, refining ADR-0007). Three tiers:
 - **Blocking approval** (must click before it proceeds) — the *entire* list is: (1) a **Merge that hits a conflict**, (2) **aborting/stopping a drain**, (3) a **HITL issue awaiting sign-off**. Nothing else blocks.
-- **Passive note** (lands in an ambient, ignorable log — never blocks): committed a checkpoint, a **clean merge** (auto-proceeds), an issue completed, a new follow-up issue logged.
+- **Run narrative** (ADR-0014 — a message in the Dispatcher *conversation*, never a gate): a Run's Completion block as it finishes, an HITL park ("waiting for you"), drain stopped/halted, strays adopted, finished-without-receipt. "The chat" means the embedded claude session itself; the activity strip is history, not the notification surface.
+- **Passive note** (history strip only): routine facts below narrative — debounced status refreshes, delivery phases, checkpoint bookkeeping.
 - **Silent** — everything else; answerable on-demand ("what's happening?").
 A **clean, conflict-free Merge auto-proceeds** (refines ADR-0002's "human-triggered" to *auto-on-clean, gate-on-conflict*), and **logging a follow-up issue** is a silent+passive action, not a gate.
 
 **Noise floor & interaction (ADR-0012)**:
-"If in doubt, stay silent." Empty/unclassifiable inputs are dropped (never a Run or note) — with ADR-0013, capture input is **Receipts** only, so the boot-screen class is gone by construction; doc-drift surfaces only on a real contradiction (not "none"); cross-run consolidation is a rare, deduped **passive note** (never a per-tick proposal). Inferred/speculative signals must clear a high confidence bar; routine facts (committed/merged/done) are ambient passive notes. **Passive notes render in the ambient log, not injected into the chat** — only blocking approvals and the user's Q&A use the chat (one serialized queue; no injection while the user types). Backward status moves (finished→open) are debounced ≥1 reconcile checkpoint before surfacing.
+"If in doubt, stay silent." Empty/unclassifiable inputs are dropped (never a Run or note) — with ADR-0013, capture input is **Receipts** only, so the boot-screen class is gone by construction; doc-drift surfaces only on a real contradiction (not "none"); cross-run consolidation is a rare, deduped **passive note** (never a per-tick proposal). Inferred/speculative signals must clear a high confidence bar. **Run narrative lands in the Dispatcher conversation as messages (ADR-0014)**; routine status flips and speculative signals stay out of it (history strip only). One serialized queue; no injection while the user types. Backward status moves (finished→open) are debounced ≥1 reconcile checkpoint before surfacing.
 
 ## Relationships
 
