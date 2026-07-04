@@ -18,8 +18,12 @@
  *   2. HITL notice         — park → `hitl-waiting` → notification DELIVERED
  *                            (fake PTY saw typed + submitted), surviving a
  *                            mid-queue session replacement (issue 60).
- *   3. Zero ghosts         — a full mixed drain ingests zero unclassifiable
- *                            records (incl. the blocked-exit Receipt).
+ *   3. Zero ghosts +       — a full mixed drain ingests zero unclassifiable
+ *      park continuation     records AND continues past the parked HITL issue
+ *                            (issue 64): every eligible issue runs, 05 stays
+ *                            `wip`, exactly one hitl-waiting delivery. 3b/3c:
+ *                            a declared-blocked Worker and a die-mid-exit
+ *                            Worker (no Receipt, no flip) still halt.
  *   4. Parallel mode       — Receipts ingested LIVE from worktrees pre-merge;
  *                            a clean merge lands the Receipt files on main.
  *   5. Misbehavior         — stray Receipt on main is ADOPTED and the merge
@@ -53,7 +57,7 @@ import {
 } from '../src/main/git-worktree-adapter';
 import { mergeRuns, defaultMergeScriptPath } from '../src/main/run-merge';
 import { branchFor } from '../src/shared/isolation-policy';
-import { planDrain, type ActiveRun } from '../src/shared/run-coordinator';
+import { planDrain, type ActiveRun, type DrainPlan } from '../src/shared/run-coordinator';
 import { deriveRunStatus } from '../src/shared/run-state';
 import {
   lifecycleKindForOutcome,
@@ -62,7 +66,11 @@ import {
 } from '../src/shared/dispatcher-lifecycle';
 import { channelForAction } from '../src/shared/dispatcher-channel';
 import { createDispatcherPump, type DeliveryPhase } from '../src/shared/dispatcher-pump';
-import { auditMissingReceipts, isReceiptRecord } from '../src/shared/receipt-audit';
+import {
+  auditMissingReceipts,
+  isReceiptRecord,
+  latestReceiptOutcomeFor,
+} from '../src/shared/receipt-audit';
 import { isRealCapture } from '../src/shared/dispatcher-noise-floor';
 import { parseReceipt } from '../src/shared/receipt-parser';
 import type { RunLogRecord } from '../src/shared/ipc-contract';
@@ -292,27 +300,37 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Scenario 3 — Zero unclassifiable records across a full mixed drain
-  // (completions, a dep-blocked issue unblocking, an HITL park, a blocked exit).
+  // Scenario 3 — a full cap-1 mixed drain: zero unclassifiable records, and the
+  // drain CONTINUES past the parked HITL issue (issue 64) — the park is success,
+  // not failure, so every eligible issue after it still runs, 05 stays `wip`,
+  // and exactly ONE hitl-waiting notification is delivered.
   // ---------------------------------------------------------------------------
-  it('Scenario 3: a full mixed drain ingests zero unclassifiable records', async () => {
+  it('Scenario 3: a cap-1 mixed drain continues past the HITL park and ingests zero unclassifiable records', async () => {
     ingestFrom(sandbox.issuesDir);
 
     // Drive the drain the way the app does: re-plan with the REAL coordinator
-    // against the REAL backlog after every Run, cap 1. Scripted exits: 02/03/04
-    // complete (03 becomes eligible only after 02 is done), 05 parks HITL.
+    // against the REAL backlog after every Run, cap 1, each Run carrying its
+    // latest Receipt's declared outcome (issue 64). Scripted exits: 02/03/04
+    // complete (03 becomes eligible only after 02 is done), 05 parks HITL,
+    // 06/07 complete AFTER the park — the drain must not halt at 05.
     const exits = new Map<number, WorkerExit>([
       [2, 'completed'],
       [3, 'completed'],
       [4, 'completed'],
       [5, 'needs-verification'],
+      [6, 'completed'],
+      [7, 'completed'],
     ]);
     const terminal: ActiveRun[] = [];
     const started: number[] = [];
+    let stop: DrainPlan['drain'] | null = null;
     for (let round = 0; round < 10; round++) {
       const backlog = await readBacklog(repo);
       const plan = planDrain({ issues: backlog.issues, maxConcurrent: 1, activeRuns: terminal });
-      if (plan.drain.stop) break;
+      if (plan.drain.stop) {
+        stop = plan.drain;
+        break;
+      }
       const id = plan.startable[0];
       started.push(id);
       const issue = sandboxIssue(id);
@@ -324,20 +342,72 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
         issueStatus: after.issues.find((i) => i.id === id)?.status ?? null,
       });
       if (status === 'finished') await commitFinishedMain(repo, issue.slug);
-      terminal.push({ issueId: id, status });
-      await waitForReceipt(id);
+      const record = await waitForReceipt(id);
+      terminal.push({ issueId: id, status, receiptOutcome: record.outcome });
     }
-    // The drain proceeded in dependency order and reached the HITL park.
-    expect(started).toEqual([2, 3, 4, 5]);
 
-    // Walkthrough item "Blocked exit": a Worker's blocked report also lands as
-    // a Receipt (`outcome: blocked`) and one record.
-    await runFakeWorker({ repo, issue: sandboxIssue(6), exit: 'blocked' });
-    await waitForReceipt(6);
+    // Issue 64's core assertion: the drain ran EVERY eligible issue, parking
+    // 05 along the way — no halt at the park. It ended because nothing
+    // eligible remained, never because a Run "blocked".
+    expect(started).toEqual([2, 3, 4, 5, 6, 7]);
+    expect(stop).not.toBeNull();
+    expect(stop!.reason).toBe('no-eligible');
+
+    // The park is real: 05 is left `wip` (awaiting the human), everything
+    // else the drain touched is `done`.
+    const backlog = await readBacklog(repo);
+    const five = backlog.issues.find((i) => i.id === 5)!;
+    expect(five.status).toBe('wip');
+    expect(five.hitl).toBe(true);
+    for (const id of [2, 3, 4, 6, 7]) {
+      expect(backlog.issues.find((i) => i.id === id)?.status).toBe('done');
+    }
+
+    // A park blocks only its dependents: 08 (`depends_on: [5]`) was never
+    // started and stays open — no special casing, its dependency simply
+    // never reached `done`.
+    expect(started).not.toContain(8);
+    expect(backlog.issues.find((i) => i.id === 8)?.status).toBe('open');
+
+    // Exactly ONE hitl-waiting event derives from the whole drain's records —
+    // and it is delivered exactly once through the real pump into the chat PTY.
+    const isHitlIssue = (issueId: number | null): boolean =>
+      issueId !== null && (backlog.issues.find((i) => i.id === issueId)?.hitl ?? false);
+    const hitlRecords = records.filter(
+      (r) => lifecycleKindForOutcome(r.outcome, isHitlIssue(r.issueId)) === 'hitl-waiting',
+    );
+    expect(hitlRecords).toHaveLength(1);
+    expect(hitlRecords[0].issueId).toBe(5);
+
+    const pty = new FakePty();
+    pty.create('dispatcher');
+    const pump = createDispatcherPump({ write: pty.write, canFlush: () => true });
+    pump.attachSession('dispatcher');
+    for (const rec of hitlRecords) {
+      const reaction = reactToLifecycleEvent({
+        kind: 'hitl-waiting',
+        runId: rec.id,
+        issueId: rec.issueId,
+        slug: rec.slug,
+        title: rec.title,
+        detail: rec.detail,
+      });
+      // Enqueue twice on the same key — dedupe keeps delivery at one.
+      pump.enqueue({ key: `hitl-waiting:${rec.id}`, text: reaction.notification! });
+      pump.enqueue({ key: `hitl-waiting:${rec.id}`, text: reaction.notification! });
+    }
+    await waitFor(
+      () => pty.submittedMessages('dispatcher').length > 0,
+      'hitl-waiting notification delivered',
+    );
+    const delivered = pty.submittedMessages('dispatcher');
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toContain('HITL gate waiting');
+    expect(delivered[0]).toContain('05');
 
     // ZERO ghosts: every ingested record is a classified, real capture — no
     // `unknown`s, no boot-screen junk, exactly one record per Receipt written.
-    expect(records).toHaveLength(5);
+    expect(records).toHaveLength(6);
     expect(records.every((r) => r.outcome !== 'unknown')).toBe(true);
     expect(records.every((r) => isRealCapture(r))).toBe(true);
     expect(records.every((r) => isReceiptRecord(r))).toBe(true);
@@ -346,13 +416,14 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
     expect(outcomes.get(3)).toBe('completed');
     expect(outcomes.get(4)).toBe('completed');
     expect(outcomes.get(5)).toBe('needs-verification');
-    expect(outcomes.get(6)).toBe('blocked');
+    expect(outcomes.get(6)).toBe('completed');
+    expect(outcomes.get(7)).toBe('completed');
 
     // The durable Run log agrees, with unique ids (no double-feeds).
     await Promise.all(appends);
     const persisted = await store.read(repo);
-    expect(persisted).toHaveLength(5);
-    expect(new Set(persisted.map((r) => r.id)).size).toBe(5);
+    expect(persisted).toHaveLength(6);
+    expect(new Set(persisted.map((r) => r.id)).size).toBe(6);
 
     // An MC "restart" — a fresh watcher whose `seen` is seeded from the
     // persisted Run log — re-scans every existing Receipt and feeds NOTHING.
@@ -366,6 +437,88 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
     } finally {
       restarted.closeAll();
     }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Scenario 3b — the conservative halts issue 64 must NOT relax: a Worker that
+  // DECLARES `outcome: blocked` still stops the drain with today's report.
+  // ---------------------------------------------------------------------------
+  it('Scenario 3b: a Worker declaring outcome: blocked still halts the drain', async () => {
+    ingestFrom(sandbox.issuesDir);
+
+    // 02 completes normally; 03 (unblocked by it) then declares blocked.
+    const two = sandboxIssue(2);
+    await runFakeWorker({ repo, issue: two, exit: 'completed' });
+    await commitFinishedMain(repo, two.slug);
+    const rec2 = await waitForReceipt(2);
+    const terminal: ActiveRun[] = [{ issueId: 2, status: 'finished', receiptOutcome: rec2.outcome }];
+
+    let backlog = await readBacklog(repo);
+    expect(planDrain({ issues: backlog.issues, maxConcurrent: 1, activeRuns: terminal }).startable[0]).toBe(3);
+    await runFakeWorker({ repo, issue: sandboxIssue(3), exit: 'blocked' });
+
+    // Walkthrough item "Blocked exit": the blocked report lands as a Receipt
+    // (`outcome: blocked`) — one classified record, carrying the reason.
+    const rec3 = await waitForReceipt(3);
+    expect(rec3.outcome).toBe('blocked');
+    expect(isReceiptRecord(rec3)).toBe(true);
+    expect(rec3.detail).toContain('I stopped because');
+
+    backlog = await readBacklog(repo);
+    const status = deriveRunStatus({
+      sessionAlive: false,
+      stoppedByUser: false,
+      issueStatus: backlog.issues.find((i) => i.id === 3)?.status ?? null,
+    });
+    expect(status).toBe('blocked');
+    terminal.push({ issueId: 3, status, receiptOutcome: latestReceiptOutcomeFor(records, 3) });
+
+    // The re-plan HALTS: declared blocked is a genuine stop, never a park —
+    // nothing further starts, and the un-started issues are reported.
+    const plan = planDrain({ issues: backlog.issues, maxConcurrent: 1, activeRuns: terminal });
+    expect(plan.drain.stop).toBe(true);
+    expect(plan.drain.reason).toBe('run-blocked');
+    expect(plan.drain.blockedIssueId).toBe(3);
+    expect(plan.startable).toEqual([]);
+    expect(plan.queued).toEqual([4, 5, 6, 7]);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Scenario 3c — a die-mid-exit Worker (no Receipt, no done flip) also still
+  // halts: with nothing DECLARED, even the HITL marker cannot park it (the
+  // genuinely-unknown case keeps the conservative stop, issue 64).
+  // ---------------------------------------------------------------------------
+  it('Scenario 3c: a Worker that dies with no Receipt and no flip still halts the drain', async () => {
+    ingestFrom(sandbox.issuesDir);
+
+    // The Worker claims the HITL issue 05, then dies mid-exit: the issue stays
+    // `wip` and NO Receipt is ever written.
+    await runFakeWorker({
+      repo,
+      issue: sandboxIssue(5),
+      exit: 'needs-verification',
+      misbehavior: 'no-receipt',
+    });
+    await sleep(300);
+    expect(records).toEqual([]);
+
+    const backlog = await readBacklog(repo);
+    const five = backlog.issues.find((i) => i.id === 5)!;
+    expect(five.status).toBe('wip');
+    expect(five.hitl).toBe(true);
+
+    // Even on an HITL-marked issue, no Receipt means no declared park — the
+    // drain stops and reports, exactly as before issue 64.
+    const status = deriveRunStatus({ sessionAlive: false, stoppedByUser: false, issueStatus: 'wip' });
+    const plan = planDrain({
+      issues: backlog.issues,
+      maxConcurrent: 1,
+      activeRuns: [{ issueId: 5, status, receiptOutcome: latestReceiptOutcomeFor(records, 5) }],
+    });
+    expect(plan.drain.stop).toBe(true);
+    expect(plan.drain.reason).toBe('run-blocked');
+    expect(plan.drain.blockedIssueId).toBe(5);
+    expect(plan.startable).toEqual([]);
   });
 
   // ---------------------------------------------------------------------------

@@ -1,9 +1,14 @@
 import { describe, it, expect } from 'vitest';
-import { planDrain, normalizeCap, type ActiveRun } from './run-coordinator';
+import { planDrain, normalizeCap, isParkedHitl, type ActiveRun } from './run-coordinator';
 import type { BacklogIssue, IssueStatus } from './backlog-model';
 
 /** Minimal issue factory — only the fields the coordinator/eligibility read. */
-function mk(id: number, status: IssueStatus, dependsOn: number[] = []): BacklogIssue {
+function mk(
+  id: number,
+  status: IssueStatus,
+  dependsOn: number[] = [],
+  hitl = false,
+): BacklogIssue {
   return {
     id,
     slug: `slug-${id}`,
@@ -13,7 +18,7 @@ function mk(id: number, status: IssueStatus, dependsOn: number[] = []): BacklogI
     dependsOn,
     parent: 'docs/PRD.md',
     source: null,
-    hitl: false,
+    hitl,
     inBatch: true,
     standalone: false,
     body: '',
@@ -210,6 +215,156 @@ describe('planDrain — drain-stop conditions', () => {
       activeRuns: [{ issueId: 1, status: 'blocked' }],
     });
     expect(plan.drain.reason).toBe('run-blocked');
+  });
+});
+
+describe('isParkedHitl — the declared-state park/blocked distinction (issue 64)', () => {
+  const hitlWip = mk(5, 'wip', [], true);
+
+  it('a Run whose Receipt declares needs-verification is a park', () => {
+    const run: ActiveRun = { issueId: 5, status: 'blocked', receiptOutcome: 'needs-verification' };
+    expect(isParkedHitl(run, hitlWip)).toBe(true);
+  });
+
+  it('a declared needs-verification parks even when the issue lacks the HITL marker', () => {
+    // The Receipt's declaration is itself declared state — the Worker parked.
+    const run: ActiveRun = { issueId: 5, status: 'blocked', receiptOutcome: 'needs-verification' };
+    expect(isParkedHitl(run, mk(5, 'wip'))).toBe(true);
+  });
+
+  it('an HITL-marked issue left wip WITH a Receipt is a park (undeclared-outcome fallback)', () => {
+    const run: ActiveRun = { issueId: 5, status: 'blocked', receiptOutcome: 'unknown' };
+    expect(isParkedHitl(run, hitlWip)).toBe(true);
+  });
+
+  it('a Run declaring outcome: blocked is NEVER a park, HITL marker or not', () => {
+    const run: ActiveRun = { issueId: 5, status: 'blocked', receiptOutcome: 'blocked' };
+    expect(isParkedHitl(run, hitlWip)).toBe(false);
+  });
+
+  it('a Run with NO Receipt is never a park — the genuinely-unknown case', () => {
+    const bare: ActiveRun = { issueId: 5, status: 'blocked' };
+    const explicit: ActiveRun = { issueId: 5, status: 'blocked', receiptOutcome: null };
+    expect(isParkedHitl(bare, hitlWip)).toBe(false);
+    expect(isParkedHitl(explicit, hitlWip)).toBe(false);
+  });
+
+  it('a non-HITL issue with only an unknown-outcome Receipt is not a park', () => {
+    const run: ActiveRun = { issueId: 2, status: 'blocked', receiptOutcome: 'unknown' };
+    expect(isParkedHitl(run, mk(2, 'wip'))).toBe(false);
+  });
+
+  it('the HITL fallback requires the issue to have ended wip', () => {
+    const run: ActiveRun = { issueId: 5, status: 'blocked', receiptOutcome: 'unknown' };
+    expect(isParkedHitl(run, mk(5, 'open', [], true))).toBe(false);
+  });
+
+  it('only a blocked-status Run can be a park', () => {
+    const run: ActiveRun = { issueId: 5, status: 'running', receiptOutcome: 'needs-verification' };
+    expect(isParkedHitl(run, hitlWip)).toBe(false);
+  });
+
+  it('an unknown issue (not in the backlog) never parks via the fallback', () => {
+    const run: ActiveRun = { issueId: 99, status: 'blocked', receiptOutcome: 'unknown' };
+    expect(isParkedHitl(run, undefined)).toBe(false);
+  });
+});
+
+describe('planDrain — a parked HITL Run does not halt the drain (issue 64)', () => {
+  it('continues scheduling eligible issues past a parked HITL Run', () => {
+    const issues = [mk(5, 'wip', [], true), mk(6, 'open'), mk(7, 'open')];
+    const plan = planDrain({
+      issues,
+      maxConcurrent: 1,
+      activeRuns: [{ issueId: 5, status: 'blocked', receiptOutcome: 'needs-verification' }],
+    });
+    expect(plan.drain.stop).toBe(false);
+    expect(plan.startable).toEqual([6]);
+    expect(plan.queued).toEqual([7]);
+  });
+
+  it('a parked Run frees its slot (it is not running)', () => {
+    const issues = [mk(5, 'wip', [], true), mk(6, 'open'), mk(7, 'open')];
+    const plan = planDrain({
+      issues,
+      maxConcurrent: 2,
+      activeRuns: [{ issueId: 5, status: 'blocked', receiptOutcome: 'needs-verification' }],
+    });
+    expect(plan.startable).toEqual([6, 7]);
+  });
+
+  it('never restarts the parked issue within the same drain', () => {
+    // Even if the parked issue somehow read `open` again, its Run is tracked.
+    const issues = [mk(5, 'open', [], true), mk(6, 'open')];
+    const plan = planDrain({
+      issues,
+      maxConcurrent: 3,
+      activeRuns: [{ issueId: 5, status: 'blocked', receiptOutcome: 'needs-verification' }],
+    });
+    expect(plan.startable).toEqual([6]);
+  });
+
+  it('issues depending on the parked issue stay blocked naturally', () => {
+    const issues = [mk(5, 'wip', [], true), mk(6, 'open', [5]), mk(7, 'open')];
+    const plan = planDrain({
+      issues,
+      maxConcurrent: 2,
+      activeRuns: [{ issueId: 5, status: 'blocked', receiptOutcome: 'needs-verification' }],
+    });
+    expect(plan.startable).toEqual([7]);
+    expect(plan.queued).toEqual([]);
+  });
+
+  it('stops with no-eligible (not run-blocked) when only the park remains', () => {
+    const issues = [mk(5, 'wip', [], true), mk(6, 'done')];
+    const plan = planDrain({
+      issues,
+      maxConcurrent: 2,
+      activeRuns: [
+        { issueId: 5, status: 'blocked', receiptOutcome: 'needs-verification' },
+        { issueId: 6, status: 'finished', receiptOutcome: 'completed' },
+      ],
+    });
+    expect(plan.drain.stop).toBe(true);
+    expect(plan.drain.reason).toBe('no-eligible');
+  });
+
+  it('still stops with run-blocked for a Run declaring outcome: blocked', () => {
+    const issues = [mk(5, 'wip', [], true), mk(6, 'open')];
+    const plan = planDrain({
+      issues,
+      maxConcurrent: 2,
+      activeRuns: [{ issueId: 5, status: 'blocked', receiptOutcome: 'blocked' }],
+    });
+    expect(plan.drain.stop).toBe(true);
+    expect(plan.drain.reason).toBe('run-blocked');
+    expect(plan.drain.blockedIssueId).toBe(5);
+  });
+
+  it('still stops with run-blocked when a Run ends with no Receipt and no done flip', () => {
+    const issues = [mk(5, 'wip', [], true), mk(6, 'open')];
+    const plan = planDrain({
+      issues,
+      maxConcurrent: 2,
+      activeRuns: [{ issueId: 5, status: 'blocked' }],
+    });
+    expect(plan.drain.stop).toBe(true);
+    expect(plan.drain.reason).toBe('run-blocked');
+  });
+
+  it('halts on the genuinely blocked Run even when another Run is parked', () => {
+    const issues = [mk(4, 'wip'), mk(5, 'wip', [], true), mk(6, 'open')];
+    const plan = planDrain({
+      issues,
+      maxConcurrent: 3,
+      activeRuns: [
+        { issueId: 5, status: 'blocked', receiptOutcome: 'needs-verification' },
+        { issueId: 4, status: 'blocked', receiptOutcome: 'blocked' },
+      ],
+    });
+    expect(plan.drain.stop).toBe(true);
+    expect(plan.drain.reason).toBe('run-blocked');
+    expect(plan.drain.blockedIssueId).toBe(4);
   });
 });
 

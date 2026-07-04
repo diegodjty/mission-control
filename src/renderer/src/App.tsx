@@ -69,6 +69,7 @@ import {
   detectReceiptStateMismatches,
   describeReceiptMismatch,
   hasReceiptFor,
+  latestReceiptOutcomeFor,
   mismatchKey,
 } from '../../shared/receipt-audit';
 import { planDrain, type ActiveRun } from '../../shared/run-coordinator';
@@ -1735,9 +1736,14 @@ export function App(): JSX.Element {
   useEffect(() => {
     if (!draining || !backlog || projectPath === null) return;
 
+    // Each Run carries the outcome its latest Receipt DECLARED (or null when
+    // none exists) so the Coordinator can tell a parked HITL Run — a success
+    // the drain continues past — from a genuinely blocked one that halts it
+    // (`isParkedHitl`, issue 64). Declared state only, never prose heuristics.
     const activeRuns: ActiveRun[] = runs.map((r) => ({
       issueId: r.target.issueId,
       status: runStatusOf(r),
+      receiptOutcome: latestReceiptOutcomeFor(runLog, r.target.issueId),
     }));
     const plan = planDrain({ issues: backlog.issues, maxConcurrent: cap, activeRuns, midMerge });
 
@@ -1827,7 +1833,9 @@ export function App(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [draining, backlog, runs, cap, projectPath, midMerge, runStatusOf, isIsolated]);
+    // `runLog` is a dependency so a Receipt that lands a beat after its session
+    // exits re-plans the drain with the park now visible (issue 64).
+  }, [draining, backlog, runs, cap, projectPath, midMerge, runStatusOf, isIsolated, runLog]);
 
   // --- Merge readiness (issue 08, ADR-0002; issue 16) ---------------------
   // Whether a human-triggered Merge is offered — and which branches it targets —

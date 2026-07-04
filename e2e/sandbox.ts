@@ -14,6 +14,10 @@
  *   05-manual-check    open  — HITL (`hitl: true`)
  *   06-parallel-a      open
  *   07-parallel-b      open
+ *   08-blocked-on-hitl open  — dep-blocked behind the HITL 05 (depends_on: [5]),
+ *                              so issue 64's "a park blocks only its dependents"
+ *                              rule is observable: 08 must never start while 05
+ *                              is parked, while 06/07 still run.
  *
  * No LLM anywhere: Workers are driven by `fake-worker.ts`, and the "Dispatcher
  * chat" is the FakePty below.
@@ -52,6 +56,7 @@ export const SANDBOX_ISSUES: readonly SandboxIssue[] = [
   { id: 5, slug: '05-manual-check', title: 'Manual check (HITL)', status: 'open', dependsOn: [], hitl: true },
   { id: 6, slug: '06-parallel-a', title: 'Parallel A', status: 'open', dependsOn: [], hitl: false },
   { id: 7, slug: '07-parallel-b', title: 'Parallel B', status: 'open', dependsOn: [], hitl: false },
+  { id: 8, slug: '08-blocked-on-hitl', title: 'Blocked on HITL 05', status: 'open', dependsOn: [5], hitl: false },
 ];
 
 /** Look up a seeded issue by id (throws on a bad id — a test bug). */

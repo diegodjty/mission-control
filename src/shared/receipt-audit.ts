@@ -46,6 +46,34 @@ export function hasReceiptFor(
   return runLog.some((rec) => isReceiptRecord(rec) && rec.issueId === issueId);
 }
 
+/** The LATEST Receipt record per issue id (newest `capturedAt` wins). */
+function latestReceiptsByIssue(
+  runLog: readonly RunLogRecord[],
+): Map<number, RunLogRecord> {
+  const latest = new Map<number, RunLogRecord>();
+  for (const rec of runLog) {
+    if (!isReceiptRecord(rec) || rec.issueId === null) continue;
+    const prior = latest.get(rec.issueId);
+    if (!prior || rec.capturedAt > prior.capturedAt) latest.set(rec.issueId, rec);
+  }
+  return latest;
+}
+
+/**
+ * The outcome the latest Receipt for `issueId` declared, or null when no
+ * Receipt exists for it. This is the declared fact the Run Coordinator's
+ * park/blocked distinction reads (`isParkedHitl`, issue 64): a superseded
+ * re-run's stale outcome is not a live claim, so only the newest Receipt
+ * counts — the same latest-wins rule the mismatch audit judges by. Legacy
+ * non-Receipt records (scroll-era, id = PTY session id) never contribute.
+ */
+export function latestReceiptOutcomeFor(
+  runLog: readonly RunLogRecord[],
+  issueId: number,
+): RunOutcome | null {
+  return latestReceiptsByIssue(runLog).get(issueId)?.outcome ?? null;
+}
+
 /** The facts about one tracked Run the missing-Receipt audit needs. */
 export interface AuditedRun {
   issueId: number;
@@ -132,13 +160,7 @@ export function detectReceiptStateMismatches(
   runLog: readonly RunLogRecord[],
   issues: readonly IssueGroundStatus[],
 ): ReceiptStateMismatch[] {
-  // Latest Receipt per issue id.
-  const latest = new Map<number, RunLogRecord>();
-  for (const rec of runLog) {
-    if (!isReceiptRecord(rec) || rec.issueId === null) continue;
-    const prior = latest.get(rec.issueId);
-    if (!prior || rec.capturedAt > prior.capturedAt) latest.set(rec.issueId, rec);
-  }
+  const latest = latestReceiptsByIssue(runLog);
 
   const mismatches: ReceiptStateMismatch[] = [];
   for (const issue of issues) {

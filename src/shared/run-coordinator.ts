@@ -21,6 +21,7 @@
  * queued Run as a slot frees" falls out of re-planning — there is no timer.
  */
 import type { BacklogIssue } from './backlog-model';
+import type { RunOutcome } from './completion-parser';
 import { eligibleForRun } from './run-eligibility';
 import type { RunStatus } from './run-state';
 
@@ -32,6 +33,46 @@ import type { RunStatus } from './run-state';
 export interface ActiveRun {
   issueId: number;
   status: RunStatus;
+  /**
+   * The outcome the latest Receipt ingested for this Run's issue DECLARED
+   * (`issues/completions/NN-slug.md`, ADR-0013), or null/absent when no Receipt
+   * exists for it. This is what lets the Coordinator tell a parked HITL Run
+   * (`needs-verification` — success, the human verifies) from a genuinely
+   * blocked one (issue 64). Declared state only — never prose heuristics.
+   */
+  receiptOutcome?: RunOutcome | null;
+}
+
+/**
+ * Whether a Run whose session ended without finishing is a **parked HITL Run**
+ * rather than a genuinely blocked one (issue 64). Parking is success: the
+ * Worker did its job and left the issue `wip` for the human to verify (the
+ * afk-issue-runner's §2 HITL contract), so the drain must skip it and keep
+ * going — issues that `depends_on` it stay blocked naturally.
+ *
+ * The distinction reads DECLARED state only (ADR-0013's declare-don't-imply):
+ *   - The Run's Receipt declares `outcome: needs-verification` ⇒ park.
+ *   - Fallback: the issue carries the HITL marker (`hitl: true` / `(HITL)`),
+ *     ended `wip`, and a Receipt EXISTS whose declaration isn't `blocked`
+ *     (an unreadable/undeclared outcome on a marked HITL park still counts —
+ *     the marker and the Receipt's existence are both declared facts).
+ *   - A Receipt declaring `blocked`, or NO Receipt at all (the genuinely-
+ *     unknown case, e.g. a Worker that died mid-exit), is never a park: the
+ *     drain keeps today's conservative stop-and-report behavior.
+ */
+export function isParkedHitl(
+  run: Pick<ActiveRun, 'status' | 'receiptOutcome'>,
+  issue: Pick<BacklogIssue, 'hitl' | 'status'> | undefined,
+): boolean {
+  if (run.status !== 'blocked') return false;
+  const receipt = run.receiptOutcome ?? null;
+  if (receipt === 'needs-verification') return true;
+  return (
+    (issue?.hitl ?? false) &&
+    issue?.status === 'wip' &&
+    receipt !== null &&
+    receipt !== 'blocked'
+  );
 }
 
 /** Why a drain stopped. */
@@ -100,8 +141,10 @@ export function normalizeCap(maxConcurrent: number): number {
  *    NOT already have a Run, in ascending id order. The first `freeSlots` are
  *    startable; the rest queue. `freeSlots = cap − (running Runs)`.
  *  - **Drain stop** — a Run that reported `blocked` stops the drain immediately
- *    (no new Runs start; in-flight Runs finish on their own). Otherwise the
- *    drain is complete when nothing is running and nothing is eligible.
+ *    (no new Runs start; in-flight Runs finish on their own) — UNLESS it is a
+ *    parked HITL Run (`isParkedHitl`, issue 64), which the drain skips and
+ *    continues past. Otherwise the drain is complete when nothing is running
+ *    and nothing is eligible.
  *  - When the drain is stopping, `startable` is emptied — the whole point of a
  *    stop is to open no further Panes. `queued` still reports what was left
  *    un-started, for the UI to explain.
@@ -122,7 +165,15 @@ export function planDrain(input: DrainInput): DrainPlan {
     .filter((issue) => !activeIds.has(issue.id) && eligibleForRun(issue, input.issues))
     .map((issue) => issue.id);
 
-  const blocked = input.activeRuns.find((r) => r.status === 'blocked') ?? null;
+  // Only a GENUINELY blocked Run halts the drain. A parked HITL Run — its
+  // Receipt declares `needs-verification` (or its HITL-marked issue ended `wip`
+  // with a Receipt) — is a success state (issue 64): the drain skips its issue
+  // (it stays in `activeIds`) and keeps scheduling everything else.
+  const issueById = new Map(input.issues.map((i) => [i.id, i]));
+  const blocked =
+    input.activeRuns.find(
+      (r) => r.status === 'blocked' && !isParkedHitl(r, issueById.get(r.issueId)),
+    ) ?? null;
 
   let drain: DrainDecision;
   if (input.midMerge) {

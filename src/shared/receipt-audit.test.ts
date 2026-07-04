@@ -22,6 +22,7 @@ import {
   describeReceiptMismatch,
   hasReceiptFor,
   isReceiptRecord,
+  latestReceiptOutcomeFor,
   type AuditedRun,
 } from './receipt-audit';
 import {
@@ -81,6 +82,43 @@ describe('isReceiptRecord / hasReceiptFor', () => {
     // Issue 7's only record is a legacy scroll capture — no Receipt exists.
     expect(hasReceiptFor(log, 7)).toBe(false);
     expect(hasReceiptFor(log, 9)).toBe(false);
+  });
+});
+
+describe('latestReceiptOutcomeFor — the declared outcome the park decision reads (issue 64)', () => {
+  it('returns the outcome of the only Receipt for the issue', () => {
+    const log = [receiptRecord({ issueId: 5, outcome: 'needs-verification' })];
+    expect(latestReceiptOutcomeFor(log, 5)).toBe('needs-verification');
+  });
+
+  it('returns null when no Receipt exists for the issue', () => {
+    expect(latestReceiptOutcomeFor([], 5)).toBeNull();
+    expect(latestReceiptOutcomeFor([receiptRecord({ issueId: 2 })], 5)).toBeNull();
+  });
+
+  it('ignores legacy non-Receipt records entirely', () => {
+    const log = [{ ...receiptRecord({ issueId: 5, outcome: 'blocked' }), id: 'legacy-session-id' }];
+    expect(latestReceiptOutcomeFor(log, 5)).toBeNull();
+  });
+
+  it('judges only the LATEST Receipt per issue — a re-run supersedes', () => {
+    const log = [
+      receiptRecord({
+        issueId: 5,
+        outcome: 'blocked',
+        id: 'receipt:05-thing:2026-07-03T09:00:00Z',
+        capturedAt: '2026-07-03T09:00:01.000Z',
+      }),
+      receiptRecord({
+        issueId: 5,
+        outcome: 'needs-verification',
+        id: 'receipt:05-thing:2026-07-03T10:00:00Z',
+        capturedAt: '2026-07-03T10:00:01.000Z',
+      }),
+    ];
+    expect(latestReceiptOutcomeFor(log, 5)).toBe('needs-verification');
+    // Order-independent: the newest capturedAt wins regardless of log order.
+    expect(latestReceiptOutcomeFor([...log].reverse(), 5)).toBe('needs-verification');
   });
 });
 
