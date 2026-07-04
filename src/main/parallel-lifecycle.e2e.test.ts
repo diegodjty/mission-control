@@ -281,7 +281,10 @@ describe('parallel lifecycle — real git + real afk-merge.sh, report vs. truth'
     expect(merge.message).not.toMatch(/uncommitted changes/i);
   });
 
-  it('auto-commit-failure is surfaced (not swallowed) and reads as commit-failed (finding 22/corr-5)', async () => {
+  // 15s timeout: passes in ~1s isolated, but real-git tests in this file accrue
+  // ~1s/test of per-process drag (macOS fsevents churn on the temp repos), which
+  // pushed this fourth-in-file test past the 5s default. Issue 67 tracks the drag.
+  it('auto-commit-failure is surfaced (not swallowed) and reads as commit-failed (finding 22/corr-5)', { timeout: 15_000 }, async () => {
     // A finished isolated Run whose auto-commit FAILS. We force a real git commit
     // failure with a non-zero pre-commit hook (shared across worktrees via the
     // common git dir), so this exercises the real adapter, not a mock.
