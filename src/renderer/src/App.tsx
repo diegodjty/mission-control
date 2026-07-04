@@ -47,6 +47,13 @@ import {
 } from '../../shared/dispatcher-synthesis';
 import { isRealCapture, isStrongOverlap } from '../../shared/dispatcher-noise-floor';
 import {
+  narrativeChannelFor,
+  narrativeKindForLifecycle,
+  narrativeKeyFor,
+  sessionSeenRecordId,
+  type NarrativeEventKind,
+} from '../../shared/dispatcher-narrative';
+import {
   reconcileStatusModel,
   renderStatusModel,
   debounceStatusModel,
@@ -318,14 +325,28 @@ export function App(): JSX.Element {
     sessionId: string | null;
   } | null>(null);
   const dispatcherFed = useRef<Set<string>>(new Set<string>());
-  // Which Runs' Completion blocks the Dispatcher SESSION has been given via the
-  // on-ask digest (issue 61) — distinct from `dispatcherFed`, which guards the
-  // ambient-LOG cards the session never sees. Baselined at Dispatcher creation
-  // to the records already in the Run log (they predate the session's seed), so
-  // the digest carries only what reported in since; ids are added only once a
-  // digest actually rides an injection, so nothing is swallowed by a skipped
-  // ask. Cleared wherever `dispatcherFed` is.
-  const dispatcherDigested = useRef<Set<string>>(new Set<string>());
+  // The ONE "this session has seen it" set (issues 61 + 66, ADR-0014): which
+  // Runs' blocks the CURRENT Dispatcher session has been given — live (a
+  // narrative/park message the pump submitted or has queued) or via the on-ask
+  // digest. Shared by both paths so a digest ask never re-lists a Run the
+  // session was just narrated, and vice versa. Baselined at Dispatcher creation
+  // to the records already in the Run log (they predate the session's seed); a
+  // REPLACEMENT session (a brand-new claude conversation) resets it to that
+  // baseline so the digest catches the new session up. Distinct from
+  // `dispatcherFed`, which guards enqueueing once per Run per Dispatcher.
+  // Cleared wherever `dispatcherFed` is.
+  const dispatcherSessionSeen = useRef<Set<string>>(new Set<string>());
+  // The record ids that predate this Dispatcher's creation (issue 66) — what a
+  // replacement session's seen-set resets TO, so old drains' persisted blocks
+  // are never replayed while this drain's narrative is caught up via the digest.
+  const dispatcherDigestBaseline = useRef<Set<string>>(new Set<string>());
+  // Whether the current Dispatcher has already had a chat session attached —
+  // how `handleDispatcherSession` tells a REPLACEMENT (reset the seen-set) from
+  // the first spawn (the baseline from Dispatcher creation already applies).
+  const dispatcherHadSession = useRef<boolean>(false);
+  // Monotonic per-drain sequence, so each drain's stopped/halted narrative fact
+  // gets a stable, deduped delivery key (issue 66).
+  const drainSeq = useRef<number>(0);
   // The Dispatcher rail's width (issue 44): user-adjustable by dragging the
   // divider between the Map and the panel, within a sensible min/max, persisted
   // app-wide so it survives closing/reopening the panel and the app. Changing it
@@ -366,6 +387,15 @@ export function App(): JSX.Element {
   // notification died instead of inferring it. `relay` is silent → log channel.
   const noteDelivery = useCallback(
     (key: string, phase: DeliveryPhase, detail?: string): void => {
+      // ADR-0014 (issue 66): a submit always lands in the CURRENT session
+      // (issue 60's guarantee), so a delivered narrative / park message marks
+      // its Run as seen by this session — re-marking after a replacement
+      // session's reset, so the on-ask digest never re-lists a Run the pump
+      // just re-delivered.
+      if (phase === 'submitted') {
+        const seenId = sessionSeenRecordId(key);
+        if (seenId !== null) dispatcherSessionSeen.current.add(seenId);
+      }
       const label = oneLineNote(`Chat delivery ${phase}${detail ? ` (${detail})` : ''} — ${key}`);
       setDispatcherActivities((prev) => {
         const id = `delivery:${key}`;
@@ -501,7 +531,9 @@ export function App(): JSX.Element {
     // panel kills the session.
     setDispatcher(null);
     dispatcherFed.current.clear();
-    dispatcherDigested.current.clear();
+    dispatcherSessionSeen.current.clear();
+    dispatcherDigestBaseline.current.clear();
+    dispatcherHadSession.current = false;
     dispatcherPumpRef.current?.reset();
     dispatcherTyping.current = INITIAL_TYPING_STATE;
     setDispatcherActivities([]);
@@ -1238,10 +1270,10 @@ export function App(): JSX.Element {
         // took out of the session's reach. Ids are marked as given only once
         // the injection is actually enqueued; when there is no status model yet
         // nothing injects and the blocks stay pending for the next ask.
-        const digest = buildRunDigest(runLogRef.current, dispatcherDigested.current);
+        const digest = buildRunDigest(runLogRef.current, dispatcherSessionSeen.current);
         const snapshot = buildStatusSnapshotMessage(debouncedStatusModelRef.current, digest.text);
         if (snapshot !== null) {
-          for (const id of digest.digestedIds) dispatcherDigested.current.add(id);
+          for (const id of digest.digestedIds) dispatcherSessionSeen.current.add(id);
           statusInjectionSeq.current += 1;
           dispatcherPump.enqueue({
             key: `status-snapshot:${statusInjectionSeq.current}`,
@@ -1269,22 +1301,6 @@ export function App(): JSX.Element {
     [],
   );
 
-  // Drain the SOLO-path stray-Receipt adoptions (issue 62) into passive
-  // `receipt-adopt` notes. The adoptions are queued where the commit resolves
-  // (`commitSoloRun`, defined before `logNote` exists) and turned into ambient
-  // log lines here — one note per adoption batch, deduped by its file list.
-  useEffect(() => {
-    if (soloAdoptions.length === 0) return;
-    for (const files of soloAdoptions) {
-      logNote(
-        `receipt-adopt:solo:${files.join(',')}`,
-        'receipt-adopt',
-        `Adopted stray Receipt(s) on main: ${files.join(', ')}`,
-      );
-    }
-    setSoloAdoptions([]);
-  }, [soloAdoptions, logNote]);
-
   // Route one Dispatcher event to its channel (issue 48, ADR-0012). The pure,
   // tested `channelForAction` is the single decision: a `blocking`-tier action is
   // a conversational prompt typed into the chat PTY via the serialized pump —
@@ -1305,6 +1321,48 @@ export function App(): JSX.Element {
     [logNote, dispatcherPump],
   );
 
+  // Surface RUN NARRATIVE per ADR-0014 (issue 66): the pure, tested
+  // `narrativeChannelFor` decides whether this kind is a live message in the
+  // Dispatcher CONVERSATION (a finished Run's Completion block, an HITL park,
+  // a drain stopped/halted fact, adopted strays, finished-without-receipt) or
+  // a history-strip line only (blocked/stranded alerts, doc-drift, overlaps —
+  // the ADR-0012 noise floor stands). Either way the activity strip keeps its
+  // history line — it demotes to a scannable log, it doesn't go blind. A
+  // chat-bound Run message is immediately counted into the session-seen set
+  // (shared with the issue-61 digest) so an ask mid-delivery can't double-list
+  // it; `action` only labels the history note (narrative is never a gate — the
+  // ADR-0011 blocking list is untouched).
+  const surfaceNarrative = useCallback(
+    (kind: NarrativeEventKind, id: string, action: DispatcherAction, text: string): void => {
+      if (narrativeChannelFor(kind) === 'chat') {
+        dispatcherPump.enqueue({ key: id, text });
+        const seenId = sessionSeenRecordId(id);
+        if (seenId !== null) dispatcherSessionSeen.current.add(seenId);
+      }
+      logNote(id, action, text);
+    },
+    [logNote, dispatcherPump],
+  );
+
+  // Drain the SOLO-path stray-Receipt adoptions (issue 62) into narrative. The
+  // adoptions are queued where the commit resolves (`commitSoloRun`, defined
+  // before the surfacing helpers exist) and surfaced here — one per adoption
+  // batch, deduped by its file list. An adoption is a drain fact worth telling
+  // (ADR-0014, issue 66): a message in the Dispatcher conversation, plus the
+  // history line.
+  useEffect(() => {
+    if (soloAdoptions.length === 0) return;
+    for (const files of soloAdoptions) {
+      surfaceNarrative(
+        'strays-adopted',
+        `receipt-adopt:solo:${files.join(',')}`,
+        'receipt-adopt',
+        `Adopted stray Receipt(s) on main: ${files.join(', ')}`,
+      );
+    }
+    setSoloAdoptions([]);
+  }, [soloAdoptions, surfaceNarrative]);
+
   useEffect(() => {
     if ((dispatcher?.sessionId ?? null) === null) return;
     for (const rec of runLog) {
@@ -1321,20 +1379,29 @@ export function App(): JSX.Element {
       if (rec.outcome === 'unknown') continue;
       if (dispatcherFed.current.has(rec.id)) continue;
       dispatcherFed.current.add(rec.id);
-      // A finished Run's synthesis is a ROUTINE PASSIVE fact (ADR-0012, issue 48):
-      // it becomes a quiet line in the ambient activity log, NOT a message typed
-      // into the chat session. `surfaceEvent` routes it there via the tested
-      // `channelForAction` (synthesize is silent → log).
       const text = renderCompletionEvent(toCompletionEvent({ id: rec.id, record: rec }));
-      surfaceEvent(`synthesize:${rec.id}`, 'synthesize', text);
+      if (rec.outcome === 'completed') {
+        // ADR-0014 (issue 66): a finished Run's Completion block is RUN
+        // NARRATIVE — typed + submitted into the Dispatcher conversation live
+        // via the pump, one message per Run, replacing issue 48's ambient-only
+        // `synthesize` routing for narrative. The strip keeps its history line.
+        surfaceNarrative('run-completed', narrativeKeyFor(rec.id), 'synthesize', text);
+      } else {
+        // A blocked/parked block's substance rides its lifecycle surface
+        // instead (the blocking HITL park notice; the blocked alert + the
+        // drain-halted narrative fact), so the block itself stays a history
+        // line — never a second chat message for the same Run.
+        surfaceNarrative('run-blocked-alert', `synthesize:${rec.id}`, 'synthesize', text);
+      }
       // Cross-Run synthesis (issue 38, acceptance a): a block that reports doc-drift
-      // (a PRD/reality contradiction) surfaces as a plain-language note. Under
-      // ADR-0011 amending the plan is a passive (non-blocking) action, and under
-      // ADR-0012 that passive note renders in the ambient log — not the chat.
+      // (a PRD/reality contradiction) surfaces as a plain-language note. A
+      // SPECULATIVE signal, so it stays below the conversation bar (ADR-0014
+      // keeps the ADR-0012 noise floor): a history-strip note, never the chat.
       // Doc-drift free / "none" blocks add nothing.
       const [drift] = extractDocDrift([rec]);
       if (drift) {
-        surfaceEvent(
+        surfaceNarrative(
+          'doc-drift',
           `doc-drift:${rec.id}`,
           'amend-plan',
           `${describeDocDrift(drift)} — the plan may need amending to reconcile it.`,
@@ -1356,14 +1423,16 @@ export function App(): JSX.Element {
       const runs = group.runs
         .map((r) => (r.issueId !== null ? `issue ${String(r.issueId).padStart(2, '0')}` : r.runId))
         .join(', ');
-      // A cross-Run consolidation is a passive note (ADR-0012, issue 48) → log.
-      surfaceEvent(
+      // A cross-Run consolidation is a SPECULATIVE signal — history only
+      // (ADR-0014 keeps the ADR-0012 noise floor out of the conversation).
+      surfaceNarrative(
+        'cross-run-overlap',
         `overlap:${group.seam}`,
         'synthesize',
         `${group.runs.length} Runs touched ${group.seam} (${runs}) — consider a consolidated pass rather than treating each separately.`,
       );
     }
-  }, [runLog, dispatcher, surfaceEvent]);
+  }, [runLog, dispatcher, surfaceNarrative]);
 
   // --- Ground the Dispatcher's status picture in truth (issue 43) -----------
   // The Dispatcher's AUTHORITATIVE model of which issues are open/wip/done/
@@ -1485,28 +1554,42 @@ export function App(): JSX.Element {
       lifecycleReacted.current.add(key);
       const reaction = reactToLifecycleEvent(event);
       if (reaction.notification === null) continue;
-      // ADR-0012 (issue 48): route by the event's authority. A HITL gate awaiting
-      // sign-off is a blocking-approval prompt → the chat PTY; a blocked/stranded/
-      // needs-attention alert is a routine passive fact → the ambient log. Either
-      // way it is surfaced once, so a stuck or human-gated drain never stalls
-      // silently — it just no longer races the user's typing in the chat. The
-      // pump keeps a chat-tier notification queued across Dispatcher session
-      // replacement/death until it is really submitted (issue 60), so "surfaced
-      // once" here can never become "lost in transit" there.
+      // A HITL gate awaiting sign-off stays a BLOCKING-approval prompt → the
+      // chat PTY via the authority line (ADR-0011/0012, unchanged by ADR-0014);
+      // its delivered park notice also marks the Run as seen by this session,
+      // so the on-ask digest (issue 61) doesn't re-list it. Every other alert
+      // (blocked / stranded / needs-attention) routes through the narrative
+      // table — a history-strip line (its drain-halt fact is the chat message).
+      // Either way it is surfaced once, so a stuck or human-gated drain never
+      // stalls silently — and the pump keeps a chat-tier notification queued
+      // across Dispatcher session replacement/death until it is really
+      // submitted (issue 60), so "surfaced once" never becomes "lost in transit".
       // ADR-0011: discard-and-continue is not a blocking gate; the user discards a
       // blocked/stranded Run from the Map's Discard control, so no proposal here.
-      surfaceEvent(key, actionForLifecycle(event.kind), reaction.notification);
+      if (event.kind === 'hitl-waiting') {
+        if (surfaceEvent(key, actionForLifecycle(event.kind), reaction.notification)) {
+          dispatcherSessionSeen.current.add(event.runId);
+        }
+      } else {
+        surfaceNarrative(
+          narrativeKindForLifecycle(event.kind),
+          key,
+          actionForLifecycle(event.kind),
+          reaction.notification,
+        );
+      }
     }
-  }, [runLog, worktreeRunStates, dispatcher, backlog, surfaceEvent]);
+  }, [runLog, worktreeRunStates, dispatcher, backlog, surfaceEvent, surfaceNarrative]);
 
   // --- The honest signals that replaced the scroll scrape (issue 57) --------
   // (a) finished-without-receipt: ground truth (the issue's `done` flip / a
   // session ending unfinished) says a Run ended, but no Receipt exists for it.
-  // Exactly ONE passive note per Run ("peek at the Pane") lands in the ambient
-  // log — never a scrape of the tail buffer, never a guess (ADR-0013). The
-  // audit waits a grace window and re-checks the LIVE Run log first, so a
-  // Receipt that lands a beat after the flip surfaces as a normal card and no
-  // note fires.
+  // Exactly ONE honest line per Run ("peek at the Pane") — never a scrape of
+  // the tail buffer, never a guess (ADR-0013). Under ADR-0014 (issue 66) this
+  // is a drain fact worth telling: it lands in the Dispatcher CONVERSATION as
+  // a message (plus the history line) — a fact, not a gate. The audit waits a
+  // grace window and re-checks the LIVE Run log first, so a Receipt that lands
+  // a beat after the flip surfaces as a normal card and no note fires.
   useEffect(() => {
     if (projectPath === null) return;
     const audited = auditMissingReceipts(
@@ -1534,8 +1617,10 @@ export function App(): JSX.Element {
         }
         const reaction = reactToLifecycleEvent(event);
         if (reaction.notification !== null) {
-          // `finished-without-receipt` → relay → the ambient log, not the chat.
-          surfaceEvent(
+          // `finished-without-receipt` → a narrative message in the chat
+          // (ADR-0014) + the history line. `relay` labels the note only.
+          surfaceNarrative(
+            narrativeKindForLifecycle(event.kind),
             `${event.kind}:${event.runId}`,
             actionForLifecycle(event.kind),
             reaction.notification,
@@ -1543,7 +1628,7 @@ export function App(): JSX.Element {
         }
       }, RECEIPT_AUDIT_GRACE_MS);
     }
-  }, [runs, runLog, projectPath, runStatusOf, surfaceEvent]);
+  }, [runs, runLog, projectPath, runStatusOf, surfaceNarrative]);
 
   // (b) Receipt/state mismatch (ADR-0013 trust hierarchy): the latest Receipt's
   // declared narrative disagrees with git's ground truth (e.g. Receipt says
@@ -1570,11 +1655,12 @@ export function App(): JSX.Element {
           mismatchSurfaced.current.delete(key);
           return;
         }
-        // `relay` is a routine passive fact → the ambient log (ADR-0012).
-        surfaceEvent(key, 'relay', describeReceiptMismatch(still));
+        // A Receipt/state disagreement is a routine fact → history only
+        // (ADR-0014 keeps it below the conversation bar).
+        surfaceNarrative('receipt-mismatch', key, 'relay', describeReceiptMismatch(still));
       }, RECEIPT_AUDIT_GRACE_MS);
     }
-  }, [runLog, debouncedStatusModel, projectPath, surfaceEvent]);
+  }, [runLog, debouncedStatusModel, projectPath, surfaceNarrative]);
 
   const startDrain = useCallback(
     (chosenCap: number): void => {
@@ -1588,19 +1674,26 @@ export function App(): JSX.Element {
       setCap(Math.max(1, Math.floor(chosenCap) || 1));
       setDrainMessage('');
       setDraining(true);
+      // Each drain gets its own sequence so its stopped/halted narrative fact
+      // (issue 66) carries a stable, deduped delivery key.
+      drainSeq.current += 1;
       // Starting a drain spins up the Dispatcher for this Project (ADR-0010):
       // the conversational orchestrator that drives the drain and that you talk
       // to instead of watching every Pane. A single manual Run (startRun) does
       // NOT do this — it stays a bare Pane. Idempotent: one Dispatcher per
       // Project, so re-draining the same Project reuses the live one.
       if (projectPath !== null) {
-        // Baseline the on-ask digest (issue 61) when a FRESH Dispatcher is
-        // created: records already in the Run log predate this session's seed
+        // Baseline the session-seen set (issues 61 + 66) when a FRESH Dispatcher
+        // is created: records already in the Run log predate this session's seed
         // (a previous drain's persisted blocks), so they are "already given" —
-        // the digest carries only what reports in from here on. A re-drain
-        // that reuses the live Dispatcher keeps its digest bookkeeping intact.
+        // live narrative and the digest carry only what reports in from here on.
+        // The baseline is kept so a REPLACEMENT session can reset to it and
+        // catch up via the digest. A re-drain that reuses the live Dispatcher
+        // keeps its bookkeeping intact.
         if (dispatcher === null || dispatcher.target.projectPath !== projectPath) {
-          dispatcherDigested.current = new Set(runLogRef.current.map((rec) => rec.id));
+          dispatcherDigestBaseline.current = new Set(runLogRef.current.map((rec) => rec.id));
+          dispatcherSessionSeen.current = new Set(dispatcherDigestBaseline.current);
+          dispatcherHadSession.current = false;
         }
         setDispatcher((cur) =>
           cur && cur.target.projectPath === projectPath
@@ -1618,8 +1711,12 @@ export function App(): JSX.Element {
 
   const stopDrain = useCallback((): void => {
     setDraining(false);
-    setDrainMessage('Drain stopped by you — in-flight Runs keep going.');
-  }, []);
+    const message = 'Drain stopped by you — in-flight Runs keep going.';
+    setDrainMessage(message);
+    // A drain stop is a lifecycle fact worth telling (ADR-0014, issue 66): a
+    // message in the Dispatcher conversation, plus the history line.
+    surfaceNarrative('drain-stopped', `drain-stopped:${drainSeq.current}`, 'relay', message);
+  }, [surfaceNarrative]);
 
   // Record the Dispatcher session's PTY id once its chat Pane spawns (issue 35),
   // so the ingest effect below can feed each Run's Completion block into it.
@@ -1630,6 +1727,17 @@ export function App(): JSX.Element {
   // forever (the stuck-compose stall).
   const handleDispatcherSession = useCallback(
     (sessionId: string): void => {
+      // A REPLACEMENT session is a brand-new claude conversation that heard
+      // none of the narrative delivered to its predecessor (issue 66): reset
+      // the session-seen set to the Dispatcher-creation baseline so the on-ask
+      // digest (issue 61) catches the new session up on everything this drain
+      // produced. Items the pump still redelivers into the new session re-mark
+      // themselves as seen when their submit lands (`noteDelivery`), so the
+      // digest never repeats them.
+      if (dispatcherHadSession.current) {
+        dispatcherSessionSeen.current = new Set(dispatcherDigestBaseline.current);
+      }
+      dispatcherHadSession.current = true;
       setDispatcher((cur) => (cur ? { ...cur, sessionId } : cur));
       dispatcherTyping.current = INITIAL_TYPING_STATE;
       dispatcherPump.attachSession(sessionId);
@@ -1653,7 +1761,9 @@ export function App(): JSX.Element {
   const dismissDispatcher = useCallback((): void => {
     setDispatcher(null);
     dispatcherFed.current.clear();
-    dispatcherDigested.current.clear();
+    dispatcherSessionSeen.current.clear();
+    dispatcherDigestBaseline.current.clear();
+    dispatcherHadSession.current = false;
     // Dropping the queue here is safe for blocking items: the fed/reacted sets
     // clear too, so a fresh Dispatcher re-derives and re-enqueues anything (e.g.
     // a still-parked HITL gate) that is still true from the Run log.
@@ -1755,6 +1865,10 @@ export function App(): JSX.Element {
     if (plan.drain.stop) {
       setDraining(false);
       setDrainMessage(plan.drain.message);
+      // A drain halt/finish is a lifecycle fact worth telling (ADR-0014, issue
+      // 66): a message in the Dispatcher conversation (why it ended — a blocked
+      // Run, nothing eligible, a mid-merge main), plus the history line.
+      surfaceNarrative('drain-halted', `drain-halted:${drainSeq.current}`, 'relay', plan.drain.message);
       return;
     }
 
@@ -1827,10 +1941,17 @@ export function App(): JSX.Element {
           addRuns(() => projectPath);
         } else {
           setDraining(false);
-          setDrainMessage(
+          const message =
             'Isolation failed while starting parallel Runs — stopped to avoid ' +
-              'running multiple agents on main. Resolve the worktree/git error, ' +
-              'then start the drain again.',
+            'running multiple agents on main. Resolve the worktree/git error, ' +
+            'then start the drain again.';
+          setDrainMessage(message);
+          // A halted drain is narrative (ADR-0014, issue 66) → the conversation.
+          surfaceNarrative(
+            'drain-halted',
+            `drain-halted:isolation:${drainSeq.current}`,
+            'relay',
+            message,
           );
         }
       });
@@ -1840,7 +1961,7 @@ export function App(): JSX.Element {
     };
     // `runLog` is a dependency so a Receipt that lands a beat after its session
     // exits re-plans the drain with the park now visible (issue 64).
-  }, [draining, backlog, runs, cap, projectPath, midMerge, runStatusOf, isIsolated, runLog]);
+  }, [draining, backlog, runs, cap, projectPath, midMerge, runStatusOf, isIsolated, runLog, surfaceNarrative]);
 
   // --- Merge readiness (issue 08, ADR-0002; issue 16) ---------------------
   // Whether a human-triggered Merge is offered — and which branches it targets —
@@ -1880,12 +2001,15 @@ export function App(): JSX.Element {
       .then((result) => {
         setMergeDisplay(mergeResultDisplay(result));
         if (auto) {
-          // A stray-Receipt adoption (issue 62) is a passive repair note: MC
-          // auto-committed known artifacts (dirty files under
-          // `issues/completions/` on main) so the preflight could proceed —
-          // record WHAT was adopted; unknown dirt still halts below.
+          // A stray-Receipt adoption (issue 62) is a repair MC did on its own:
+          // it auto-committed known artifacts (dirty files under
+          // `issues/completions/` on main) so the preflight could proceed.
+          // A drain fact worth telling (ADR-0014, issue 66) — a message in the
+          // Dispatcher conversation, plus the history line; unknown dirt still
+          // halts below.
           if (result.adopted !== undefined && result.adopted.length > 0) {
-            logNote(
+            surfaceNarrative(
+              'strays-adopted',
               `receipt-adopt:${sig}:${result.adopted.join(',')}`,
               'receipt-adopt',
               `Adopted stray Receipt(s) on main: ${result.adopted.join(', ')}`,
@@ -1955,7 +2079,7 @@ export function App(): JSX.Element {
         );
       })
       .finally(() => setMerging(false));
-  }, [projectPath, merging, mergePlan, logNote, surfaceEvent]);
+  }, [projectPath, merging, mergePlan, logNote, surfaceEvent, surfaceNarrative]);
 
   // The manual Map Merge button — the unchanged, human-triggered path (ADR-0002).
   const runMerge = useCallback((): void => runMergeCore(false), [runMergeCore]);

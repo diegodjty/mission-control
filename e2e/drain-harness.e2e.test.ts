@@ -34,6 +34,13 @@
  *                            drain's remaining issues.
  *   6. Dirty non-Receipt   — a foreign dirty file on main halts TRUTHFULLY:
  *                            no merge, no auto-commit, no fake conflict.
+ *   7. Run narrative       — ADR-0014 (issue 66): a mixed drain delivers ONE
+ *                            conversation message per finished Run (the block,
+ *                            heading + What-changed) plus the HITL park notice
+ *                            and the drain-ended fact — all via the pump,
+ *                            surviving a mid-drain session replacement; the
+ *                            on-ask digest never repeats what the session saw
+ *                            live, and a replacement session catches up via it.
  *
  * Checklist items that genuinely need the live Electron shell are declared
  * `manual-only` at the bottom (as named, skipped specs) — zero silent gaps.
@@ -65,6 +72,18 @@ import {
   reactToLifecycleEvent,
 } from '../src/shared/dispatcher-lifecycle';
 import { channelForAction } from '../src/shared/dispatcher-channel';
+import { classifyAuthority } from '../src/shared/dispatcher-authority';
+import {
+  narrativeChannelFor,
+  narrativeKindForLifecycle,
+  narrativeKeyFor,
+  sessionSeenRecordId,
+} from '../src/shared/dispatcher-narrative';
+import {
+  renderCompletionEvent,
+  toCompletionEvent,
+} from '../src/shared/dispatcher-input-contract';
+import { buildRunDigest } from '../src/shared/dispatcher-status-model';
 import { createDispatcherPump, type DeliveryPhase } from '../src/shared/dispatcher-pump';
 import {
   auditMissingReceipts,
@@ -686,12 +705,15 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
       expect(events[0].kind).toBe('finished-without-receipt');
       expect(events[0].issueId).toBe(4);
 
-      // It surfaces as one passive ambient-log note — no scrape, no junk entry,
-      // and NOT a chat interruption.
+      // It surfaces as ONE honest line — no scrape, no junk entry. Under
+      // ADR-0014 (issue 66) a missing Receipt is a drain fact worth telling:
+      // it is chat NARRATIVE (a message in the conversation) while remaining a
+      // non-blocking relay — a fact, never a gate.
       const reaction = reactToLifecycleEvent(events[0]);
       expect(reaction.notification).toContain('finished without a receipt');
       expect(reaction.proactive).toBe(false);
-      expect(channelForAction(actionForLifecycle(events[0].kind))).toBe('log');
+      expect(narrativeChannelFor(narrativeKindForLifecycle(events[0].kind))).toBe('chat');
+      expect(classifyAuthority(actionForLifecycle(events[0].kind))).not.toBe('blocking');
     });
 
     it('a die-mid-exit Worker does not stall the drain\'s remaining issues', async () => {
@@ -761,6 +783,189 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
     expect(await isMidMerge(repo)).toBe(false);
     const facts = await scanAfkBranches(repo);
     expect(facts.find((f) => f.slug === six.slug)?.mergedIntoMain).toBe(false);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Scenario 7 — run narrative lands in the Dispatcher CONVERSATION (issue 66,
+  // ADR-0014). The same cap-1 lingering mixed drain as Scenario 3, but with the
+  // chat wired: each finished Run's Completion block is typed + submitted into
+  // the Dispatcher session as ONE message via the real pump, the HITL park
+  // notice arrives the same way, and the drain's ending is a spoken fact — all
+  // surviving a mid-drain session replacement. Live delivery and the on-ask
+  // digest (issue 61) share one "session has seen it" set: a digest ask after
+  // live delivery repeats nothing, and a replacement session (a brand-new
+  // claude conversation) catches up on what it missed via the digest.
+  // ---------------------------------------------------------------------------
+  it('Scenario 7: run narrative — live blocks + park notice + drain fact into the conversation; digest is catch-up only', async () => {
+    ingestFrom(sandbox.issuesDir);
+
+    const pty = new FakePty();
+    pty.create('S1');
+    pty.create('S2');
+    // The ONE shared "this session has seen it" set (issues 61 + 66): marked on
+    // enqueue of a narrative/park message (as App.tsx marks it) and re-marked by
+    // the delivery hook when a submit lands — which is what repairs the set
+    // after a session replacement requeues and re-delivers an item.
+    let sessionSeen = new Set<string>();
+    const pump = createDispatcherPump({
+      write: pty.write,
+      canFlush: () => true,
+      onDelivery: (key, phase) => {
+        if (phase !== 'submitted') return;
+        const recId = sessionSeenRecordId(key);
+        if (recId !== null) sessionSeen.add(recId);
+      },
+    });
+    pump.attachSession('S1');
+
+    // Route one ingested record exactly the way App.tsx does under ADR-0014:
+    // completed → the rendered block as chat narrative; HITL park → the
+    // blocking notice (unchanged authority path). Both count as session-seen.
+    const narrate = (rec: RunLogRecord, hitl: boolean): void => {
+      const kind = lifecycleKindForOutcome(rec.outcome, hitl);
+      if (kind === 'finished') {
+        expect(narrativeChannelFor(narrativeKindForLifecycle(kind))).toBe('chat');
+        pump.enqueue({
+          key: narrativeKeyFor(rec.id),
+          text: renderCompletionEvent(toCompletionEvent({ id: rec.id, record: rec })),
+        });
+        sessionSeen.add(rec.id);
+      } else if (kind === 'hitl-waiting') {
+        const reaction = reactToLifecycleEvent({
+          kind,
+          runId: rec.id,
+          issueId: rec.issueId,
+          slug: rec.slug,
+          title: rec.title,
+          detail: rec.detail,
+        });
+        expect(channelForAction(actionForLifecycle(kind))).toBe('chat');
+        pump.enqueue({ key: `hitl-waiting:${rec.id}`, text: reaction.notification! });
+        sessionSeen.add(rec.id);
+      }
+    };
+
+    // Drive the cap-1 lingering mixed drain (Scenario 3's loop), narrating each
+    // Run as its Receipt lands. After 03 finishes, the Dispatcher session is
+    // REPLACED — a brand-new claude conversation: the seen-set resets to the
+    // drain-start baseline (empty here: no records predate this drain), which is
+    // App.tsx's replacement rule.
+    const exits = new Map<number, WorkerExit>([
+      [2, 'completed'],
+      [3, 'completed'],
+      [4, 'completed'],
+      [5, 'needs-verification'],
+      [6, 'completed'],
+      [7, 'completed'],
+    ]);
+    const terminal: ActiveRun[] = [];
+    let stop: DrainPlan['drain'] | null = null;
+    for (let round = 0; round < 10; round++) {
+      const backlog = await readBacklog(repo);
+      const plan = planDrain({ issues: backlog.issues, maxConcurrent: 1, activeRuns: terminal });
+      if (plan.drain.stop) {
+        stop = plan.drain;
+        break;
+      }
+      const id = plan.startable[0];
+      if (id === undefined) break;
+      const issue = sandboxIssue(id);
+      const trace = await runFakeWorker({
+        repo,
+        issue,
+        exit: exits.get(id) ?? 'completed',
+        linger: true,
+      });
+      const record = await waitForReceipt(id);
+      const after = await readBacklog(repo);
+      narrate(record, after.issues.find((i) => i.id === id)?.hitl ?? false);
+      await waitFor(() => pump.pending() === 0, `narrative for issue ${id} delivered`);
+      const status = deriveRunStatus({
+        sessionAlive: trace.sessionAlive,
+        stoppedByUser: false,
+        issueStatus: after.issues.find((i) => i.id === id)?.status ?? null,
+        receiptOutcome: record.outcome,
+      });
+      if (status === 'finished') await commitFinishedMain(repo, issue.slug);
+      terminal.push({ issueId: id, status, receiptOutcome: record.outcome });
+      if (id === 3) {
+        // Mid-drain session replacement (issue 60 churn): S1 dies, S2 attaches.
+        pty.kill('S1');
+        pump.attachSession(null);
+        pump.attachSession('S2');
+        sessionSeen = new Set();
+      }
+    }
+
+    // The drain ended because nothing eligible remained — and its ending is a
+    // narrative fact spoken into the conversation (ADR-0014).
+    expect(stop).not.toBeNull();
+    expect(stop!.reason).toBe('no-eligible');
+    expect(narrativeChannelFor('drain-halted')).toBe('chat');
+    pump.enqueue({ key: 'drain-halted:1', text: stop!.message });
+    await waitFor(() => pump.pending() === 0, 'drain-ended fact delivered');
+
+    // --- One conversation message per finished Run, in finish order ---------
+    const s1 = pty.submittedMessages('S1');
+    const s2 = pty.submittedMessages('S2');
+    const all = [...s1, ...s2];
+    // 5 completed blocks + 1 park notice + 1 drain fact — and NOTHING else.
+    expect(all).toHaveLength(7);
+    const blockIdsOf = (msgs: string[]): string[] =>
+      msgs
+        .map((m) => /Completion block for issue (\d\d) \(completed\)/.exec(m)?.[1] ?? null)
+        .filter((id): id is string => id !== null);
+    for (const id of [2, 3, 4, 6, 7]) {
+      const label = String(id).padStart(2, '0');
+      const mine = all.filter((m) => m.includes(`Completion block for issue ${label} (completed)`));
+      expect(mine, `one message for issue ${label}`).toHaveLength(1);
+      // The block's substance rode along: heading + What-changed.
+      expect(mine[0]).toContain('What changed');
+      expect(mine[0]).toContain(sandboxIssue(id).title);
+    }
+    // Delivery survived the replacement: 02/03 into S1; everything after the
+    // churn — 04, the park notice, 06, 07, the drain fact — into S2, in order.
+    expect(blockIdsOf(s1)).toEqual(['02', '03']);
+    expect(blockIdsOf(s2)).toEqual(['04', '06', '07']);
+    const park = s2.find((m) => m.includes('HITL gate waiting'));
+    expect(park).toBeDefined();
+    expect(park!).toContain('05');
+    expect(park!).toContain('manual verification');
+    expect(s2.indexOf(park!)).toBeLessThan(
+      s2.findIndex((m) => m.includes('Completion block for issue 06')),
+    );
+    expect(s2[s2.length - 1]).toContain('no eligible issue remains');
+
+    // --- The noise floor stands: nothing else reached the conversation ------
+    expect(records.every((r) => r.outcome !== 'unknown' && isRealCapture(r))).toBe(true);
+    expect(all.some((m) => m.includes('Ground-truth status'))).toBe(false);
+    expect(narrativeChannelFor('status-refresh')).toBe('history');
+    expect(narrativeChannelFor('doc-drift')).toBe('history');
+    expect(narrativeChannelFor('cross-run-overlap')).toBe('history');
+
+    // --- Blocking-approval behavior unchanged (the ADR-0011 three-item list) -
+    expect(classifyAuthority('merge-conflict')).toBe('blocking');
+    expect(classifyAuthority('abort-drain')).toBe('blocking');
+    expect(classifyAuthority('hitl-signoff')).toBe('blocking');
+    expect(channelForAction('merge-conflict')).toBe('chat');
+
+    // --- The digest is catch-up only (issues 61 + 66) ------------------------
+    await Promise.all(appends);
+    const newestFirst = [...records].reverse();
+    // S2 saw 04/05/06/07 live; 02/03 were delivered only to the DEAD S1 — the
+    // digest catches the replacement session up on exactly those, no repeats.
+    const digest = buildRunDigest(newestFirst, sessionSeen);
+    expect(digest.text).not.toBeNull();
+    expect(digest.text!).toContain('issue 02');
+    expect(digest.text!).toContain('issue 03');
+    for (const label of ['04', '05', '06', '07']) {
+      expect(digest.text!, `digest must not repeat issue ${label}`).not.toContain(
+        `issue ${label}`,
+      );
+    }
+    // Once given, a further ask repeats nothing.
+    for (const id of digest.digestedIds) sessionSeen.add(id);
+    expect(buildRunDigest(newestFirst, sessionSeen).text).toBeNull();
   });
 });
 
