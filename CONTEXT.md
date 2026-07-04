@@ -11,8 +11,9 @@ _Avoid_: dashboard (too narrow — it also controls), orchestrator (implies head
 **Window**:
 One view onto the single backend, scoped to one **Project**. Multiple windows run at once (billing in one, vapi in another) without a second backend — no port collisions, no double-managing a repo.
 
-**Project**:
-A first-class entry in Mission Control's registry — a repo path with its own backlog, pipeline stage, and Runs. The backend owns *many* Projects; each **Window** shows one.
+**Project** (redefined by ADR-0015):
+A first-class entry in Mission Control's registry — a **Workbench** entry (backlog, Receipts, PRDs, memory) referencing **one or more code repos** (`repos:` map + `default_repo` in its CONFIG). An issue targets exactly one repo via optional `repo:` frontmatter (omitted = default); cross-repo work is a `depends_on` chain, never one multi-repo issue. The backend owns *many* Projects; each **Window** shows one.
+_Avoid_: "repo" as a synonym for Project — a Project may span several repos.
 
 **Map**:
 The structured, birds-eye view of a backlog — issue statuses (open/wip/done), the dependency graph, git state, and completion blocks. Rendered from the **artifacts on disk**, never from a live agent stream.
@@ -27,7 +28,11 @@ One issue being worked in one **Pane** — a single fresh Claude Code session cl
 _Avoid_: job, task (task = the issue itself, not the act of working it).
 
 **Artifacts**:
-The on-disk files the **Map** reads: `issues/NN-slug.md` (status/depends_on frontmatter), `issues/CONFIG.md`, git history, and **Receipts** (the on-disk carrier of the completion blocks the afk-issue-runner emits).
+The on-disk files the **Map** reads: `issues/NN-slug.md` (status/depends_on frontmatter), the project CONFIG, git history, and **Receipts** (the on-disk carrier of the completion blocks the afk-issue-runner emits). Pipeline artifacts live in the **Workbench** (ADR-0015); a legacy in-repo `issues/` layout remains supported (QA sandbox, external skill users).
+
+**Workbench** (ADR-0015):
+The ecosystem's data layer: ONE private git repo (`~/Workbench/`) holding every Project's pipeline artifacts (PRD, issues, Receipts, HUMAN-SETUP, CONFIG) and `memory/` (CORE.md — curated, capped, injected into every Worker/Dispatcher/bare session — plus topics/ and journal/), a `registry.md` mapping repo paths → Projects, and reserved folders for future tools. Code-describing docs (CONTEXT.md, ADRs) stay with the code. MC auto-commits it per Run event; push is manual; single-machine by construction (two machines ⇒ design claim sync first). An Obsidian vault at its root is the human browsing lens — **a lens, never a dependency**.
+_Avoid_: vault (that's Obsidian's word for its viewer window, not the system).
 
 **Execution view**:
 The Mission Control surface for running a backlog — the **Map** plus parallel **Panes** plus the **Merge** action.
@@ -45,8 +50,8 @@ A **Run**'s Pane session, seen from the **Dispatcher**'s perspective — a fresh
 **Completion block**:
 The structured summary a **Worker** emits when its Run ends (what changed / try-it / verified / bookkeeping / doc-drift). Carried by a **Receipt** and fed to the **Dispatcher** (see the **Run log**). This — not the raw Pane scroll — is what the Dispatcher holds.
 
-**Receipt** (ADR-0013):
-The on-disk carrier of a **Completion block**: `issues/completions/NN-slug.md`, committed, one per issue (latest Run wins). YAML frontmatter declares the machine-facing facts (`issue`, `slug`, `outcome: completed | needs-verification | blocked`, `finished`); the body is the verbatim block. Written by the **Worker** at *every* exit — finish, HITL park, or blocked — per the afk-issue-runner skill (producer-owned contract). Receipts are the **sole capture input**: the live Pane scroll is never parsed (peek/debug only). Trust hierarchy: git/issue frontmatter is ground truth for *state*; the Receipt is ground truth for *narrative*. A Run that ends with no Receipt surfaces as one explicit passive note, never a scrape. Intended as the standard result-handoff pattern for future companion tools.
+**Receipt** (ADR-0013, location per ADR-0015):
+The on-disk carrier of a **Completion block**: `~/Workbench/<project>/completions/NN-slug.md` (legacy layout: `issues/completions/` in-repo), committed, one per issue (latest Run wins). YAML frontmatter declares the machine-facing facts (`issue`, `slug`, `outcome: completed | needs-verification | blocked`, `finished`); the body is the verbatim block. Written by the **Worker** at *every* exit — finish, HITL park, or blocked — per the afk-issue-runner skill (producer-owned contract). Receipts are the **sole capture input**: the live Pane scroll is never parsed (peek/debug only). Trust hierarchy: git/issue frontmatter is ground truth for *state*; the Receipt is ground truth for *narrative*. A Run that ends with no Receipt surfaces as one explicit passive note, never a scrape. Intended as the standard result-handoff pattern for future companion tools.
 _Avoid_: completion file, run report, capture (the thing captured is the block; the Receipt is the artifact).
 
 **Run log**:
