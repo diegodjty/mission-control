@@ -7,7 +7,7 @@ depends_on: []
 
 ## Source
 
-Dispatcher forensics, 2026-07-03: `parallel-lifecycle.e2e.test.ts > auto-commit-failure…` runs in ~1s isolated but slows cumulatively when preceded by the file's other real-git tests (~1s of added wall-clock per preceding test; >5s after three → timed out at the old 5s default). Fresh temp repo per test, so it is per-process/environment drag, not shared state. Issue 63's harness independently hit macOS FSEvents dropping events during watcher startup. The timeout was raised to 15s with a pointing comment as a stopgap.
+Dispatcher forensics, 2026-07-03. Measured: `parallel-lifecycle.e2e.test.ts > auto-commit-failure…` takes **0.9s isolated**, **5.3s** with one concurrent test file, **~32s** under the full 55-file parallel suite — pure load-proportional git-spawn slowdown (the test issues ~50 sequential git spawns). Ruled out: shared repo state (fresh mkdtemp per test), thread-pool starvation (`--pool=forks` fails identically), Spotlight indexing (`.noindex` temp parent — kept, but no effect). Stopgap in place: 60s timeout on that test with a pointing comment. Issue 63's harness independently hit macOS FSEvents flakiness during watcher startup.
 
 ## What to build
 

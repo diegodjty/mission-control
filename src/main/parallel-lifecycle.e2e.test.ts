@@ -109,7 +109,12 @@ async function finishInWorktree(
 }
 
 beforeEach(async () => {
-  scratch = await mkdtemp(join(tmpdir(), 'mc-e2e-'));
+  // `.noindex` parent: Spotlight/fseventsd churn on tmp-dir file storms is what
+  // makes these real-git tests load-proportionally slow under a parallel suite
+  // (issue 67); a .noindex ancestor excludes them from indexing.
+  const noindex = join(tmpdir(), 'mc-tests.noindex');
+  await mkdir(noindex, { recursive: true });
+  scratch = await mkdtemp(join(noindex, 'mc-e2e-'));
   repo = join(scratch, 'repo');
   await mkdir(join(repo, 'issues'), { recursive: true });
   await git(repo, 'init', '-b', 'main');
@@ -281,10 +286,12 @@ describe('parallel lifecycle — real git + real afk-merge.sh, report vs. truth'
     expect(merge.message).not.toMatch(/uncommitted changes/i);
   });
 
-  // 15s timeout: passes in ~1s isolated, but real-git tests in this file accrue
-  // ~1s/test of per-process drag (macOS fsevents churn on the temp repos), which
-  // pushed this fourth-in-file test past the 5s default. Issue 67 tracks the drag.
-  it('auto-commit-failure is surfaced (not swallowed) and reads as commit-failed (finding 22/corr-5)', { timeout: 15_000 }, async () => {
+  // 60s timeout: passes in ~1s isolated, but this test's ~50 sequential git
+  // spawns are extremely load-sensitive — per-spawn cost balloons under the
+  // full suite's parallel real-git workers (5x with ONE concurrent file, >15x
+  // suite-wide). The logic is proven by the isolated run; issue 67 owns the
+  // real fix (worker cap / low-parallelism config for real-git suites).
+  it('auto-commit-failure is surfaced (not swallowed) and reads as commit-failed (finding 22/corr-5)', { timeout: 60_000 }, async () => {
     // A finished isolated Run whose auto-commit FAILS. We force a real git commit
     // failure with a non-zero pre-commit hook (shared across worktrees via the
     // common git dir), so this exercises the real adapter, not a mock.
