@@ -1,0 +1,21 @@
+---
+issue: 63
+slug: 63-e2e-drain-harness-checklist-as-code
+outcome: completed
+finished: 2026-07-04T03:10:00Z
+---
+## Completed issue 63 — e2e-drain-harness-checklist-as-code
+
+**What changed** — The QA walkthrough that three humans in a row had to fail by hand is now a machine check. A new `npm run test:e2e` command drives the whole drain end-to-end against real infrastructure — a throwaway git repo seeded exactly like the QA sandbox, the real Receipt file-watcher, real worktrees and the real merge script, and the real notification pipeline typing into a scripted fake chat terminal. The "Workers" are small deterministic scripts (no AI anywhere) that can be told to misbehave in the four known ways: write their Receipt into the wrong checkout, write no Receipt at all, write the Receipt but die before committing, or flip the issue done and vanish. All six checklist items from walkthrough 58 run as named scenarios, and the handful of things only a live app window can show (how cards and notifications actually look on screen) are listed by name in the suite output as manual-only — so nothing is silently uncovered. From now on the rule is: the machine passes this suite before a human is ever asked to walk through it.
+
+**Try it yourself**
+1. `cd /Users/devteam/Developer/mission-control`
+2. `source ~/.nvm/nvm.sh && nvm use 22`
+3. `npm run test:e2e` — you should see 9 passed, 4 skipped in ~5s. The passing names read as the walkthrough checklist (Scenario 1 solo Receipt … Scenario 6 truthful halt); the 4 skipped are the declared `manual-only:` items with their reasons in the name.
+4. To see the suite guard the issue-62 fix: in `src/main/run-merge.ts` temporarily replace the line `const adoption = await adoptStrayReceipts(projectPath);` with `const adoption = { adopted: [] as string[], error: null };`, run `npx vitest run --config vitest.e2e.config.ts -t 'stray Receipt'` — it fails ("expected true to be false" on `result.ok`); revert the line and it passes again.
+
+**Verified** — Ran `npm run test:e2e` 20+ times: 9 scenarios pass, including one stress loop of 10 consecutive full-suite runs, all green (one early flake was diagnosed to macOS FSEvents dropping events during watcher startup — a test-timing artifact, not a product bug — and fixed with the app's own recovery pattern, a deduped re-point scan, then re-stressed 10/10 green). Proved acceptance criterion 3 by actually reverting issue 62's adoption call: the stray-receipt scenario went red on `result.ok`, then green again after restoring it. Full unit suite (725 tests, 54 files) and `npm run type-check` pass. Not runtime-verified in the live Electron shell — that's exactly the residue the suite declares as its four `manual-only` items.
+
+**Bookkeeping** — New files: `e2e/drain-harness.e2e.test.ts` (the six named scenarios + declared manual-only specs), `e2e/fake-worker.ts` (scripted Worker driver: three skill exits × misbehavior modes `none` / `receipt-to-wrong-checkout` / `no-receipt` / `receipt-before-commit` / `die-mid-exit`), `e2e/sandbox.ts` (QA-sandbox-shaped temp git repo, FakePty that records typed/submitted chat writes, wait helpers), `vitest.e2e.config.ts`. Edited: `package.json` (adds `test:e2e`), `tsconfig.node.json` (type-checks `e2e/`), `issues/CONFIG.md` (documents the command + the "machine passes before human walkthrough" rule). No product source was changed. All four misbehavior modes are exercised in the passing suite (stray-receipt and no-receipt per the acceptance minimum, plus receipt-before-commit in Scenario 4 and die-mid-exit in Scenario 5).
+
+**Doc drift** — One behavior worth knowing, faithfully encoded rather than papered over: the Run Coordinator stops the whole drain when a Run ends `blocked`, and a parked HITL Run derives as `blocked` (session ended, issue still `wip`) — so a cap-1 mixed drain stops at the HITL park (Scenario 3 asserts `started == [2,3,4,5]` with 6/7 left queued). Walkthrough 58's wording ("let the drain reach the parked HITL issue") is consistent with this, but if the intent for issue 58's live run is that a drain should *continue past* a parked HITL issue, that's a coordinator behavior gap to raise before the walkthrough. May affect issue 58's sign-off expectations; no other open issue affected.

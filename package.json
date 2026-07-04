@@ -16,7 +16,8 @@
     "type-check:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "type-check:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "type-check": "npm run type-check:node && npm run type-check:web",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts"
   },
   "dependencies": {
     "node-pty": "^1.0.0"

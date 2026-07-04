@@ -1,0 +1,599 @@
+/**
+ * E2E drain harness (issue 63) — walkthrough 58's checklist as code.
+ *
+ * Three human walkthroughs in a row failed on seam bugs 700 unit tests could
+ * not see, because the seams (watchers, timers, git, worktrees, PTY delivery)
+ * were only ever exercised by a human driving the live app. This suite drives
+ * the REAL modules against REAL infrastructure — a temp git repo seeded like
+ * the QA sandbox (`e2e/sandbox.ts`), the real Receipt watcher on the real
+ * filesystem, real worktrees and the real `afk-merge.sh` merge path, the real
+ * ingest → Run-log → lifecycle → pump pipeline (pumped into a scripted fake
+ * PTY that records what was typed and submitted). Workers are scripted and
+ * deterministic (`e2e/fake-worker.ts`) with configurable misbehavior modes.
+ * No LLM anywhere.
+ *
+ * Scenarios map 1:1 to walkthrough 58's checklist:
+ *   1. Solo Receipt        — one commit (deliverable + flip + Receipt); a
+ *                            Run-log record with a DECLARED outcome.
+ *   2. HITL notice         — park → `hitl-waiting` → notification DELIVERED
+ *                            (fake PTY saw typed + submitted), surviving a
+ *                            mid-queue session replacement (issue 60).
+ *   3. Zero ghosts         — a full mixed drain ingests zero unclassifiable
+ *                            records (incl. the blocked-exit Receipt).
+ *   4. Parallel mode       — Receipts ingested LIVE from worktrees pre-merge;
+ *                            a clean merge lands the Receipt files on main.
+ *   5. Misbehavior         — stray Receipt on main is ADOPTED and the merge
+ *                            proceeds (issue 62 — revert the adoption logic and
+ *                            the first assertion here goes red); a no-receipt
+ *                            Worker yields exactly ONE finished-without-receipt
+ *                            note; a die-mid-exit Worker does not stall the
+ *                            drain's remaining issues.
+ *   6. Dirty non-Receipt   — a foreign dirty file on main halts TRUTHFULLY:
+ *                            no merge, no auto-commit, no fake conflict.
+ *
+ * Checklist items that genuinely need the live Electron shell are declared
+ * `manual-only` at the bottom (as named, skipped specs) — zero silent gaps.
+ * Run this suite (`npm run test:e2e`) BEFORE any human walkthrough.
+ */
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { rm, appendFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { ReceiptWatcher } from '../src/main/receipt-watcher';
+import { RunLogStore } from '../src/main/run-log-store';
+import { readBacklog } from '../src/main/backlog-reader';
+import {
+  applyIsolation,
+  createWorktree,
+  readIsolatedIssueStatus,
+  commitFinishedMain,
+  worktreePathFor,
+  scanAfkBranches,
+  isMidMerge,
+} from '../src/main/git-worktree-adapter';
+import { mergeRuns, defaultMergeScriptPath } from '../src/main/run-merge';
+import { branchFor } from '../src/shared/isolation-policy';
+import { planDrain, type ActiveRun } from '../src/shared/run-coordinator';
+import { deriveRunStatus } from '../src/shared/run-state';
+import {
+  lifecycleKindForOutcome,
+  actionForLifecycle,
+  reactToLifecycleEvent,
+} from '../src/shared/dispatcher-lifecycle';
+import { channelForAction } from '../src/shared/dispatcher-channel';
+import { createDispatcherPump, type DeliveryPhase } from '../src/shared/dispatcher-pump';
+import { auditMissingReceipts, isReceiptRecord } from '../src/shared/receipt-audit';
+import { isRealCapture } from '../src/shared/dispatcher-noise-floor';
+import { parseReceipt } from '../src/shared/receipt-parser';
+import type { RunLogRecord } from '../src/shared/ipc-contract';
+import {
+  seedSandbox,
+  sandboxIssue,
+  git,
+  waitFor,
+  sleep,
+  FakePty,
+  type Sandbox,
+} from './sandbox';
+import { runFakeWorker, type WorkerExit } from './fake-worker';
+
+const SCRIPT = defaultMergeScriptPath();
+
+let sandbox: Sandbox;
+let repo: string;
+let watcher: ReceiptWatcher;
+let store: RunLogStore;
+
+/** Everything the live ingest edge produced this test, in arrival order. */
+let records: RunLogRecord[];
+/** The caller-owned dedupe map (seeded from the Run log on a "restart"). */
+let seen: Map<string, string | null>;
+/** Store appends in flight (awaited before reading the store back). */
+let appends: Promise<unknown>[];
+
+/** The `issues/` roots the current test watches (for recovery re-points). */
+let watchedDirs: string[];
+let rescans = 0;
+
+function onReceipt(record: RunLogRecord): void {
+  records.push(record);
+  appends.push(store.append(repo, record));
+}
+
+/** (Re)point the real Receipt watcher at the given `issues/` roots. */
+function ingestFrom(...issueDirs: string[]): void {
+  watchedDirs = issueDirs;
+  watcher.watch('project', issueDirs, seen, onReceipt);
+}
+
+/**
+ * Wait until the live edge has ingested a Receipt for the given issue id.
+ *
+ * Normally the recursive watch delivers within the debounce window. Under
+ * load, though, macOS FSEvents can DROP an event raised before its stream
+ * finished starting — a pure test-timing artifact (the harness writes Receipts
+ * milliseconds after attaching; in the app the watch is attached long before
+ * any Worker exits, and its reconcile re-points recover anything missed). So
+ * after a grace period this falls back to the app's own recovery pattern: a
+ * re-point whose initial scan re-reads what is already on disk, deduped by the
+ * shared `seen` map so nothing ever double-feeds.
+ */
+async function waitForReceipt(issueId: number): Promise<RunLogRecord> {
+  const ingested = (): boolean => records.some((r) => r.issueId === issueId);
+  for (let attempt = 0; attempt < 3 && !ingested(); attempt++) {
+    try {
+      await waitFor(ingested, `receipt for issue ${issueId} ingested`, 1500);
+    } catch {
+      watcher.watch(`project-rescan-${rescans++}`, watchedDirs, seen, onReceipt);
+    }
+  }
+  await waitFor(ingested, `receipt for issue ${issueId} ingested (after re-point scans)`, 2000);
+  return records.find((r) => r.issueId === issueId)!;
+}
+
+/** Current committed-history commit count on main. */
+async function commitCount(): Promise<number> {
+  return Number((await git(repo, 'rev-list', '--count', 'HEAD')).trim());
+}
+
+beforeEach(async () => {
+  sandbox = await seedSandbox();
+  repo = sandbox.repo;
+  // Fast (but real) debounce/stability timers so the suite stays quick while
+  // still exercising the genuine two-read stability loop.
+  watcher = new ReceiptWatcher({ debounceMs: 40, stabilityMs: 25 });
+  store = new RunLogStore(join(sandbox.scratch, 'store'));
+  records = [];
+  seen = new Map();
+  appends = [];
+});
+
+afterEach(async () => {
+  watcher.closeAll();
+  await rm(sandbox.scratch, { recursive: true, force: true });
+});
+
+describe('e2e drain harness — real modules, real infrastructure', () => {
+  it('the real afk-merge.sh exists where the skill installs it', () => {
+    expect(existsSync(SCRIPT)).toBe(true);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Scenario 1 — Solo Run: ONE commit containing deliverable + flip + Receipt;
+  // a Run-log record with a DECLARED outcome. (Walkthrough 58, "Solo Receipt".)
+  // ---------------------------------------------------------------------------
+  it('Scenario 1: solo Run → one commit (deliverable + flip + Receipt) and a declared Run-log record', async () => {
+    ingestFrom(sandbox.issuesDir);
+    const baseline = await commitCount();
+    const issue = sandboxIssue(2);
+    const finished = '2026-07-03T12:00:00.000Z';
+
+    // The Worker finishes issue 02 solo (uncommitted — MC owns the commit).
+    const trace = await runFakeWorker({ repo, issue, finished });
+    expect(trace.receiptPath).toBe(join(repo, 'issues', 'completions', `${issue.slug}.md`));
+
+    // The REAL watcher (real fs events, debounce, stability reads) ingests it,
+    // keyed on issue + `finished` (ADR-0013's dedupe identity).
+    const record = await waitForReceipt(2);
+    expect(record.id).toBe(`receipt:${issue.slug}:${finished}`);
+    expect(record.outcome).toBe('completed');
+    expect(record.whatChanged).toBeTruthy();
+    expect(record.tryIt).toBeTruthy();
+
+    // Declared, not inferred: classification is a frontmatter field read.
+    expect(parseReceipt(await readReceipt(issue.slug)).outcomeSource).toBe('declared');
+
+    // The record enters the durable Run log (real JSONL on disk) intact.
+    await Promise.all(appends);
+    const persisted = await store.read(repo);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].id).toBe(record.id);
+    expect(persisted[0].outcome).toBe('completed');
+    expect(isReceiptRecord(persisted[0])).toBe(true);
+
+    // MC observes the finished solo Run → exactly ONE run commit lands, holding
+    // the deliverable, the done flip AND the Receipt (issue 59's contract).
+    const outcome = await commitFinishedMain(repo, issue.slug);
+    expect(outcome.committed).toBe(true);
+    expect(outcome.error).toBeNull();
+    expect(await commitCount()).toBe(baseline + 1);
+    const committedFiles = await git(repo, 'show', '--name-only', '--pretty=format:', 'HEAD');
+    expect(committedFiles).toContain(`work/${issue.slug}.txt`);
+    expect(committedFiles).toContain(`issues/${issue.slug}.md`);
+    expect(committedFiles).toContain(`issues/completions/${issue.slug}.md`);
+    expect((await git(repo, 'status', '--porcelain')).trim()).toBe('');
+
+    // Ground truth agrees: the issue reads done from the real backlog reader.
+    const backlog = await readBacklog(repo);
+    expect(backlog.issues.find((i) => i.id === 2)?.status).toBe('done');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Scenario 2 — HITL Run parks → `hitl-waiting` derived → the notification is
+  // DELIVERED (fake PTY saw typed + submitted), surviving a mid-queue session
+  // replacement (issue 60's guarantee, end-to-end).
+  // ---------------------------------------------------------------------------
+  it('Scenario 2: HITL park → hitl-waiting → notification delivered through a session replacement', async () => {
+    ingestFrom(sandbox.issuesDir);
+    const issue = sandboxIssue(5);
+
+    // The Worker parks the HITL issue: stays wip, Receipt declares the park.
+    await runFakeWorker({ repo, issue, exit: 'needs-verification' });
+    const record = await waitForReceipt(5);
+    expect(record.outcome).toBe('needs-verification');
+    expect(record.detail).toContain('manual verification');
+
+    // Ground truth from the real backlog: 05 is wip and hitl.
+    const backlog = await readBacklog(repo);
+    const five = backlog.issues.find((i) => i.id === 5)!;
+    expect(five.status).toBe('wip');
+    expect(five.hitl).toBe(true);
+
+    // The pure chain the app composes: outcome + hitl flag → hitl-waiting →
+    // a blocking chat-tier prompt (never the ambient log).
+    const kind = lifecycleKindForOutcome(record.outcome, five.hitl);
+    expect(kind).toBe('hitl-waiting');
+    expect(actionForLifecycle(kind!)).toBe('hitl-signoff');
+    expect(channelForAction(actionForLifecycle(kind!))).toBe('chat');
+
+    const reaction = reactToLifecycleEvent({
+      kind: kind!,
+      runId: record.id,
+      issueId: record.issueId,
+      slug: record.slug,
+      title: null,
+      detail: record.detail,
+    });
+    expect(reaction.proactive).toBe(true);
+    expect(reaction.notification).toContain('HITL gate waiting');
+    expect(reaction.notification).toContain('05');
+
+    // Delivery through the REAL pump into a scripted chat PTY — with the
+    // Dispatcher session dying and being replaced MID-pump (issue 60).
+    const pty = new FakePty();
+    pty.create('dispatcher-A');
+    pty.create('dispatcher-B');
+    const phases: { key: string; phase: DeliveryPhase }[] = [];
+    const pump = createDispatcherPump({
+      write: pty.write,
+      canFlush: () => true,
+      onDelivery: (key, phase) => phases.push({ key, phase }),
+    });
+    pump.attachSession('dispatcher-A');
+
+    const key = `hitl-waiting:${record.id}`;
+    expect(pump.enqueue({ key, text: reaction.notification! })).toBe(true);
+    // Gate churn can't multiply one notification: same key won't double-queue.
+    expect(pump.enqueue({ key, text: reaction.notification! })).toBe(false);
+
+    // The pump has typed into A but NOT yet submitted (the submit write is a
+    // separate later step). Kill A mid-queue and attach the replacement.
+    pty.kill('dispatcher-A');
+    pump.attachSession(null);
+    pump.attachSession('dispatcher-B');
+
+    await waitFor(() => phases.some((p) => p.phase === 'submitted'), 'delivery to replacement session');
+
+    // Delivered: the REPLACEMENT session saw the message typed AND submitted.
+    const submitted = pty.submittedMessages('dispatcher-B');
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0]).toContain('HITL gate waiting');
+    expect(submitted[0]).toContain('05');
+    expect(submitted[0]).toContain('manual verification');
+    // The dead session never received a completed submit.
+    expect(pty.submittedMessages('dispatcher-A')).toHaveLength(0);
+    expect(pump.pending()).toBe(0);
+
+    // Delivery was observable end-to-end (issue 60 rule 3).
+    const seq = phases.filter((p) => p.key === key).map((p) => p.phase);
+    expect(seq[0]).toBe('queued');
+    expect(seq).toContain('requeued');
+    expect(seq[seq.length - 1]).toBe('submitted');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Scenario 3 — Zero unclassifiable records across a full mixed drain
+  // (completions, a dep-blocked issue unblocking, an HITL park, a blocked exit).
+  // ---------------------------------------------------------------------------
+  it('Scenario 3: a full mixed drain ingests zero unclassifiable records', async () => {
+    ingestFrom(sandbox.issuesDir);
+
+    // Drive the drain the way the app does: re-plan with the REAL coordinator
+    // against the REAL backlog after every Run, cap 1. Scripted exits: 02/03/04
+    // complete (03 becomes eligible only after 02 is done), 05 parks HITL.
+    const exits = new Map<number, WorkerExit>([
+      [2, 'completed'],
+      [3, 'completed'],
+      [4, 'completed'],
+      [5, 'needs-verification'],
+    ]);
+    const terminal: ActiveRun[] = [];
+    const started: number[] = [];
+    for (let round = 0; round < 10; round++) {
+      const backlog = await readBacklog(repo);
+      const plan = planDrain({ issues: backlog.issues, maxConcurrent: 1, activeRuns: terminal });
+      if (plan.drain.stop) break;
+      const id = plan.startable[0];
+      started.push(id);
+      const issue = sandboxIssue(id);
+      await runFakeWorker({ repo, issue, exit: exits.get(id) ?? 'completed' });
+      const after = await readBacklog(repo);
+      const status = deriveRunStatus({
+        sessionAlive: false,
+        stoppedByUser: false,
+        issueStatus: after.issues.find((i) => i.id === id)?.status ?? null,
+      });
+      if (status === 'finished') await commitFinishedMain(repo, issue.slug);
+      terminal.push({ issueId: id, status });
+      await waitForReceipt(id);
+    }
+    // The drain proceeded in dependency order and reached the HITL park.
+    expect(started).toEqual([2, 3, 4, 5]);
+
+    // Walkthrough item "Blocked exit": a Worker's blocked report also lands as
+    // a Receipt (`outcome: blocked`) and one record.
+    await runFakeWorker({ repo, issue: sandboxIssue(6), exit: 'blocked' });
+    await waitForReceipt(6);
+
+    // ZERO ghosts: every ingested record is a classified, real capture — no
+    // `unknown`s, no boot-screen junk, exactly one record per Receipt written.
+    expect(records).toHaveLength(5);
+    expect(records.every((r) => r.outcome !== 'unknown')).toBe(true);
+    expect(records.every((r) => isRealCapture(r))).toBe(true);
+    expect(records.every((r) => isReceiptRecord(r))).toBe(true);
+    const outcomes = new Map(records.map((r) => [r.issueId, r.outcome]));
+    expect(outcomes.get(2)).toBe('completed');
+    expect(outcomes.get(3)).toBe('completed');
+    expect(outcomes.get(4)).toBe('completed');
+    expect(outcomes.get(5)).toBe('needs-verification');
+    expect(outcomes.get(6)).toBe('blocked');
+
+    // The durable Run log agrees, with unique ids (no double-feeds).
+    await Promise.all(appends);
+    const persisted = await store.read(repo);
+    expect(persisted).toHaveLength(5);
+    expect(new Set(persisted.map((r) => r.id)).size).toBe(5);
+
+    // An MC "restart" — a fresh watcher whose `seen` is seeded from the
+    // persisted Run log — re-scans every existing Receipt and feeds NOTHING.
+    const restartRecords: RunLogRecord[] = [];
+    const restartSeen = new Map<string, string | null>(persisted.map((r) => [r.id, null]));
+    const restarted = new ReceiptWatcher({ debounceMs: 40, stabilityMs: 25 });
+    try {
+      restarted.watch('restart', [sandbox.issuesDir], restartSeen, (r) => restartRecords.push(r));
+      await sleep(400);
+      expect(restartRecords).toEqual([]);
+    } finally {
+      restarted.closeAll();
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Scenario 4 — Parallel Runs: Receipts ingested LIVE from worktrees pre-merge;
+  // a clean auto-merge lands the Receipt files on main.
+  // ---------------------------------------------------------------------------
+  it('Scenario 4: parallel Receipts ingest live from worktrees, then a clean merge lands them on main', async () => {
+    const six = sandboxIssue(6);
+    const seven = sandboxIssue(7);
+    const iso = await applyIsolation(repo, [
+      { issueId: 6, slug: six.slug },
+      { issueId: 7, slug: seven.slug },
+    ]);
+    expect(iso.parallel).toBe(true);
+    const wt6 = worktreePathFor(repo, six.slug);
+    const wt7 = worktreePathFor(repo, seven.slug);
+
+    // The watcher covers the checkout AND each live worktree's issues dir —
+    // exactly how the app re-points it as worktrees appear.
+    ingestFrom(sandbox.issuesDir, join(wt6, 'issues'), join(wt7, 'issues'));
+
+    // 06's Worker exercises the receipt-before-commit mode: its Receipt is on
+    // disk in the worktree while NOTHING is committed yet.
+    await runFakeWorker({ repo, worktree: wt6, issue: six, misbehavior: 'receipt-before-commit' });
+    const rec6 = await waitForReceipt(6);
+    expect(rec6.outcome).toBe('completed');
+    // Ingested LIVE from the WORKTREE: nothing has reached main (or even the
+    // branch — this Worker died before committing), yet the record exists.
+    expect(await git(repo, 'ls-files')).not.toContain(`issues/completions/${six.slug}.md`);
+    expect(existsSync(join(repo, 'issues', 'completions', `${six.slug}.md`))).toBe(false);
+
+    // MC observes the finished worktree → the real auto-commit repairs the
+    // dropped commit (deliverable + flip + Receipt land on afk/06-parallel-a),
+    // leaving the branch genuinely ahead of main (finished-unmerged).
+    const obs6 = await readIsolatedIssueStatus(repo, six.slug);
+    expect(obs6.status).toBe('done');
+    expect(obs6.commitError).toBeNull();
+    let facts = await scanAfkBranches(repo);
+    expect(facts.find((f) => f.slug === six.slug)?.mergedIntoMain).toBe(false);
+
+    // 07's Worker is well-behaved: commits its own work + Receipt.
+    const trace7 = await runFakeWorker({ repo, worktree: wt7, issue: seven });
+    expect(trace7.committed).toBe(true);
+    const rec7 = await waitForReceipt(7);
+    expect(rec7.outcome).toBe('completed');
+    const obs7 = await readIsolatedIssueStatus(repo, seven.slug);
+    expect(obs7.status).toBe('done');
+
+    // Both Receipts were ingested BEFORE any merge — from the worktrees.
+    facts = await scanAfkBranches(repo);
+    expect(facts.every((f) => !f.mergedIntoMain)).toBe(true);
+    expect(records.map((r) => r.issueId).sort()).toEqual([6, 7]);
+
+    // Clean merge via the REAL afk-merge.sh: both branches land, and the
+    // Receipt files are present ON MAIN afterwards.
+    const result = await mergeRuns(repo, [six.slug, seven.slug], { scriptPath: SCRIPT });
+    expect(result.ok).toBe(true);
+    expect(result.conflicted).toBe(false);
+    expect(result.merged.sort()).toEqual([six.slug, seven.slug]);
+    const tracked = await git(repo, 'ls-files');
+    expect(tracked).toContain(`issues/completions/${six.slug}.md`);
+    expect(tracked).toContain(`issues/completions/${seven.slug}.md`);
+    expect(existsSync(join(repo, 'issues', 'completions', `${six.slug}.md`))).toBe(true);
+    expect(existsSync(join(repo, 'issues', 'completions', `${seven.slug}.md`))).toBe(true);
+    expect((await git(repo, 'status', '--porcelain')).trim()).toBe('');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Scenario 5 — deliberately misbehaving Workers.
+  // ---------------------------------------------------------------------------
+  describe('Scenario 5: misbehaving Workers', () => {
+    it('a stray Receipt on main is adopted (issue 62) and the merge proceeds', async () => {
+      ingestFrom(sandbox.issuesDir);
+      const six = sandboxIssue(6);
+      await createWorktree(repo, six.slug, branchFor(six.slug));
+      const wt6 = worktreePathFor(repo, six.slug);
+
+      // The walkthrough-2 bug, scripted: the Worker commits its work on the
+      // branch but writes its Receipt into the MAIN checkout's completions dir.
+      const trace = await runFakeWorker({
+        repo,
+        worktree: wt6,
+        issue: six,
+        misbehavior: 'receipt-to-wrong-checkout',
+      });
+      expect(trace.committed).toBe(true);
+      expect(trace.receiptPath).toBe(join(repo, 'issues', 'completions', `${six.slug}.md`));
+
+      // Ingest handles both locations: the stray Receipt still reaches the log.
+      const record = await waitForReceipt(6);
+      expect(record.outcome).toBe('completed');
+
+      // The stray file is untracked on main — the exact state that used to fail
+      // EVERY later merge. The merge now ADOPTS it and proceeds. (Reverting
+      // issue 62's adoption turns this into a dirty-tree halt → ok === false.)
+      const result = await mergeRuns(repo, [six.slug], { scriptPath: SCRIPT });
+      expect(result.ok).toBe(true);
+      expect(result.adopted).toEqual([`issues/completions/${six.slug}.md`]);
+      expect(result.merged).toEqual([six.slug]);
+
+      // The adoption is a dedicated, greppable commit; main ends clean with the
+      // work merged and the Receipt tracked.
+      const log = await git(repo, 'log', '--pretty=%s');
+      expect(log).toContain('chore: adopt stray Receipt(s)');
+      expect(await git(repo, 'ls-files')).toContain(`issues/completions/${six.slug}.md`);
+      expect((await git(repo, 'status', '--porcelain')).trim()).toBe('');
+    });
+
+    it('a no-receipt Worker yields exactly one finished-without-receipt passive note', async () => {
+      ingestFrom(sandbox.issuesDir);
+      const two = sandboxIssue(2);
+      const four = sandboxIssue(4);
+
+      // 02 finishes properly (Receipt written); 04 finishes with NO Receipt.
+      await runFakeWorker({ repo, issue: two });
+      await waitForReceipt(2);
+      await commitFinishedMain(repo, two.slug);
+      await runFakeWorker({ repo, issue: four, misbehavior: 'no-receipt' });
+      await commitFinishedMain(repo, four.slug);
+      // Give the real watcher time to (wrongly) surface anything for 04.
+      await sleep(300);
+      expect(records.some((r) => r.issueId === 4)).toBe(false);
+
+      // The audit derives EXACTLY ONE honest event — for 04, never for 02.
+      const events = auditMissingReceipts(
+        [
+          { issueId: 2, slug: two.slug, title: two.title, status: 'finished' },
+          { issueId: 4, slug: four.slug, title: four.title, status: 'finished' },
+        ],
+        records,
+      );
+      expect(events).toHaveLength(1);
+      expect(events[0].kind).toBe('finished-without-receipt');
+      expect(events[0].issueId).toBe(4);
+
+      // It surfaces as one passive ambient-log note — no scrape, no junk entry,
+      // and NOT a chat interruption.
+      const reaction = reactToLifecycleEvent(events[0]);
+      expect(reaction.notification).toContain('finished without a receipt');
+      expect(reaction.proactive).toBe(false);
+      expect(channelForAction(actionForLifecycle(events[0].kind))).toBe('log');
+    });
+
+    it('a die-mid-exit Worker does not stall the drain\'s remaining issues', async () => {
+      ingestFrom(sandbox.issuesDir);
+      const two = sandboxIssue(2);
+
+      // The Worker flips 02 done, then dies: no Receipt, nothing committed.
+      await runFakeWorker({ repo, issue: two, misbehavior: 'die-mid-exit' });
+
+      // Ground truth still reads "finished" (the flip IS on disk), so MC's solo
+      // auto-commit self-heals the dropped exit and main ends clean.
+      const status = deriveRunStatus({ sessionAlive: false, stoppedByUser: false, issueStatus: 'done' });
+      expect(status).toBe('finished');
+      const outcome = await commitFinishedMain(repo, two.slug);
+      expect(outcome.committed).toBe(true);
+      expect((await git(repo, 'status', '--porcelain')).trim()).toBe('');
+
+      // The drain's next re-plan CONTINUES: the dead Run's issue is done, so
+      // the dep-blocked 03 unblocks and is startable — no stall, no stop.
+      const backlog = await readBacklog(repo);
+      const plan = planDrain({
+        issues: backlog.issues,
+        maxConcurrent: 1,
+        activeRuns: [{ issueId: 2, status }],
+      });
+      expect(plan.drain.stop).toBe(false);
+      expect(plan.startable).toEqual([3]);
+
+      // And the honest signal fires: one finished-without-receipt note for 02.
+      const events = auditMissingReceipts(
+        [{ issueId: 2, slug: two.slug, title: two.title, status: 'finished' }],
+        records,
+      );
+      expect(events).toHaveLength(1);
+      expect(events[0].issueId).toBe(2);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Scenario 6 — a dirty NON-Receipt file on main: truthful halt, no merge,
+  // no auto-commit, no fake conflict.
+  // ---------------------------------------------------------------------------
+  it('Scenario 6: a dirty non-Receipt file on main halts truthfully — no merge, no fake conflict', async () => {
+    const six = sandboxIssue(6);
+    await createWorktree(repo, six.slug, branchFor(six.slug));
+    const wt6 = worktreePathFor(repo, six.slug);
+    const trace = await runFakeWorker({ repo, worktree: wt6, issue: six });
+    expect(trace.committed).toBe(true);
+
+    // Unknown state on main: a tracked file modified outside MC's knowledge.
+    await appendFile(join(repo, 'README.md'), 'uncommitted local edit\n');
+
+    const result = await mergeRuns(repo, [six.slug], { scriptPath: SCRIPT });
+
+    // Truthful halt: not ok, NOT a conflict, nothing merged, nothing adopted.
+    expect(result.ok).toBe(false);
+    expect(result.conflicted).toBe(false);
+    expect(result.midMerge).toBe(false);
+    expect(result.merged).toEqual([]);
+    expect(result.adopted).toEqual([]);
+    expect(result.message).toMatch(/uncommitted changes/i);
+    expect(result.message).toContain('README.md');
+
+    // The foreign file was NOT auto-committed, main is not mid-merge, and the
+    // finished branch is left intact for after the user cleans up.
+    expect(await git(repo, 'status', '--porcelain')).toContain('README.md');
+    expect(await isMidMerge(repo)).toBe(false);
+    const facts = await scanAfkBranches(repo);
+    expect(facts.find((f) => f.slug === six.slug)?.mergedIntoMain).toBe(false);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// Manual-only checklist items — walkthrough 58 lines that genuinely require the
+// live Electron shell. Declared here (as named, skipped specs) so the coverage
+// gap is explicit in the suite output, never silent. Everything else above is
+// machine-verified; a human walkthrough runs ONLY after this suite passes.
+// -----------------------------------------------------------------------------
+describe('manual-only — needs the live Electron shell (declared, not silently skipped)', () => {
+  it.skip('manual-only: the Run-log CARD visibly renders the block sections — reason: React renderer UI; the record fields feeding the card are asserted in Scenario 1', () => {});
+  it.skip('manual-only: the HITL notification is visually PROMINENT in the Dispatcher chat — reason: the live `claude` chat TUI renders it; typed+submitted delivery into the PTY is asserted in Scenario 2', () => {});
+  it.skip('manual-only: passive notes appear in the ambient activities LOG panel — reason: renderer UI; channel routing (log, not chat) is asserted in Scenario 5', () => {});
+  it.skip('manual-only: the Drain button spawns real `claude` Panes with the per-Run prompt — reason: needs Electron + an authenticated claude CLI; the coordinator plan driving it is asserted in Scenarios 3 and 5', () => {});
+});
+
+/** Read a Receipt file from the main checkout's completions dir. */
+async function readReceipt(slug: string): Promise<string> {
+  const { readFile } = await import('node:fs/promises');
+  return readFile(join(repo, 'issues', 'completions', `${slug}.md`), 'utf8');
+}
