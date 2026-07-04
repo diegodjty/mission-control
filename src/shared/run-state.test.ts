@@ -52,6 +52,117 @@ describe('deriveRunStatus', () => {
   });
 });
 
+describe('deriveRunStatus — the Receipt outcome joins the facts (issue 65)', () => {
+  it('a needs-verification Receipt parks the Run while the session still lives', () => {
+    // The walkthrough-58 third-attempt stall: a real claude Pane never exits —
+    // it sits at its prompt after the park. The declared Receipt alone must
+    // end the Run (terminal `parked`), freeing its slot; the Pane stays open.
+    expect(
+      deriveRunStatus({
+        sessionAlive: true,
+        stoppedByUser: false,
+        issueStatus: 'wip',
+        receiptOutcome: 'needs-verification',
+      }),
+    ).toBe('parked');
+  });
+
+  it('a needs-verification Receipt also parks a Run whose session already ended', () => {
+    // Same declared fact, dead session: still a park (success awaiting the
+    // human), never a generic blocked.
+    expect(
+      deriveRunStatus({
+        sessionAlive: false,
+        stoppedByUser: false,
+        issueStatus: 'wip',
+        receiptOutcome: 'needs-verification',
+      }),
+    ).toBe('parked');
+  });
+
+  it('a blocked Receipt with a live session ends the Run blocked', () => {
+    // A blocked Worker also lingers at its prompt — the declared Receipt ends
+    // the Run so today's conservative drain halt applies.
+    expect(
+      deriveRunStatus({
+        sessionAlive: true,
+        stoppedByUser: false,
+        issueStatus: 'wip',
+        receiptOutcome: 'blocked',
+      }),
+    ).toBe('blocked');
+  });
+
+  it('no Receipt + live session + no done flip stays running (an active Worker is untouched)', () => {
+    expect(
+      deriveRunStatus({ sessionAlive: true, stoppedByUser: false, issueStatus: 'wip' }),
+    ).toBe('running');
+    expect(
+      deriveRunStatus({
+        sessionAlive: true,
+        stoppedByUser: false,
+        issueStatus: 'wip',
+        receiptOutcome: null,
+      }),
+    ).toBe('running');
+  });
+
+  it('only DECLARED park/blocked outcomes count — completed/unknown never end a live Run', () => {
+    // A `completed` Receipt is judged by the done flip (state wins, ADR-0013);
+    // an `unknown` outcome is not a declaration at all.
+    expect(
+      deriveRunStatus({
+        sessionAlive: true,
+        stoppedByUser: false,
+        issueStatus: 'wip',
+        receiptOutcome: 'completed',
+      }),
+    ).toBe('running');
+    expect(
+      deriveRunStatus({
+        sessionAlive: true,
+        stoppedByUser: false,
+        issueStatus: 'wip',
+        receiptOutcome: 'unknown',
+      }),
+    ).toBe('running');
+  });
+
+  it('the done flip beats a needs-verification Receipt (the human verified and flipped)', () => {
+    expect(
+      deriveRunStatus({
+        sessionAlive: true,
+        stoppedByUser: false,
+        issueStatus: 'done',
+        receiptOutcome: 'needs-verification',
+      }),
+    ).toBe('finished');
+  });
+
+  it('a user stop beats the Receipt outcome', () => {
+    expect(
+      deriveRunStatus({
+        sessionAlive: false,
+        stoppedByUser: true,
+        issueStatus: 'wip',
+        receiptOutcome: 'needs-verification',
+      }),
+    ).toBe('stopped');
+  });
+
+  it('parked is terminal (the slot frees; polling stops)', () => {
+    expect(isTerminal('parked')).toBe(true);
+  });
+
+  it('runningIssueIds excludes a parked Run (its issue no longer reads running)', () => {
+    const runs = [
+      { id: 5, status: 'parked' as RunStatus },
+      { id: 6, status: 'running' as RunStatus },
+    ];
+    expect(runningIssueIds(runs, (r) => r.status, (r) => r.id)).toEqual([6]);
+  });
+});
+
 describe('observedIssueStatus (issue 13 — which source to trust)', () => {
   it('an isolated Run reads its status from the worktree, ignoring main', () => {
     // The worktree flipped to done on the afk/ branch; main still says wip.

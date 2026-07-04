@@ -5,14 +5,21 @@
  *
  * Mission Control learns "done vs. blocked" from the Artifacts on disk, not by
  * parsing the agent's stream (ADR-0001): a Run is FINISHED when its issue file
- * flips to `done`, and BLOCKED when the session ends while the issue is still
- * unfinished (the agent's blocked reason is what it printed live in the Pane).
+ * flips to `done`, BLOCKED when the session ends while the issue is still
+ * unfinished (the agent's blocked reason is what it printed live in the Pane)
+ * OR when its Receipt DECLARES `outcome: blocked`, and PARKED when its Receipt
+ * declares `outcome: needs-verification` (issue 65, ADR-0013): a real claude
+ * Pane never exits — it finishes its final message and sits at its prompt — so
+ * a parked HITL Run judged only by session-death would read `running` forever,
+ * wedging the drain's slot. The declared Receipt outcome is therefore a fact
+ * of its own, ending the Run while the Pane stays open for the human to peek.
  *
  * Pure (no I/O, no Electron) so it is unit-testable in isolation.
  */
 import type { IssueStatus } from './backlog-model';
+import type { RunOutcome } from './completion-parser';
 
-export type RunStatus = 'running' | 'finished' | 'blocked' | 'stopped';
+export type RunStatus = 'running' | 'finished' | 'blocked' | 'stopped' | 'parked';
 
 export interface RunFacts {
   /** Is the underlying PTY session still alive (not exited)? */
@@ -21,18 +28,35 @@ export interface RunFacts {
   stoppedByUser: boolean;
   /** The issue's current status on disk, or null if not yet observed. */
   issueStatus: IssueStatus | null;
+  /**
+   * The outcome the LATEST Receipt for this Run's issue DECLARED
+   * (`issues/completions/NN-slug.md`, ADR-0013), or null/absent when none
+   * exists. Declared state only — never prose heuristics (issue 65): only
+   * `needs-verification` (⇒ parked) and `blocked` (⇒ blocked) end a Run here;
+   * `completed` is judged by the `done` flip (state wins) and `unknown` is not
+   * a declaration at all.
+   */
+  receiptOutcome?: RunOutcome | null;
 }
 
 /**
  * Derive the Run's status. Precedence:
  *   1. Issue reached `done` on disk ⇒ finished (even if the session lingers).
  *   2. User stopped it ⇒ stopped.
- *   3. Session ended without the issue reaching done ⇒ blocked.
- *   4. Otherwise ⇒ still running.
+ *   3. Receipt declares `needs-verification` ⇒ parked — terminal; the HITL
+ *      Worker did its job and the human verifies. The session usually still
+ *      lives (the Pane sits at its prompt) and is deliberately NOT killed.
+ *   4. Receipt declares `blocked` ⇒ blocked — a blocked Worker also lingers
+ *      at its prompt, so the declaration ends the Run without a session death.
+ *   5. Session ended without the issue reaching done ⇒ blocked.
+ *   6. Otherwise ⇒ still running.
  */
 export function deriveRunStatus(facts: RunFacts): RunStatus {
   if (facts.issueStatus === 'done') return 'finished';
   if (facts.stoppedByUser) return 'stopped';
+  const declared = facts.receiptOutcome ?? null;
+  if (declared === 'needs-verification') return 'parked';
+  if (declared === 'blocked') return 'blocked';
   if (!facts.sessionAlive) return 'blocked';
   return 'running';
 }

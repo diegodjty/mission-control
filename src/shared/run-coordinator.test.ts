@@ -268,6 +268,43 @@ describe('isParkedHitl — the declared-state park/blocked distinction (issue 64
     const run: ActiveRun = { issueId: 99, status: 'blocked', receiptOutcome: 'unknown' };
     expect(isParkedHitl(run, undefined)).toBe(false);
   });
+
+  it('a Run already derived `parked` (issue 65) is a park, whatever else is known', () => {
+    // run-state now derives `parked` directly from the declared Receipt while
+    // the session lingers — that status IS the park, no re-derivation here.
+    const run: ActiveRun = { issueId: 5, status: 'parked', receiptOutcome: 'needs-verification' };
+    expect(isParkedHitl(run, hitlWip)).toBe(true);
+    expect(isParkedHitl({ status: 'parked' }, undefined)).toBe(true);
+  });
+});
+
+describe('planDrain — a terminal `parked` Run (issue 65) frees its slot and never halts', () => {
+  it('continues past a parked Run at cap 1 — the lingering-Pane stall this fixes', () => {
+    const issues = [mk(5, 'wip', [], true), mk(6, 'open'), mk(7, 'open')];
+    const plan = planDrain({
+      issues,
+      maxConcurrent: 1,
+      activeRuns: [{ issueId: 5, status: 'parked', receiptOutcome: 'needs-verification' }],
+    });
+    expect(plan.drain.stop).toBe(false);
+    // The park freed the ONLY slot: 6 starts immediately, 7 queues.
+    expect(plan.startable).toEqual([6]);
+    expect(plan.queued).toEqual([7]);
+  });
+
+  it('stops with no-eligible (not run-blocked) when only the parked Run remains', () => {
+    const issues = [mk(5, 'wip', [], true), mk(6, 'done')];
+    const plan = planDrain({
+      issues,
+      maxConcurrent: 1,
+      activeRuns: [
+        { issueId: 5, status: 'parked', receiptOutcome: 'needs-verification' },
+        { issueId: 6, status: 'finished', receiptOutcome: 'completed' },
+      ],
+    });
+    expect(plan.drain.stop).toBe(true);
+    expect(plan.drain.reason).toBe('no-eligible');
+  });
 });
 
 describe('planDrain — a parked HITL Run does not halt the drain (issue 64)', () => {

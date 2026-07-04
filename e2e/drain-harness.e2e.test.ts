@@ -300,12 +300,17 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Scenario 3 — a full cap-1 mixed drain: zero unclassifiable records, and the
-  // drain CONTINUES past the parked HITL issue (issue 64) — the park is success,
-  // not failure, so every eligible issue after it still runs, 05 stays `wip`,
-  // and exactly ONE hitl-waiting notification is delivered.
+  // Scenario 3 — a full cap-1 mixed drain with LINGERING Workers: zero
+  // unclassifiable records, and the drain CONTINUES past the parked HITL issue
+  // (issues 64 + 65). The Workers here linger the way a real claude Pane does —
+  // they finish their exit and keep their session alive at the prompt — so the
+  // slot only frees if the Run's status turns terminal on DECLARED facts (the
+  // `done` flip, or the Receipt's outcome), never on session death. Before
+  // issue 65 this exact drain stalled at 05: the parked HITL Run read
+  // `running` forever and the cap-1 coordinator (correctly) waited for a slot
+  // that never came. Fake workers that exit hid it; lingering ones catch it.
   // ---------------------------------------------------------------------------
-  it('Scenario 3: a cap-1 mixed drain continues past the HITL park and ingests zero unclassifiable records', async () => {
+  it('Scenario 3: a cap-1 mixed drain with lingering Workers parks the HITL issue, frees its slot, and completes the rest', async () => {
     ingestFrom(sandbox.issuesDir);
 
     // Drive the drain the way the app does: re-plan with the REAL coordinator
@@ -324,6 +329,7 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
     const terminal: ActiveRun[] = [];
     const started: number[] = [];
     let stop: DrainPlan['drain'] | null = null;
+    let stalledAtFullCap = false;
     for (let round = 0; round < 10; round++) {
       const backlog = await readBacklog(repo);
       const plan = planDrain({ issues: backlog.issues, maxConcurrent: 1, activeRuns: terminal });
@@ -332,19 +338,40 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
         break;
       }
       const id = plan.startable[0];
+      if (id === undefined) {
+        // Live but nothing startable: every tracked Run lingers at its prompt
+        // and at least one still counts as `running` — the walkthrough-58
+        // third-attempt stall this scenario exists to catch (issue 65).
+        stalledAtFullCap = true;
+        break;
+      }
       started.push(id);
       const issue = sandboxIssue(id);
-      await runFakeWorker({ repo, issue, exit: exits.get(id) ?? 'completed' });
+      // Linger mode: the Worker writes everything, then sits at its prompt —
+      // `sessionAlive` stays true, exactly like a real claude Pane.
+      const trace = await runFakeWorker({
+        repo,
+        issue,
+        exit: exits.get(id) ?? 'completed',
+        linger: true,
+      });
+      const record = await waitForReceipt(id);
       const after = await readBacklog(repo);
       const status = deriveRunStatus({
-        sessionAlive: false,
+        sessionAlive: trace.sessionAlive,
         stoppedByUser: false,
         issueStatus: after.issues.find((i) => i.id === id)?.status ?? null,
+        receiptOutcome: record.outcome,
       });
       if (status === 'finished') await commitFinishedMain(repo, issue.slug);
-      const record = await waitForReceipt(id);
       terminal.push({ issueId: id, status, receiptOutcome: record.outcome });
     }
+
+    // Issue 65's core assertion: the lingering HITL park did NOT wedge the
+    // cap — its Run turned terminal (`parked`) on the Receipt's declared
+    // outcome alone, freeing the slot while the session stayed alive.
+    expect(stalledAtFullCap).toBe(false);
+    expect(terminal.find((r) => r.issueId === 5)?.status).toBe('parked');
 
     // Issue 64's core assertion: the drain ran EVERY eligible issue, parking
     // 05 along the way — no halt at the park. It ended because nothing
@@ -441,9 +468,12 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
 
   // ---------------------------------------------------------------------------
   // Scenario 3b — the conservative halts issue 64 must NOT relax: a Worker that
-  // DECLARES `outcome: blocked` still stops the drain with today's report.
+  // DECLARES `outcome: blocked` still stops the drain with today's report —
+  // even while its session LINGERS at the prompt (issue 65: a blocked Worker
+  // also never exits, so the Run must end `blocked` on the declared Receipt
+  // alone, not wait for a session death that never comes).
   // ---------------------------------------------------------------------------
-  it('Scenario 3b: a Worker declaring outcome: blocked still halts the drain', async () => {
+  it('Scenario 3b: a lingering Worker declaring outcome: blocked still halts the drain', async () => {
     ingestFrom(sandbox.issuesDir);
 
     // 02 completes normally; 03 (unblocked by it) then declares blocked.
@@ -455,7 +485,8 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
 
     let backlog = await readBacklog(repo);
     expect(planDrain({ issues: backlog.issues, maxConcurrent: 1, activeRuns: terminal }).startable[0]).toBe(3);
-    await runFakeWorker({ repo, issue: sandboxIssue(3), exit: 'blocked' });
+    const trace3 = await runFakeWorker({ repo, issue: sandboxIssue(3), exit: 'blocked', linger: true });
+    expect(trace3.sessionAlive).toBe(true);
 
     // Walkthrough item "Blocked exit": the blocked report lands as a Receipt
     // (`outcome: blocked`) — one classified record, carrying the reason.
@@ -466,9 +497,10 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
 
     backlog = await readBacklog(repo);
     const status = deriveRunStatus({
-      sessionAlive: false,
+      sessionAlive: trace3.sessionAlive,
       stoppedByUser: false,
       issueStatus: backlog.issues.find((i) => i.id === 3)?.status ?? null,
+      receiptOutcome: rec3.outcome,
     });
     expect(status).toBe('blocked');
     terminal.push({ issueId: 3, status, receiptOutcome: latestReceiptOutcomeFor(records, 3) });

@@ -51,6 +51,8 @@ export interface ActiveRun {
  * going — issues that `depends_on` it stay blocked naturally.
  *
  * The distinction reads DECLARED state only (ADR-0013's declare-don't-imply):
+ *   - The Run's status is already `parked` (issue 65) — run-state derived the
+ *     park directly from the declared Receipt, session alive or not.
  *   - The Run's Receipt declares `outcome: needs-verification` ⇒ park.
  *   - Fallback: the issue carries the HITL marker (`hitl: true` / `(HITL)`),
  *     ended `wip`, and a Receipt EXISTS whose declaration isn't `blocked`
@@ -64,6 +66,7 @@ export function isParkedHitl(
   run: Pick<ActiveRun, 'status' | 'receiptOutcome'>,
   issue: Pick<BacklogIssue, 'hitl' | 'status'> | undefined,
 ): boolean {
+  if (run.status === 'parked') return true;
   if (run.status !== 'blocked') return false;
   const receipt = run.receiptOutcome ?? null;
   if (receipt === 'needs-verification') return true;

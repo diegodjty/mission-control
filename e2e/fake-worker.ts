@@ -26,6 +26,13 @@
  *                                    branch tip still reads `wip`.
  *   - `die-mid-exit`               — flips `done`, then stops: no Receipt, no
  *                                    commit. The drain must not stall on it.
+ *
+ * Linger mode (issue 65): a REAL claude Pane never exits — it finishes its
+ * final message and sits at its prompt. `linger: true` models exactly that:
+ * the Worker writes everything its exit requires, then keeps its session
+ * alive (`trace.sessionAlive` stays true). The default (no linger) models a
+ * session that exited — which is what every scenario before issue 65 assumed,
+ * and why the cap-1 HITL stall stayed invisible to the harness.
  */
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -54,6 +61,13 @@ export interface WorkerTask {
   misbehavior?: Misbehavior;
   /** The Receipt's `finished` stamp; injectable so re-runs are testable. */
   finished?: string;
+  /**
+   * Linger (issue 65): write everything, then KEEP THE SESSION ALIVE — the way
+   * a real claude Pane sits at its prompt after its final message instead of
+   * exiting. The trace reports `sessionAlive: true` so the scenario feeds
+   * `deriveRunStatus` the fact a live Pane would present.
+   */
+  linger?: boolean;
 }
 
 export interface WorkerTrace {
@@ -63,6 +77,12 @@ export interface WorkerTrace {
   receiptPath: string | null;
   /** Whether the Worker committed on its branch (parallel, well-behaved). */
   committed: boolean;
+  /**
+   * Whether the Worker's session is still alive after its exit was written —
+   * true only in linger mode (issue 65). This is the `sessionAlive` fact the
+   * harness hands to `deriveRunStatus`, replacing the pre-65 hardcoded `false`.
+   */
+  sessionAlive: boolean;
 }
 
 /** The Receipt body for each exit — the same block the Worker's final message is. */
@@ -164,5 +184,5 @@ export async function runFakeWorker(task: WorkerTask): Promise<WorkerTrace> {
     committed = true;
   }
 
-  return { deliverablePath, receiptPath, committed };
+  return { deliverablePath, receiptPath, committed, sessionAlive: task.linger ?? false };
 }

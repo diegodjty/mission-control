@@ -626,8 +626,13 @@ export function App(): JSX.Element {
           mainStatus: issueStatusOf(run.target.issueId),
           worktreeStatus: committedStatusById[run.target.issueId] ?? null,
         }),
+        // The latest Receipt's DECLARED outcome (issue 65): a real claude Pane
+        // never exits, so a parked (`needs-verification`) or declared-blocked
+        // Run must end on this fact alone — the session staying alive can no
+        // longer read as `running` forever and wedge the drain's slot.
+        receiptOutcome: latestReceiptOutcomeFor(runLog, run.target.issueId),
       }),
-    [issueStatusOf, isIsolated, committedStatusById],
+    [issueStatusOf, isIsolated, committedStatusById, runLog],
   );
 
   // Commit a solo Run's finished work on `main` via the adapter, moving its

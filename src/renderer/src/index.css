@@ -453,6 +453,15 @@ body.is-col-resizing {
   border-color: #33404d;
 }
 
+/* A parked HITL Run (issue 65): the Worker finished its part and the Pane sits
+   at its prompt awaiting the human's verification — success-waiting, not an
+   error, so calm blue rather than blocked red. */
+.run-status--parked {
+  color: #8fc7f0;
+  border-color: #2c4a6b;
+  background: #101a28;
+}
+
 .run-stop {
   background: #2a1518;
   color: #f0a0a0;
