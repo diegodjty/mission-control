@@ -71,7 +71,13 @@ import {
   actionForLifecycle,
   reactToLifecycleEvent,
 } from '../src/shared/dispatcher-lifecycle';
-import { channelForAction } from '../src/shared/dispatcher-channel';
+import {
+  INITIAL_TYPING_STATE,
+  canFlushChat,
+  channelForAction,
+  reduceTyping,
+  type TypingState,
+} from '../src/shared/dispatcher-channel';
 import { classifyAuthority } from '../src/shared/dispatcher-authority';
 import {
   narrativeChannelFor,
@@ -807,9 +813,13 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
     // the delivery hook when a submit lands — which is what repairs the set
     // after a session replacement requeues and re-delivers an item.
     let sessionSeen = new Set<string>();
+    // Issue 68: the chat input stream runs through the REAL defer-while-typing
+    // gate, exactly as App.tsx wires it — each user chunk folds via
+    // `reduceTyping`, and the pump consults `canFlushChat` before every flush.
+    let typing: TypingState = INITIAL_TYPING_STATE;
     const pump = createDispatcherPump({
       write: pty.write,
-      canFlush: () => true,
+      canFlush: (now) => canFlushChat(typing, now),
       onDelivery: (key, phase) => {
         if (phase !== 'submitted') return;
         const recId = sessionSeenRecordId(key);
@@ -888,6 +898,18 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
       });
       if (status === 'finished') await commitFinishedMain(repo, issue.slug);
       terminal.push({ issueId: id, status, receiptOutcome: record.outcome });
+      if (id === 2) {
+        // Issue 68 (failing-first on pre-68 code): mid-drain the user CLICKS
+        // the chat pane and SCROLLS it — the terminal emits focus-in/out
+        // reports and SGR mouse-report bursts. None of that is typing: every
+        // later narrative message (03, 04, the park notice, 06, 07, the drain
+        // fact) must keep flowing live. On pre-68 code the first of these
+        // chunks armed `composing` forever and dammed the whole queue behind
+        // the user's next Enter.
+        typing = reduceTyping(typing, '\x1b[I', Date.now());
+        typing = reduceTyping(typing, '\x1b[<64;18;6M\x1b[<64;18;6M\x1b[<65;18;7M', Date.now());
+        typing = reduceTyping(typing, '\x1b[O', Date.now());
+      }
       if (id === 3) {
         // Mid-drain session replacement (issue 60 churn): S1 dies, S2 attaches.
         pty.kill('S1');
@@ -902,8 +924,16 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
     expect(stop).not.toBeNull();
     expect(stop!.reason).toBe('no-eligible');
     expect(narrativeChannelFor('drain-halted')).toBe('chat');
+    // Issue 68, the other half: a GENUINELY mid-compose line (printable chars,
+    // no submit) still holds the queue — the drain fact waits behind the user's
+    // half-typed question — and the held message flushes once the line is
+    // submitted. (The ~15s idle decay path is unit-tested with a fake clock.)
+    typing = reduceTyping(typing, 'status?', Date.now());
     pump.enqueue({ key: 'drain-halted:1', text: stop!.message });
-    await waitFor(() => pump.pending() === 0, 'drain-ended fact delivered');
+    await sleep(700);
+    expect(pump.pending(), 'drain fact held behind a live compose').toBe(1);
+    typing = reduceTyping(typing, '\r', Date.now());
+    await waitFor(() => pump.pending() === 0, 'drain-ended fact delivered after the submit');
 
     // --- One conversation message per finished Run, in finish order ---------
     const s1 = pty.submittedMessages('S1');

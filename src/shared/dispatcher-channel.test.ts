@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   CHAT_IDLE_MS,
+  COMPOSE_DECAY_MS,
   INITIAL_TYPING_STATE,
   canFlushChat,
   channelForAction,
   channelForAuthority,
   isLineClearInput,
+  isNonComposeInput,
   isStatusInjectionTrigger,
   isSubmitInput,
   reduceTyping,
@@ -116,9 +118,10 @@ describe('canFlushChat (defer-while-typing gate)', () => {
     expect(canFlushChat(INITIAL_TYPING_STATE, 10_000)).toBe(true);
   });
 
-  it('holds while the user is mid-compose, however long it has been', () => {
+  it('holds while the user is mid-compose, well past the idle window (until the compose decays)', () => {
     const composing: TypingState = { composing: true, lastInputAt: 1000 };
-    // Even far past the idle window, an un-submitted line never flushes.
+    // Far past the idle window — but inside the decay window — an un-submitted
+    // line still holds the queue.
     expect(canFlushChat(composing, 1000 + CHAT_IDLE_MS * 10)).toBe(false);
   });
 
@@ -145,6 +148,106 @@ describe('canFlushChat (defer-while-typing gate)', () => {
     state = reduceTyping(state, '\r', (t += 100));
     expect(canFlushChat(state, t)).toBe(false);
     expect(canFlushChat(state, t + CHAT_IDLE_MS)).toBe(true);
+  });
+});
+
+// Issue 68 decision table: input chunks that are NOT typing — focus reports,
+// mouse reports, bracketed-paste guards, and other bare terminal replies — must
+// never arm the compose gate; printable characters and editing keys still do.
+const NON_COMPOSE_CHUNKS: Array<[string, string]> = [
+  ['focus-in report', '\x1b[I'],
+  ['focus-out report', '\x1b[O'],
+  ['SGR mouse press', '\x1b[<0;10;5M'],
+  ['SGR mouse release', '\x1b[<0;10;5m'],
+  ['SGR mouse-wheel burst', '\x1b[<64;3;4M\x1b[<64;3;4M\x1b[<65;3;5M'],
+  ['legacy X10 mouse report', '\x1b[M !!'],
+  ['bracketed-paste open guard', '\x1b[200~'],
+  ['bracketed-paste close guard', '\x1b[201~'],
+  ['cursor-position report', '\x1b[24;80R'],
+  ['device-attributes reply', '\x1b[?1;2c'],
+  ['mixed focus + mouse burst', '\x1b[I\x1b[<0;1;1M\x1b[O'],
+];
+const COMPOSE_CHUNKS: Array<[string, string]> = [
+  ['printable character', 'a'],
+  ['a word', 'hello'],
+  ['arrow key (editing)', '\x1b[A'],
+  ['delete key (editing)', '\x1b[3~'],
+  ['backspace (editing)', '\x7f'],
+  ['bracketed paste WITH pasted text inside', '\x1b[200~hi\x1b[201~'],
+];
+
+describe('isNonComposeInput (issue 68 decision table)', () => {
+  for (const [label, chunk] of NON_COMPOSE_CHUNKS) {
+    it(`classifies a ${label} as non-compose input`, () => {
+      expect(isNonComposeInput(chunk)).toBe(true);
+    });
+  }
+
+  for (const [label, chunk] of COMPOSE_CHUNKS) {
+    it(`classifies ${label} as compose input`, () => {
+      expect(isNonComposeInput(chunk)).toBe(false);
+    });
+  }
+
+  it('empty input is not classified as non-compose (it is a plain no-op)', () => {
+    expect(isNonComposeInput('')).toBe(false);
+  });
+});
+
+describe('reduceTyping ignores non-compose input (issue 68)', () => {
+  for (const [label, chunk] of NON_COMPOSE_CHUNKS) {
+    it(`a ${label} never sets composing`, () => {
+      const s = reduceTyping(INITIAL_TYPING_STATE, chunk, 5000);
+      expect(s.composing).toBe(false);
+    });
+  }
+
+  it('a non-compose chunk leaves the state untouched (no lastInputAt bump — a scroll is not a keystroke)', () => {
+    const typing = reduceTyping(INITIAL_TYPING_STATE, 'hel', 1000);
+    expect(reduceTyping(typing, '\x1b[I', 9000)).toBe(typing);
+    expect(reduceTyping(INITIAL_TYPING_STATE, '\x1b[<64;3;4M', 9000)).toBe(INITIAL_TYPING_STATE);
+  });
+
+  it('a non-compose chunk does not clear an existing compose either', () => {
+    const typing = reduceTyping(INITIAL_TYPING_STATE, 'hel', 1000);
+    const after = reduceTyping(typing, '\x1b[O', 2000);
+    expect(after.composing).toBe(true);
+  });
+
+  for (const [label, chunk] of COMPOSE_CHUNKS) {
+    it(`${label} still sets composing`, () => {
+      const s = reduceTyping(INITIAL_TYPING_STATE, chunk, 5000);
+      expect(s.composing).toBe(true);
+      expect(s.lastInputAt).toBe(5000);
+    });
+  }
+});
+
+describe('compose decay (issue 68): an abandoned line stops blocking the flush', () => {
+  const abandoned: TypingState = { composing: true, lastInputAt: 10_000 };
+
+  it('is generous: at least ~15s of idle before a compose is considered abandoned', () => {
+    expect(COMPOSE_DECAY_MS).toBeGreaterThanOrEqual(15_000);
+  });
+
+  it('holds right up to the decay window, then no longer blocks', () => {
+    expect(canFlushChat(abandoned, 10_000 + COMPOSE_DECAY_MS - 1)).toBe(false);
+    expect(canFlushChat(abandoned, 10_000 + COMPOSE_DECAY_MS)).toBe(true);
+  });
+
+  it('a submit still releases immediately (after only the short idle window)', () => {
+    const submitted = reduceTyping(abandoned, '\r', 11_000);
+    expect(canFlushChat(submitted, 11_000 + CHAT_IDLE_MS)).toBe(true);
+  });
+
+  it('a line-clear (Ctrl-C) still releases immediately (after only the short idle window)', () => {
+    const cleared = reduceTyping(abandoned, '\x03', 11_000);
+    expect(canFlushChat(cleared, 11_000 + CHAT_IDLE_MS)).toBe(true);
+  });
+
+  it('fresh typing after a decayed compose re-arms the hold', () => {
+    const resumed = reduceTyping(abandoned, 'x', 10_000 + COMPOSE_DECAY_MS + 1000);
+    expect(canFlushChat(resumed, 10_000 + COMPOSE_DECAY_MS + 1500)).toBe(false);
   });
 });
 

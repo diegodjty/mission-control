@@ -149,6 +149,21 @@ describe('dispatcher pump — basic delivery', () => {
     expect(submitsTo(h, 'A')).toBe(1);
   });
 
+  it('a held queue flushes in enqueue order once the gate opens (issue 68)', () => {
+    const h = makeHarness();
+    h.pump.attachSession('A');
+    h.setCanFlush(false);
+    h.pump.enqueue({ key: 'k1', text: 'first' });
+    h.pump.enqueue({ key: 'k2', text: 'second' });
+    h.pump.enqueue({ key: 'k3', text: 'third' });
+    h.sched.advance(3000);
+    expect(h.writes).toEqual([]); // all held — nothing interleaves with typing
+    h.setCanFlush(true);
+    h.sched.advance(5000);
+    expect(textsTo(h, 'A')).toEqual(['first', 'second', 'third']);
+    expect(submitsTo(h, 'A')).toBe(3);
+  });
+
   it('dedupes a key that is already pending in the queue', () => {
     const h = makeHarness();
     expect(h.pump.enqueue({ key: 'k1', text: 'once' })).toBe(true);

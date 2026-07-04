@@ -85,6 +85,43 @@ export const INITIAL_TYPING_STATE: TypingState = { composing: false, lastInputAt
  */
 export const CHAT_IDLE_MS = 800;
 
+/**
+ * How long a compose state may sit idle (no further compose-relevant input)
+ * before it is considered ABANDONED and stops blocking the flush (issue 68).
+ * Without decay, one un-submitted keystroke dams every queued chat message
+ * until the user's next Enter releases them all in a burst. By this much idle
+ * the user has walked away from the line — and the claude TUI queues typed-
+ * ahead text safely anyway, so the interleave risk the gate protects against
+ * is gone. A submit or line-clear still releases immediately.
+ */
+export const COMPOSE_DECAY_MS = 15_000;
+
+/**
+ * Terminal input chunks that are NOT the user typing (issue 68): focus in/out
+ * reports (`CSI I` / `CSI O` — emitted when the user merely clicks into or out
+ * of the pane), mouse reports (SGR `CSI < … M/m` and legacy `CSI M` + 3 bytes —
+ * emitted by clicks and scroll wheels), bracketed-paste guard markers
+ * (`CSI 200~` / `CSI 201~`), and bare terminal replies (cursor-position report
+ * `CSI … R`, device-attributes reply `CSI ? … c`). Deliberately NOT matched:
+ * arrow keys / Home / End (`CSI A`–`D`, `H`, `F`) and editing keys like Delete
+ * (`CSI 3~`) — those manipulate the input line, so they still count as typing.
+ */
+const NON_COMPOSE_SEQUENCE =
+  // eslint-disable-next-line no-control-regex
+  /\x1b\[(?:I|O|<[0-9;]*[Mm]|M[\s\S]{3}|20[01]~|[0-9;]*R|\?[0-9;]*c)/g;
+
+/**
+ * Is this chunk made up ENTIRELY of non-compose terminal sequences (focus /
+ * mouse / paste-guard / reply escapes)? Such a chunk carries no typing at all —
+ * the user clicked or scrolled, or the terminal answered a query — so it must
+ * never arm the defer-while-typing gate. A chunk with any other content (a
+ * printable character, an editing key, a paste's actual text) is compose input
+ * and takes the normal `reduceTyping` path.
+ */
+export function isNonComposeInput(data: string): boolean {
+  return data.length > 0 && data.replace(NON_COMPOSE_SEQUENCE, '') === '';
+}
+
 /** Does this input chunk SUBMIT the current line (Enter / carriage return)? */
 export function isSubmitInput(data: string): boolean {
   return data.endsWith('\r') || data.endsWith('\n');
@@ -104,9 +141,17 @@ export function isLineClearInput(data: string): boolean {
  * ends the compose (the line no longer holds pending characters); any other
  * keystroke means the user is actively composing. Empty input is a no-op.
  * `now` is the caller's clock (ms) — the function stays pure.
+ *
+ * Non-compose chunks (issue 68) — focus reports, mouse reports, paste guards,
+ * bare terminal replies — are a no-op too: they neither set `composing` (a
+ * click is not typing) nor bump `lastInputAt` (`lastInputAt` exists to keep a
+ * programmatic write off the heels of a real keystroke; a scroll puts nothing
+ * on the line, and counting it would let continuous scrolling postpone flushes
+ * — and the compose decay — indefinitely).
  */
 export function reduceTyping(state: TypingState, data: string, now: number): TypingState {
   if (data.length === 0) return state;
+  if (isNonComposeInput(data)) return state;
   if (isSubmitInput(data) || isLineClearInput(data)) {
     return { composing: false, lastInputAt: now };
   }
@@ -119,9 +164,20 @@ export function reduceTyping(state: TypingState, data: string, now: number): Typ
  * least `idleMs`. While the user is typing (or just submitted), this returns
  * false and the queue holds — so the app never interleaves with the user's line
  * ("prompt over prompt" gone).
+ *
+ * A compose state DECAYS (issue 68): once the line has sat idle past `decayMs`
+ * the user has abandoned it, and the hold lifts — otherwise one un-submitted
+ * keystroke would dam the queue forever. Fresh typing re-arms the hold; a
+ * submit or line-clear still releases immediately (via `reduceTyping`).
  */
-export function canFlushChat(state: TypingState, now: number, idleMs: number = CHAT_IDLE_MS): boolean {
-  if (state.composing) return false;
+export function canFlushChat(
+  state: TypingState,
+  now: number,
+  idleMs: number = CHAT_IDLE_MS,
+  decayMs: number = COMPOSE_DECAY_MS,
+): boolean {
+  const composeHolds = state.composing && now - state.lastInputAt < decayMs;
+  if (composeHolds) return false;
   return now - state.lastInputAt >= idleMs;
 }
 
