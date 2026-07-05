@@ -9,6 +9,7 @@ import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent } from 'el
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { PtySessionManager } from './pty-session-manager';
+import { AttentionWatcher } from './attention-watcher';
 import { readBacklogAt } from './backlog-reader';
 import { BacklogWatcher } from './backlog-watcher';
 import { resolveProjectIdentity } from './project-resolver';
@@ -39,6 +40,7 @@ import type { IssueStatus } from '../shared/backlog-model';
 import type { AfkBranchFacts } from '../shared/worktree-scan';
 import {
   IpcChannel,
+  type AttentionSnapshot,
   type AfkScanRequest,
   type AfkScanResult,
   type AfkDiscardRequest,
@@ -333,6 +335,15 @@ const backlogWatcher = new BacklogWatcher();
 // under the app's userData dir, so the Execution view's feed survives closing
 // Panes and app restarts. Instantiated in `whenReady` (needs `app.getPath`).
 let runLogStore: RunLogStore;
+
+// The cross-project attention watch (issue 79, ADR-0016): ONE app-level
+// background service — not per-Window — that watches every `status: active`
+// registry project's workbench dirs (open in a Window or not), re-derives the
+// pure attention model on change, and broadcasts the aggregated list to every
+// Window. Read-only by contract: it never writes or commits to any workbench.
+// Instantiated in `whenReady`; torn down on quit (NOT on window-all-closed —
+// on macOS the app outlives its Windows, and the Inbox must keep watching).
+let attentionWatcher: AttentionWatcher | null = null;
 
 // The Receipt capture edge (issue 56, ADR-0013): watches each Project's
 // `issues/completions/` (checkout + live worktrees) for Worker Receipts, keyed
@@ -870,6 +881,15 @@ function registerIpc(): void {
     sender.once('destroyed', () => receiptWatcher.unwatch(key));
   });
 
+  // The current aggregated attention snapshot (issue 79): a pull for freshly
+  // opened Windows; live updates arrive on the AttentionChanged broadcast.
+  // Not ownership-gated on purpose — the Inbox is a cross-project, read-only
+  // surface every Window shows (acting on an item goes through open/claim).
+  ipcMain.handle(
+    IpcChannel.AttentionList,
+    (): AttentionSnapshot => attentionWatcher?.snapshot ?? { items: [], notes: [] },
+  );
+
   // Drain journal (issue 73, ADR-0015): when a drain ends (any stop reason),
   // ONE dated summary entry lands in the workbench project's `memory/journal/`
   // — every Run with its declared outcome, doc-drift flags, notable events —
@@ -913,6 +933,13 @@ function registerIpc(): void {
 
 app.whenReady().then(() => {
   runLogStore = new RunLogStore(app.getPath('userData'));
+  // Background cross-project attention watch (issue 79): starts with the app,
+  // independent of any Window, and stays inert when ~/Workbench doesn't exist.
+  attentionWatcher = new AttentionWatcher({
+    workbenchRoot: join(homedir(), 'Workbench'),
+    onChange: (snapshot) => broadcast(IpcChannel.AttentionChanged, snapshot),
+  });
+  attentionWatcher.start();
   registerIpc();
   createWindow();
 
@@ -932,4 +959,8 @@ app.on('before-quit', () => {
   ptyManager.killAll();
   backlogWatcher.closeAll();
   receiptWatcher.closeAll();
+  // The attention watch closes on QUIT only — it deliberately survives
+  // window-all-closed (macOS keeps the app alive; the Inbox keeps watching).
+  attentionWatcher?.close();
+  attentionWatcher = null;
 });

@@ -6,6 +6,7 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import {
   IpcChannel,
+  type AttentionSnapshot,
   type BacklogChangedMessage,
   type BacklogLoadRequest,
   type BacklogLoadResult,
@@ -133,6 +134,15 @@ const api: MissionControlApi = {
 
   writeDrainJournal: (req: DrainJournalRequest): Promise<DrainJournalResult> =>
     ipcRenderer.invoke(IpcChannel.DrainJournal, req),
+
+  listAttention: (): Promise<AttentionSnapshot> =>
+    ipcRenderer.invoke(IpcChannel.AttentionList),
+
+  onAttentionChanged: (listener: (msg: AttentionSnapshot) => void): (() => void) => {
+    const handler = (_e: IpcRendererEvent, msg: AttentionSnapshot): void => listener(msg);
+    ipcRenderer.on(IpcChannel.AttentionChanged, handler);
+    return () => ipcRenderer.removeListener(IpcChannel.AttentionChanged, handler);
+  },
 
   spawnPty: (req: PtySpawnRequest): Promise<PtySpawnResult> =>
     ipcRenderer.invoke(IpcChannel.PtySpawn, req),

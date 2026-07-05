@@ -6,6 +6,7 @@
  * Shared by main, preload, and renderer, so it must stay free of node/electron
  * runtime imports (types only).
  */
+import type { AttentionItem } from './attention-model';
 import type { Backlog, IssueStatus } from './backlog-model';
 import type { CompletionRecord, RunOutcome } from './completion-parser';
 import type { IsolationRun } from './isolation-policy';
@@ -169,6 +170,22 @@ export const IpcChannel = {
    * Resolves to a DrainJournalResult.
    */
   DrainJournal: 'drain:journal',
+  /**
+   * renderer → main (invoke): the current aggregated cross-project attention
+   * snapshot (issue 79, ADR-0016) — what the background workbench watch has
+   * derived so far — so a freshly opened Window doesn't wait for the next
+   * change. Resolves to an AttentionSnapshot.
+   */
+  AttentionList: 'attention:list',
+  /**
+   * main → renderer (broadcast to every Window): the aggregated cross-project
+   * attention list changed (issue 79). The background service watches EVERY
+   * `status: active` registry project's workbench dirs — open in a Window or
+   * not — re-derives on change (debounced, ADR-0006), and pushes only when
+   * the result actually differs. Informational only: items never claim or
+   * write anything; acting on one goes through the normal open flows.
+   */
+  AttentionChanged: 'attention:changed',
 } as const;
 
 export type IpcChannel = (typeof IpcChannel)[keyof typeof IpcChannel];
@@ -714,6 +731,20 @@ export interface DrainJournalResult {
 }
 
 /**
+ * The aggregated cross-project attention state (issue 79, ADR-0016): every
+ * active workbench project's items from the pure attention model (issue 78),
+ * grouped by project (projects ascending; each project's items in the model's
+ * deterministic order). Pushed on change and pullable on demand. Derived
+ * read-only from workbench artifacts — displaying or ignoring it never writes.
+ */
+export interface AttentionSnapshot {
+  /** Every active project's attention items, in stable aggregate order. */
+  items: AttentionItem[];
+  /** `<project>: <note>` lines about malformed artifacts that derived no item. */
+  notes: string[];
+}
+
+/**
  * The surface preload exposes on `window.mc`. Declared here so main, preload,
  * and renderer all agree on one shape.
  */
@@ -801,6 +832,10 @@ export interface MissionControlApi {
    * A quiet no-op for legacy Projects.
    */
   writeDrainJournal(req: DrainJournalRequest): Promise<DrainJournalResult>;
+  /** The current aggregated cross-project attention snapshot (issue 79). */
+  listAttention(): Promise<AttentionSnapshot>;
+  /** Subscribe to attention-list changes; returns an unsubscribe function. */
+  onAttentionChanged(listener: (msg: AttentionSnapshot) => void): () => void;
   spawnPty(req: PtySpawnRequest): Promise<PtySpawnResult>;
   writePty(msg: PtyWriteMessage): void;
   resizePty(msg: PtyResizeMessage): void;
