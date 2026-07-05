@@ -20,5 +20,5 @@ No `.env` secrets, no cloud credentials, no ports to open externally — the app
 
 - [ ] Create a **private** GitHub repo `workbench` and add it as remote to `~/Workbench` (issue 69 creates the local repo; push manually: `git -C ~/Workbench remote add origin <ssh-url> && git -C ~/Workbench push -u origin main`). Unblocks: off-machine backup (optional but recommended — Receipts/memory contain employer facts; MUST be private).
 - [ ] Install Obsidian (free, https://obsidian.md) and open `~/Workbench` as a vault ("Open folder as vault"). Optional viewer — nothing depends on it.
-- [ ] Issue 74 sitting: apply the prepped `~/.claude` changes per `~/Workbench/tools/pending-setup/APPLY.md` (skill diff, curator skill, CLAUDE.md line, weekly schedule).
+- [x] Issue 74 sitting: apply the prepped `~/.claude` changes per `~/Workbench/tools/pending-setup/APPLY.md` (skill diff, curator skill, CLAUDE.md line, weekly schedule).
 - [ ] Issue 76 sitting: run the migration script (only after `npm run test:e2e` is green).
