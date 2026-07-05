@@ -37,8 +37,14 @@ _Avoid_: vault (that's Obsidian's word for its viewer window, not the system).
 **Execution view**:
 The Mission Control surface for running a backlog — the **Map** plus parallel **Panes** plus the **Merge** action.
 
-**Planning view**:
-The Mission Control surface for the planning stages (`grill-with-docs`, `to-prd`, `to-issues`). Direction (not yet locked): a split screen with the interview conversation on one side and the documents it writes (`CONTEXT.md`, PRD, ADRs) rendering live on the other. Distinct from a raw **Pane** — planning is a conversation with live doc output, not a tiled terminal.
+**Planning view** (v1 per ADR-0016):
+The Mission Control surface for the planning stages: a normal **Pane** running `grill-with-docs`/`to-prd`/`to-issues` beside a live markdown preview of the documents as they are written (workbench PRD/issues + repo CONTEXT/ADRs, file-watched), with stage buttons launching each step. Deliberately thin — not a bespoke structured chat.
+
+**Launcher** (ADR-0016):
+The front door: every empty **Window** asks *what are we doing?* — New project / Big feature / Quick fix / Just talk / Continue — and each action performs its own setup (scaffold + registry entry, a **Planning view**, a one-sentence standalone issue with Run-now, a warm bare **Pane**). The playbook as UI: the user stops remembering; the tool asks.
+
+**Inbox** (ADR-0016):
+The cross-project attention surface: derived from lightly watching **every** `status: active` registry project's workbench artifacts — HITL parks awaiting sign-off, curator `CORE.proposed.md` proposals, blocked Runs, HUMAN-SETUP boxes gating issues — plus a since-last-seen journal briefing. Quiet text, never notifications; items click through to their project. The ecosystem hub: future tools surface here by writing workbench artifacts, no new UI channel per tool.
 
 **Dispatcher**:
 The foreground *conversational orchestrator* — a Claude session you talk to in Mission Control (as you would in a terminal), which spawns the worker Panes, ingests each **Completion block** as a Run finishes, synthesizes across Runs (progress, cross-Run patterns, doc-drift), and recommends/acts on next steps. It holds **only the summaries**, never a Run's implementation context — so it stays lean across a long drain the way a fresh-context-per-issue worker does. It replaces *watching every Pane* with *talking to one orchestrator*. Distinct from the **Run Coordinator** (pure, deterministic scheduling) and from a **Worker** (does one issue).
