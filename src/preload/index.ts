@@ -6,6 +6,7 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import {
   IpcChannel,
+  type AttentionMarkSeenResult,
   type AttentionSnapshot,
   type BacklogChangedMessage,
   type BacklogLoadRequest,
@@ -143,6 +144,9 @@ const api: MissionControlApi = {
     ipcRenderer.on(IpcChannel.AttentionChanged, handler);
     return () => ipcRenderer.removeListener(IpcChannel.AttentionChanged, handler);
   },
+
+  markAttentionSeen: (): Promise<AttentionMarkSeenResult> =>
+    ipcRenderer.invoke(IpcChannel.AttentionMarkSeen),
 
   spawnPty: (req: PtySpawnRequest): Promise<PtySpawnResult> =>
     ipcRenderer.invoke(IpcChannel.PtySpawn, req),

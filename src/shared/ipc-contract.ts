@@ -186,6 +186,14 @@ export const IpcChannel = {
    * write anything; acting on one goes through the normal open flows.
    */
   AttentionChanged: 'attention:changed',
+  /**
+   * renderer → main (invoke): the Inbox was viewed (issue 80, ADR-0016) —
+   * advance every watched project's briefing last-seen stamp to now, persist
+   * it in app userData (never workbench data — viewing the Inbox must not
+   * create commits), and re-derive so already-seen journal entries drop out
+   * of the next snapshot. Resolves to an AttentionMarkSeenResult.
+   */
+  AttentionMarkSeen: 'attention:mark-seen',
 } as const;
 
 export type IpcChannel = (typeof IpcChannel)[keyof typeof IpcChannel];
@@ -738,10 +746,22 @@ export interface DrainJournalResult {
  * read-only from workbench artifacts — displaying or ignoring it never writes.
  */
 export interface AttentionSnapshot {
+  /**
+   * The workbench root the items' `project` names live under (issue 80):
+   * `<workbenchRoot>/<item.project>` is the directory click-through hands to
+   * the normal `openProject` flow, so the renderer never guesses a path.
+   */
+  workbenchRoot: string;
   /** Every active project's attention items, in stable aggregate order. */
   items: AttentionItem[];
   /** `<project>: <note>` lines about malformed artifacts that derived no item. */
   notes: string[];
+}
+
+/** The stamps after an Inbox view advanced them (issue 80). */
+export interface AttentionMarkSeenResult {
+  /** Project directory name → ISO-8601 last-seen stamp, as now persisted. */
+  lastSeen: Record<string, string>;
 }
 
 /**
@@ -836,6 +856,11 @@ export interface MissionControlApi {
   listAttention(): Promise<AttentionSnapshot>;
   /** Subscribe to attention-list changes; returns an unsubscribe function. */
   onAttentionChanged(listener: (msg: AttentionSnapshot) => void): () => void;
+  /**
+   * The Inbox was viewed (issue 80): advance the briefing's last-seen stamps
+   * (app userData) and re-derive, so seen journal entries stop surfacing.
+   */
+  markAttentionSeen(): Promise<AttentionMarkSeenResult>;
   spawnPty(req: PtySpawnRequest): Promise<PtySpawnResult>;
   writePty(msg: PtyWriteMessage): void;
   resizePty(msg: PtyResizeMessage): void;

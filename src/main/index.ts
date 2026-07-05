@@ -9,6 +9,7 @@ import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent } from 'el
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { PtySessionManager } from './pty-session-manager';
+import { AttentionLastSeenStore } from './attention-last-seen';
 import { AttentionWatcher } from './attention-watcher';
 import { readBacklogAt } from './backlog-reader';
 import { BacklogWatcher } from './backlog-watcher';
@@ -40,6 +41,7 @@ import type { IssueStatus } from '../shared/backlog-model';
 import type { AfkBranchFacts } from '../shared/worktree-scan';
 import {
   IpcChannel,
+  type AttentionMarkSeenResult,
   type AttentionSnapshot,
   type AfkScanRequest,
   type AfkScanResult,
@@ -344,6 +346,15 @@ let runLogStore: RunLogStore;
 // Instantiated in `whenReady`; torn down on quit (NOT on window-all-closed —
 // on macOS the app outlives its Windows, and the Inbox must keep watching).
 let attentionWatcher: AttentionWatcher | null = null;
+
+// The workbench root the attention watch (and Inbox click-through) keys on.
+const WORKBENCH_ROOT = join(homedir(), 'Workbench');
+
+// The briefing's last-seen stamps (issue 80, ADR-0016): app-level state in
+// userData — reading the Inbox must never create workbench commits. Loaded in
+// `whenReady` BEFORE the attention watcher starts, so its `lastSeenFor` hook
+// answers from memory, synchronously.
+let attentionLastSeen: AttentionLastSeenStore;
 
 // The Receipt capture edge (issue 56, ADR-0013): watches each Project's
 // `issues/completions/` (checkout + live worktrees) for Worker Receipts, keyed
@@ -887,8 +898,22 @@ function registerIpc(): void {
   // surface every Window shows (acting on an item goes through open/claim).
   ipcMain.handle(
     IpcChannel.AttentionList,
-    (): AttentionSnapshot => attentionWatcher?.snapshot ?? { items: [], notes: [] },
+    (): AttentionSnapshot =>
+      attentionWatcher?.snapshot ?? { workbenchRoot: WORKBENCH_ROOT, items: [], notes: [] },
   );
+
+  // The Inbox was viewed (issue 80): advance every watched project's briefing
+  // last-seen stamp to now, persist in app userData, and re-derive so already-
+  // seen journal entries drop out of the next snapshot. Not ownership-gated
+  // (the Inbox is a cross-project surface every Window shows) and — by the
+  // same read-only contract as the watch itself — this writes NOTHING to any
+  // workbench: the stamp is app-level state.
+  ipcMain.handle(IpcChannel.AttentionMarkSeen, async (): Promise<AttentionMarkSeenResult> => {
+    const projects = attentionWatcher?.watchedProjects ?? [];
+    const lastSeen = await attentionLastSeen.markAll(projects, new Date().toISOString());
+    attentionWatcher?.rederiveAll();
+    return { lastSeen };
+  });
 
   // Drain journal (issue 73, ADR-0015): when a drain ends (any stop reason),
   // ONE dated summary entry lands in the workbench project's `memory/journal/`
@@ -931,13 +956,18 @@ function registerIpc(): void {
   );
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   runLogStore = new RunLogStore(app.getPath('userData'));
+  // The briefing's last-seen stamps load BEFORE the watcher starts, so the
+  // first derivation already filters against them (issue 80).
+  attentionLastSeen = new AttentionLastSeenStore(app.getPath('userData'));
+  await attentionLastSeen.load();
   // Background cross-project attention watch (issue 79): starts with the app,
   // independent of any Window, and stays inert when ~/Workbench doesn't exist.
   attentionWatcher = new AttentionWatcher({
-    workbenchRoot: join(homedir(), 'Workbench'),
+    workbenchRoot: WORKBENCH_ROOT,
     onChange: (snapshot) => broadcast(IpcChannel.AttentionChanged, snapshot),
+    lastSeenFor: (project) => attentionLastSeen.get(project),
   });
   attentionWatcher.start();
   registerIpc();

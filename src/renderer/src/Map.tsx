@@ -103,6 +103,17 @@ interface MapProps {
    * Run's Pane (it is App state loaded from disk, not tied to any live Pane).
    */
   runLog?: RunLogRecord[];
+  /**
+   * An Inbox click-through's focus request (issue 80): select this issue so
+   * its detail opens — the parked/blocked issue the item referenced. Null when
+   * nothing was requested.
+   */
+  focusIssueId?: number | null;
+  /**
+   * Bumped per click-through so re-focusing the SAME issue still re-selects it
+   * (the user may have clicked elsewhere in the Map since).
+   */
+  focusSeq?: number;
 }
 
 /**
@@ -138,6 +149,8 @@ export function Map({
   onAbortMerge,
   aborting,
   runLog,
+  focusIssueId,
+  focusSeq,
 }: MapProps = {}): JSX.Element {
   const activeRunSet = new Set(activeRunIssueIds ?? []);
   const worktreeRunningSet = new Set(worktreeRunningIds ?? []);
@@ -162,6 +175,13 @@ export function Map({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+
+  // An Inbox click-through focuses its referenced issue (issue 80): select it
+  // so the detail panel opens on it. Keyed on the bump too, so clicking the
+  // same item again re-focuses even after the user selected something else.
+  useEffect(() => {
+    if (focusIssueId !== null && focusIssueId !== undefined) setSelectedId(focusIssueId);
+  }, [focusIssueId, focusSeq]);
 
   // The currently-shown Project path, read inside the live-change listener
   // without re-subscribing on every load.

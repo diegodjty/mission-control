@@ -91,7 +91,7 @@ export class AttentionWatcher {
   private registryTimer: ReturnType<typeof setTimeout> | null = null;
   /** Serialized JSON of the last pushed snapshot (suppresses no-op pushes). */
   private lastPushed: string;
-  private latest: AttentionSnapshot = { items: [], notes: [] };
+  private latest: AttentionSnapshot;
   private closed = false;
 
   constructor(opts: AttentionWatcherOptions) {
@@ -99,6 +99,7 @@ export class AttentionWatcher {
     this.onChange = opts.onChange;
     this.debounceMs = opts.debounceMs ?? DEFAULT_DEBOUNCE_MS;
     this.lastSeenFor = opts.lastSeenFor ?? (() => null);
+    this.latest = { workbenchRoot: this.workbenchRoot, items: [], notes: [] };
     this.lastPushed = JSON.stringify(this.latest);
   }
 
@@ -137,6 +138,22 @@ export class AttentionWatcher {
   /** How many project watches are live (for tests / leak assertions). */
   get size(): number {
     return this.projects.size;
+  }
+
+  /** The watched project directory names, ascending. */
+  get watchedProjects(): string[] {
+    return [...this.projects.keys()].sort();
+  }
+
+  /**
+   * Re-derive every watched project now — no fs change required. Used when a
+   * derivation INPUT that lives outside the workbench changed: the briefing's
+   * last-seen stamps advanced on an Inbox view (issue 80), so already-seen
+   * journal entries must drop out of the next aggregate.
+   */
+  rederiveAll(): void {
+    if (this.closed) return;
+    for (const project of this.projects.keys()) void this.derive(project);
   }
 
   /** Tear everything down — timers and watchers. Call on app quit. */
@@ -269,7 +286,7 @@ export class AttentionWatcher {
       items.push(...result.items);
       notes.push(...result.notes.map((n) => `${project}: ${n}`));
     }
-    const next: AttentionSnapshot = { items, notes };
+    const next: AttentionSnapshot = { workbenchRoot: this.workbenchRoot, items, notes };
     const serialized = JSON.stringify(next);
     if (serialized === this.lastPushed) return;
     this.lastPushed = serialized;

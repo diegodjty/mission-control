@@ -1353,3 +1353,198 @@ body.is-col-resizing {
   border-color: #3a4a5a;
   background: #16202a;
 }
+
+/* --- Inbox (issue 80, ADR-0016): a quiet place you look, never a notifier -- */
+
+.inbox {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  justify-content: center;
+  overflow-y: auto;
+}
+
+.inbox__body {
+  width: 100%;
+  max-width: 720px;
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.inbox__notice {
+  margin: 0;
+  color: #f0c674;
+  background: #23200f;
+  border: 1px solid #6b5423;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+.inbox__empty {
+  margin: 8px 0;
+  color: #6b7a89;
+  font-size: 14px;
+}
+
+.inbox__briefing,
+.inbox__notes {
+  border: 1px solid #232d38;
+  border-radius: 6px;
+  background: #10161d;
+  padding: 6px 10px;
+}
+
+.inbox__briefing-summary,
+.inbox__notes-summary {
+  cursor: pointer;
+  color: #8296aa;
+  font-size: 12px;
+  user-select: none;
+}
+
+.inbox__briefing-list {
+  list-style: none;
+  margin: 8px 0 2px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.inbox__briefing-line {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 12px;
+  color: #9aa7b4;
+}
+
+.inbox__group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.inbox__group-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #6b7a89;
+}
+
+.inbox__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.inbox__item {
+  width: 100%;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  text-align: left;
+  font: inherit;
+  font-size: 13px;
+  color: #c7d2dd;
+  background: #131b23;
+  border: 1px solid #232d38;
+  border-radius: 6px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.inbox__item:hover {
+  background: #182430;
+  border-color: #2e3d4d;
+}
+
+.inbox__project {
+  color: #8fb8e6;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.inbox__text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.inbox__badge {
+  flex: 0 0 auto;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid #33404d;
+  color: #9aa7b4;
+  white-space: nowrap;
+}
+
+.inbox__badge--hitl-park {
+  color: #f0c674;
+  border-color: #6b5423;
+  background: #23200f;
+}
+
+.inbox__badge--curator-proposal {
+  color: #b0a0d0;
+  border-color: #5a4a7a;
+  background: #1a1524;
+}
+
+.inbox__badge--blocked-run {
+  color: #f0a0a0;
+  border-color: #7a3a3a;
+  background: #2a1518;
+}
+
+.inbox__badge--setup-gate {
+  color: #8fb8e6;
+  border-color: #2b6cb0;
+  background: #101a26;
+}
+
+/* An Inbox click-through's file reference, above the Map (issue 80). */
+.app__inbox-focus {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: #8296aa;
+  background: #10161d;
+  border: 1px solid #232d38;
+  border-radius: 6px;
+  padding: 5px 10px;
+  margin: 8px 12px 0;
+}
+
+.app__inbox-focus-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.app__inbox-focus code {
+  color: #c7d2dd;
+}
+
+.app__inbox-focus-dismiss {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: #6b7a89;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 4px;
+}
+
+.app__inbox-focus-dismiss:hover {
+  color: #c7d2dd;
+}

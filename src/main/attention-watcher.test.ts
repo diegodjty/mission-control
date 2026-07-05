@@ -218,12 +218,50 @@ describe('AttentionWatcher (real temp workbenches)', () => {
   });
 
   it('stays inert (no throw, empty snapshot) when the workbench root does not exist', async () => {
-    const { watcher, pushes } = newWatcher(join(tmpdir(), 'mc-attn-does-not-exist'));
+    const root = join(tmpdir(), 'mc-attn-does-not-exist');
+    const { watcher, pushes } = newWatcher(root);
     watcher.start();
     await sleep(DEBOUNCE * 3);
     expect(watcher.size).toBe(0);
-    expect(watcher.snapshot).toEqual({ items: [], notes: [] });
+    expect(watcher.snapshot).toEqual({ workbenchRoot: root, items: [], notes: [] });
     expect(pushes).toEqual([]);
+  });
+
+  it('re-derives on demand with fresh last-seen stamps: a viewed briefing entry drops out (issue 80)', async () => {
+    const root = await makeWorkbench([{ name: 'alpha', active: true }]);
+    await writeFile(
+      join(root, 'alpha', 'memory', 'journal', '2026-07-04.md'),
+      '# Drain journal — 2026-07-04\n\n- Ended: 2026-07-04T10:00:00Z\n- Reason: backlog drained\n',
+    );
+
+    // The caller's stamps live OUTSIDE the workbench (app userData, issue 80):
+    // the watcher only consults this hook.
+    let lastSeen: string | null = null;
+    const pushes: AttentionSnapshot[] = [];
+    const watcher = new AttentionWatcher({
+      workbenchRoot: root,
+      debounceMs: DEBOUNCE,
+      onChange: (s) => pushes.push(s),
+      lastSeenFor: () => lastSeen,
+    });
+    watchers.push(watcher);
+    watcher.start();
+    await waitFor(() => ids(watcher).includes('alpha:briefing:2026-07-04.md'), 'the briefing item');
+    expect(watcher.snapshot.workbenchRoot).toBe(root);
+    expect(watcher.watchedProjects).toEqual(['alpha']);
+
+    // The Inbox was viewed: the stamps advanced, and rederiveAll — no fs
+    // change anywhere — must drop the now-seen entry from the aggregate.
+    lastSeen = '2026-07-05T00:00:00Z';
+    watcher.rederiveAll();
+    await waitFor(() => !ids(watcher).includes('alpha:briefing:2026-07-04.md'), 'the seen entry to drop');
+
+    // A NEWER entry still surfaces against the same stamps.
+    await writeFile(
+      join(root, 'alpha', 'memory', 'journal', '2026-07-06.md'),
+      '# Drain journal — 2026-07-06\n\n- Ended: 2026-07-06T09:00:00Z\n- Reason: quick fix\n',
+    );
+    await waitFor(() => ids(watcher).includes('alpha:briefing:2026-07-06.md'), 'the newer entry');
   });
 
   it('pushes only on real change — a no-op rewrite of the same state is silent', async () => {

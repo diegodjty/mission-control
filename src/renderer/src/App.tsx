@@ -3,8 +3,12 @@ import { Pane } from './Pane';
 import { Map } from './Map';
 import { ProjectBar } from './ProjectBar';
 import { DispatcherPanel } from './DispatcherPanel';
+import { Inbox } from './Inbox';
+import type { AttentionItem } from '../../shared/attention-model';
+import { workbenchProjectPath } from '../../shared/inbox-model';
 import type { Backlog, IssueStatus } from '../../shared/backlog-model';
 import type {
+  AttentionSnapshot,
   DispatcherTarget,
   ProjectView,
   RunLogRecord,
@@ -157,7 +161,18 @@ function slugOf(fileName: string): string {
   return fileName.replace(/\.md$/, '');
 }
 
-type View = 'map' | 'pane';
+type View = 'map' | 'pane' | 'inbox';
+
+/**
+ * An Inbox click-through's focus request (issue 80): the thing the clicked
+ * item referenced, to be surfaced once its project is open — the issue is
+ * selected in the Map; the file reference shows as a quiet dismissible line.
+ */
+interface InboxFocus {
+  project: string;
+  issueId: number | null;
+  fileRef: string | null;
+}
 
 /**
  * One Run the UI is tracking: its target plus the observable facts
@@ -266,6 +281,37 @@ export function App(): JSX.Element {
     return off;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // --- Inbox state (issue 80, ADR-0016) -------------------------------------
+  // The aggregated cross-project attention snapshot: pulled once on mount (so
+  // a fresh Window doesn't wait for the next change) and kept live off the
+  // broadcast. App-wide, NOT per-Project — the Inbox shows every active
+  // workbench project regardless of what this Window has open, so it is
+  // deliberately not cleared on a Project switch.
+  const [attention, setAttention] = useState<AttentionSnapshot>({
+    workbenchRoot: '',
+    items: [],
+    notes: [],
+  });
+  useEffect(() => {
+    let disposed = false;
+    void window.mc.listAttention().then((snapshot) => {
+      if (!disposed) setAttention(snapshot);
+    });
+    const off = window.mc.onAttentionChanged(setAttention);
+    return () => {
+      disposed = true;
+      off();
+    };
+  }, []);
+  // The last click-through's outcome when it could NOT open the project (the
+  // owned-elsewhere case) — shown quietly inside the Inbox, per its
+  // "handled gracefully" acceptance. Cleared by the next successful open.
+  const [inboxNotice, setInboxNotice] = useState<string | null>(null);
+  // What the last successful click-through asked to focus, plus a bump so
+  // re-clicking the same item re-focuses it in the Map.
+  const [inboxFocus, setInboxFocus] = useState<InboxFocus | null>(null);
+  const [inboxFocusSeq, setInboxFocusSeq] = useState(0);
 
   // --- Run state -----------------------------------------------------------
   const [runs, setRuns] = useState<TrackedRun[]>([]);
@@ -585,6 +631,10 @@ export function App(): JSX.Element {
     setRunLog([]);
     receiptAudited.current.clear();
     mismatchSurfaced.current.clear();
+    // An Inbox focus request is about the project it named — a switch to a
+    // different Project must not surface (or select) the old one's reference.
+    // (The attention snapshot itself is app-wide and deliberately stays.)
+    setInboxFocus(null);
     setBacklog(null);
     setProjectPath(null);
   }, []);
@@ -620,6 +670,38 @@ export function App(): JSX.Element {
       setActiveProjectKey(res.activeProjectKey);
     }
   }, [resetForProjectSwitch]);
+
+  // An Inbox item was clicked (issue 80): open/switch to its project through
+  // the NORMAL open/claim flow — ownership rules and all (ADR-0004): if
+  // another Window owns it, main rejects with a clear message we surface as
+  // the Inbox's quiet notice — then land on the Map with the referenced thing
+  // focused (the parked/blocked issue selected; a file reference shown as a
+  // dismissible line). Acting on an item never claims or writes anything
+  // beyond what opening a project always did.
+  const openAttentionItem = useCallback(
+    async (item: AttentionItem): Promise<void> => {
+      const path = workbenchProjectPath(attention.workbenchRoot, item.project);
+      if (path === null) {
+        setInboxNotice(`Can't resolve a workbench directory for "${item.project}".`);
+        return;
+      }
+      const res = await window.mc.openProject({ path });
+      setProjects(res.projects);
+      if (!res.ok) {
+        setInboxNotice(res.error ?? `Could not open ${item.project}.`);
+        return;
+      }
+      setInboxNotice(null);
+      if (isProjectSwitch(activeProjectKeyRef.current, res.activeProjectKey)) {
+        resetForProjectSwitch();
+      }
+      setActiveProjectKey(res.activeProjectKey);
+      setInboxFocus({ project: item.project, issueId: item.issueId, fileRef: item.fileRef });
+      setInboxFocusSeq((n) => n + 1);
+      setView('map');
+    },
+    [attention.workbenchRoot, resetForProjectSwitch],
+  );
 
   const openInNewWindow = useCallback((): void => {
     const path = newRepoPath.trim();
@@ -2444,6 +2526,15 @@ export function App(): JSX.Element {
           >
             Pane{runs.length > 0 ? ` (${runs.length})` : ''}
           </button>
+          {/* The Inbox is a place you look (ADR-0012): a plain tab — no count,
+              no badge, no pulse — that shows what awaits you when YOU choose
+              to look. */}
+          <button
+            className={`app__tab${view === 'inbox' ? ' app__tab--active' : ''}`}
+            onClick={() => setView('inbox')}
+          >
+            Inbox
+          </button>
         </nav>
 
         {view === 'pane' && runs.length > 0 && (
@@ -2476,6 +2567,24 @@ export function App(): JSX.Element {
             current even while you watch a Pane. */}
         <div className="app__slot" style={{ display: view === 'map' ? 'flex' : 'none' }}>
           <div className="app__map-col">
+          {/* An Inbox click-through's file reference (issue 80): the curator
+              proposal / HUMAN-SETUP path the item pointed at, as one quiet
+              dismissible line — issue references additionally select their
+              issue in the Map below. */}
+          {inboxFocus && inboxFocus.fileRef !== null && (
+            <div className="app__inbox-focus">
+              <span className="app__inbox-focus-text">
+                From Inbox: <code>{inboxFocus.fileRef}</code> in {inboxFocus.project}
+              </span>
+              <button
+                className="app__inbox-focus-dismiss"
+                title="Dismiss"
+                onClick={() => setInboxFocus(null)}
+              >
+                ✕
+              </button>
+            </div>
+          )}
           <Map
             projectPath={activeProjectKey}
             onRun={startRun}
@@ -2501,6 +2610,8 @@ export function App(): JSX.Element {
             midMerge={midMerge}
             onAbortMerge={runAbortMerge}
             aborting={aborting}
+            focusIssueId={inboxFocus?.issueId ?? null}
+            focusSeq={inboxFocusSeq}
           />
           </div>
           {/* The Dispatcher chat panel beside the Map (ADR-0010): present once a
@@ -2691,6 +2802,20 @@ export function App(): JSX.Element {
         {runs.length === 0 && view === 'pane' && (
           <div className="app__slot" style={{ display: 'flex' }}>
             <Pane onStatusChange={setPaneStatus} onExit={() => setPaneStatus('exited')} />
+          </div>
+        )}
+
+        {/* The Inbox (issue 80): mounted fresh per view — being here IS
+            "viewing", which is what advances the briefing's last-seen stamp
+            and freezes the briefing you're reading. Available in every
+            Window, whatever Project (if any) it has open. */}
+        {view === 'inbox' && (
+          <div className="app__slot" style={{ display: 'flex' }}>
+            <Inbox
+              snapshot={attention}
+              onOpenItem={(item) => void openAttentionItem(item)}
+              notice={inboxNotice}
+            />
           </div>
         )}
       </div>
