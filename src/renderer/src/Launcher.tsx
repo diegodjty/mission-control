@@ -2,9 +2,11 @@ import { useMemo, useState } from 'react';
 import type {
   AttentionSnapshot,
   LauncherProject,
+  OnboardingCreateResult,
   QuickFixCreateResult,
 } from '../../shared/ipc-contract';
 import { projectStateLine } from '../../shared/launcher-model';
+import { repoKeyFor } from '../../shared/onboarding-model';
 
 /** What a successful Quick fix hands back for the Run-now offer. */
 export interface QuickFixIssueRef {
@@ -24,8 +26,12 @@ interface LauncherProps {
   onBackToProject: (() => void) | null;
   /** Continue: open this project in this Window through the normal flow. */
   onContinue: (project: LauncherProject) => void;
-  /** New project — wired by issue 82; until then the classic folder picker. */
-  onNewProject: () => void;
+  /**
+   * New project (issue 82): the guided flow just created and committed this
+   * workbench project — land the Window on it (with the Big feature /
+   * Quick fix nudge).
+   */
+  onProjectCreated: (created: { workbenchDir: string; label: string }) => void;
   /** Big feature — wired by issue 83; until then the classic folder picker. */
   onBigFeature: () => void;
   /** Just talk: one warm bare Pane on this project (CORE.md injected). */
@@ -36,14 +42,25 @@ interface LauncherProps {
   onQuickFixRunNow: (project: LauncherProject, issue: QuickFixIssueRef) => void;
 }
 
-type LauncherMode = 'menu' | 'quickfix' | 'talk';
+type LauncherMode = 'menu' | 'newproject' | 'quickfix' | 'talk';
+
+/** One repo row of the New project form. */
+interface RepoRow {
+  key: string;
+  path: string;
+  /** True once the user edited the key by hand — stop auto-deriving it. */
+  keyTouched: boolean;
+}
+
+const EMPTY_ROW: RepoRow = { key: '', path: '', keyTouched: false };
 
 /**
  * The Launcher (issue 81, ADR-0016): every empty Window IS this surface —
  * *what are we doing?* — and the home affordance returns any Window to it
- * without closing its project. Five actions: New project / Big feature
- * (present; wired by issues 82/83 — until then they open the classic folder
- * picker), and the three this issue fully implements — Quick fix (one
+ * without closing its project. Five actions: New project (issue 82 — the
+ * guided onboarding flow: name + repo paths → workbench project + registry
+ * entries + one commit, then land on the new project), Big feature (present;
+ * wired by issue 83 — until then the classic folder picker), Quick fix (one
  * sentence → a standalone workbench issue, auto-committed, with a Run-now
  * offer), Just talk (one warm bare Pane), and Continue (recent projects with
  * a truthful one-line state).
@@ -54,13 +71,95 @@ export function Launcher({
   activeProjectLabel,
   onBackToProject,
   onContinue,
-  onNewProject,
+  onProjectCreated,
   onBigFeature,
   onJustTalkProject,
   onJustTalkFolder,
   onQuickFixRunNow,
 }: LauncherProps): JSX.Element {
   const [mode, setMode] = useState<LauncherMode>('menu');
+
+  // --- New project state (issue 82) ------------------------------------------
+  const [projName, setProjName] = useState('');
+  const [repoRows, setRepoRows] = useState<RepoRow[]>([EMPTY_ROW]);
+  const [onboardErrors, setOnboardErrors] = useState<string[]>([]);
+  // Warnings awaiting the human's "Create anyway" (non-git / missing paths).
+  const [onboardWarnings, setOnboardWarnings] = useState<string[]>([]);
+  const [onboarding, setOnboarding] = useState(false);
+
+  const setRow = (index: number, patch: Partial<RepoRow>): void => {
+    setRepoRows((rows) => rows.map((r, i) => (i === index ? { ...r, ...patch } : r)));
+    // Any edit invalidates a pending warnings confirmation.
+    setOnboardWarnings([]);
+  };
+
+  /** Fill a row's path (typed or browsed), deriving key/name when untouched. */
+  const fillRowPath = (index: number, path: string): void => {
+    setRepoRows((rows) =>
+      rows.map((r, i) =>
+        i === index ? { ...r, path, key: r.keyTouched ? r.key : repoKeyFor(path) } : r,
+      ),
+    );
+    setOnboardWarnings([]);
+    // Registering an existing repo: the picked folder pre-fills the name too.
+    if (index === 0 && projName.trim().length === 0) {
+      const base = path.split('/').filter(Boolean).pop();
+      if (base) setProjName(base);
+    }
+  };
+
+  const browseRow = (index: number): void => {
+    void window.mc.pickProjectFolder().then(({ path }) => {
+      if (path) fillRowPath(index, path);
+    });
+  };
+
+  /**
+   * Submit the New project form. First pass validates (dryRun): refusals show
+   * as errors; non-git / missing-path warnings show with the button switched
+   * to "Create anyway" (warn, allow — ADR-0016). The confirmed pass creates
+   * for real and lands the Window on the new project.
+   */
+  const createProject = (confirmedWarnings: boolean): void => {
+    if (onboarding) return;
+    setOnboarding(true);
+    setOnboardErrors([]);
+    const req = {
+      name: projName,
+      repos: repoRows
+        .filter((r) => r.path.trim().length > 0 || r.key.trim().length > 0)
+        .map((r) => ({ key: r.key.trim(), path: r.path.trim() })),
+    };
+    void window.mc
+      .createProject({ ...req, dryRun: !confirmedWarnings })
+      .then(async (res: OnboardingCreateResult): Promise<OnboardingCreateResult | null> => {
+        if (!res.ok) return res;
+        if (!confirmedWarnings) {
+          if (res.warnings.length > 0) {
+            setOnboardWarnings(res.warnings); // pause for "Create anyway"
+            return null;
+          }
+          return window.mc.createProject(req); // clean dry run → create for real
+        }
+        return res;
+      })
+      .then((res) => {
+        if (res === null) return;
+        if (!res.ok || res.workbenchDir === null) {
+          setOnboardErrors(res.errors.length > 0 ? res.errors : ['Could not create the project.']);
+          setOnboardWarnings([]);
+          return;
+        }
+        onProjectCreated({ workbenchDir: res.workbenchDir, label: res.dirName ?? projName });
+        setProjName('');
+        setRepoRows([EMPTY_ROW]);
+        setOnboardWarnings([]);
+      })
+      .catch((err: unknown) => {
+        setOnboardErrors([err instanceof Error ? err.message : String(err)]);
+      })
+      .finally(() => setOnboarding(false));
+  };
 
   // --- Quick fix state ------------------------------------------------------
   const [quickFixDir, setQuickFixDir] = useState<string>('');
@@ -122,6 +221,8 @@ export function Launcher({
     setMode('menu');
     setQuickFixError(null);
     setCreated(null);
+    setOnboardErrors([]);
+    setOnboardWarnings([]);
   };
 
   const projectRows = (onPick: (p: LauncherProject) => void, verb: string): JSX.Element =>
@@ -165,8 +266,11 @@ export function Launcher({
             <div className="launcher__actions">
               <button
                 className="launcher__action"
-                onClick={onNewProject}
-                title="Set up a new project (guided onboarding lands with issue 82 — for now this opens the classic folder picker)"
+                onClick={() => {
+                  setMode('newproject');
+                  setQueuedNote(null);
+                }}
+                title="Set up a new workbench project (or register an existing repo): name + repo paths → CONFIG, registry entries, one commit"
               >
                 <span className="launcher__action-name">New project</span>
                 <span className="launcher__action-hint">start or register a project</span>
@@ -206,6 +310,125 @@ export function Launcher({
 
             <h2 className="launcher__subtitle">Continue</h2>
             {projectRows(onContinue, 'Open')}
+          </>
+        )}
+
+        {mode === 'newproject' && (
+          <>
+            <h1 className="launcher__title">New project</h1>
+            <p className="launcher__hint">
+              Start a project — or register a repo you&apos;ve been working in. This creates
+              ~/Workbench/&lt;project&gt; (CONFIG, empty backlog, memory), adds the registry
+              entries, and commits the workbench.
+            </p>
+            <div className="launcher__form">
+              <label className="launcher__label">
+                Project name
+                <input
+                  className="launcher__input"
+                  type="text"
+                  value={projName}
+                  placeholder="e.g. Billing Platform"
+                  onChange={(e) => {
+                    setProjName(e.target.value);
+                    setOnboardWarnings([]);
+                  }}
+                  autoFocus
+                />
+              </label>
+
+              <span className="launcher__label">
+                Code repos — the first is the default
+                {repoRows.map((row, i) => (
+                  <span className="launcher__repo-row" key={i}>
+                    <input
+                      className="launcher__input launcher__input--path"
+                      type="text"
+                      value={row.path}
+                      placeholder={i === 0 ? '~/Developer/my-repo' : 'another repo path'}
+                      onChange={(e) => fillRowPath(i, e.target.value)}
+                    />
+                    <button
+                      className="launcher__secondary"
+                      onClick={() => browseRow(i)}
+                      title="Pick the repo folder (pre-fills the key — and the name, when empty)"
+                    >
+                      Browse…
+                    </button>
+                    <input
+                      className="launcher__input launcher__input--key"
+                      type="text"
+                      value={row.key}
+                      placeholder="key"
+                      title="The short key issues name this repo by (repo: <key>)"
+                      onChange={(e) => setRow(i, { key: e.target.value, keyTouched: true })}
+                    />
+                    {repoRows.length > 1 && (
+                      <button
+                        className="launcher__secondary"
+                        title="Remove this repo row"
+                        onClick={() => {
+                          setRepoRows((rows) => rows.filter((_, j) => j !== i));
+                          setOnboardWarnings([]);
+                        }}
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </span>
+                ))}
+                <span className="launcher__row">
+                  <button
+                    className="launcher__secondary"
+                    onClick={() => setRepoRows((rows) => [...rows, EMPTY_ROW])}
+                  >
+                    Add another repo
+                  </button>
+                </span>
+              </span>
+
+              {onboardErrors.length > 0 && (
+                <span className="launcher__error">
+                  {onboardErrors.map((e, i) => (
+                    <span key={i}>
+                      {e}
+                      <br />
+                    </span>
+                  ))}
+                </span>
+              )}
+              {onboardWarnings.length > 0 && (
+                <span className="launcher__warning">
+                  {onboardWarnings.map((w, i) => (
+                    <span key={i}>
+                      {w}
+                      <br />
+                    </span>
+                  ))}
+                </span>
+              )}
+              <div className="launcher__row">
+                <button
+                  className="launcher__primary"
+                  onClick={() => createProject(onboardWarnings.length > 0)}
+                  disabled={onboarding}
+                  title={
+                    onboardWarnings.length > 0
+                      ? 'Create the project despite the warnings above'
+                      : 'Validate and create the workbench project'
+                  }
+                >
+                  {onboarding
+                    ? 'Creating…'
+                    : onboardWarnings.length > 0
+                      ? 'Create anyway'
+                      : 'Create project'}
+                </button>
+                <button className="launcher__secondary" onClick={backToMenu}>
+                  Cancel
+                </button>
+              </div>
+            </div>
           </>
         )}
 

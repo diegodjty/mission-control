@@ -30,6 +30,7 @@ import { mergeRuns, abortMerge } from './run-merge';
 import { RunLogStore } from './run-log-store';
 import { ReceiptWatcher } from './receipt-watcher';
 import { commitWorkbenchProject } from './workbench-git';
+import { createWorkbenchProject } from './onboarding';
 import { readCoreMemory, writeDrainJournal } from './memory-files';
 import {
   buildQuickFixIssue,
@@ -67,6 +68,8 @@ import {
   type IssueStatusObserveResult,
   type LauncherListResult,
   type LauncherProject,
+  type OnboardingCreateRequest,
+  type OnboardingCreateResult,
   type QuickFixCreateRequest,
   type QuickFixCreateResult,
   type MainCommitRequest,
@@ -1110,6 +1113,31 @@ function registerIpc(): void {
       } catch (err) {
         return fail(err instanceof Error ? err.message : String(err));
       }
+    },
+  );
+
+  // New project (issue 82, ADR-0016): the Launcher's guided onboarding. All
+  // validation lives in the pure onboarding model; the edge work (project
+  // skeleton, registry append, ONE boring workbench commit) in
+  // `main/onboarding.ts`. Not ownership-gated — creating a project claims
+  // nothing; the Window lands on it through the normal open flow afterward.
+  ipcMain.handle(
+    IpcChannel.OnboardingCreate,
+    async (_event, req: OnboardingCreateRequest): Promise<OnboardingCreateResult> => {
+      const outcome = await createWorkbenchProject({
+        workbenchRoot: WORKBENCH_ROOT,
+        homeDir: homedir(),
+        name: req?.name ?? '',
+        repos: Array.isArray(req?.repos) ? req.repos : [],
+        dryRun: req?.dryRun === true,
+      });
+      return {
+        ok: outcome.ok,
+        errors: outcome.errors,
+        warnings: outcome.warnings,
+        dirName: outcome.dirName,
+        workbenchDir: outcome.workbenchDir,
+      };
     },
   );
 }

@@ -21,6 +21,8 @@ import {
   type IsolationApplyRequest,
   type IsolationApplyResult,
   type LauncherListResult,
+  type OnboardingCreateRequest,
+  type OnboardingCreateResult,
   type QuickFixCreateRequest,
   type QuickFixCreateResult,
   type IssueStatusObserveRequest,
@@ -156,6 +158,9 @@ const api: MissionControlApi = {
 
   createQuickFix: (req: QuickFixCreateRequest): Promise<QuickFixCreateResult> =>
     ipcRenderer.invoke(IpcChannel.QuickFixCreate, req),
+
+  createProject: (req: OnboardingCreateRequest): Promise<OnboardingCreateResult> =>
+    ipcRenderer.invoke(IpcChannel.OnboardingCreate, req),
 
   spawnPty: (req: PtySpawnRequest): Promise<PtySpawnResult> =>
     ipcRenderer.invoke(IpcChannel.PtySpawn, req),

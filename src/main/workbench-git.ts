@@ -52,20 +52,36 @@ export async function commitWorkbenchProject(
   projectRoot: string,
   message: string,
 ): Promise<WorkbenchCommitOutcome> {
+  return commitWorkbenchPaths(projectRoot, ['.'], message);
+}
+
+/**
+ * Commit everything currently changed under the given pathspecs (relative to
+ * `cwd`) with one message. The onboarding flow (issue 82) needs this shape:
+ * a NEW project's directory PLUS the root `registry.md` land in ONE boring
+ * commit, without sweeping any sibling project's dirt. Same discipline as
+ * `commitWorkbenchProject` (which is the `['.']` case with cwd = the project
+ * root): quiet no-op when clean, reported-never-thrown failures, never a push.
+ */
+export async function commitWorkbenchPaths(
+  cwd: string,
+  pathspecs: string[],
+  message: string,
+): Promise<WorkbenchCommitOutcome> {
   try {
-    // Stage every change under THIS project dir only (cwd-relative pathspec).
-    await git(projectRoot, ['add', '-A', '.']);
-    // Anything to commit? `--cached` vs HEAD, scoped to the project dir.
+    // Stage every change under the named pathspecs only.
+    await git(cwd, ['add', '-A', '--', ...pathspecs]);
+    // Anything to commit? `--cached` vs HEAD, scoped to the same pathspecs.
     // Exit 0 = no staged changes here → quiet no-op (idempotence).
     try {
-      await git(projectRoot, ['diff', '--cached', '--quiet', '--', '.']);
+      await git(cwd, ['diff', '--cached', '--quiet', '--', ...pathspecs]);
       return { committed: false, error: null };
     } catch {
-      // Non-zero exit: there IS something staged under the project dir.
+      // Non-zero exit: there IS something staged under the pathspecs.
     }
-    // Pathspec'd commit: only this project's paths land, even if other paths
-    // happen to be staged elsewhere in the workbench repo.
-    await git(projectRoot, ['commit', '-m', message, '--', '.']);
+    // Pathspec'd commit: only these paths land, even if other paths happen
+    // to be staged elsewhere in the workbench repo.
+    await git(cwd, ['commit', '-m', message, '--', ...pathspecs]);
     return { committed: true, error: null };
   } catch (err) {
     return { committed: false, error: err instanceof Error ? err.message : String(err) };

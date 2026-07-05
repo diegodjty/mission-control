@@ -344,6 +344,11 @@ export function App(): JSX.Element {
   // tracking. Deliberately NOT per-Project state: it is anchored to the cwd it
   // was started on, so a Project switch does not clear it.
   const [talk, setTalk] = useState<TalkTarget | null>(null);
+  // The New-project landing nudge (issue 82): after onboarding creates a
+  // project, the Window lands on its (empty) Map with a dismissible pointer
+  // toward Big feature (planning) or Quick fix. Cleared on dismissal and on
+  // any Project switch — it is about the project just created, nothing else.
+  const [onboardNudge, setOnboardNudge] = useState<string | null>(null);
 
   // --- Run state -----------------------------------------------------------
   const [runs, setRuns] = useState<TrackedRun[]>([]);
@@ -667,6 +672,8 @@ export function App(): JSX.Element {
     // different Project must not surface (or select) the old one's reference.
     // (The attention snapshot itself is app-wide and deliberately stays.)
     setInboxFocus(null);
+    // Same for the New-project landing nudge (issue 82).
+    setOnboardNudge(null);
     setBacklog(null);
     setProjectPath(null);
   }, []);
@@ -1316,12 +1323,25 @@ export function App(): JSX.Element {
 
   // --- Launcher actions (issue 81, ADR-0016) --------------------------------
 
-  // The classic folder picker — what New project / Big feature open until
-  // issues 82/83 wire their real flows: Browse… then the normal open-here.
+  // The classic folder picker — what Big feature opens until issue 83 wires
+  // the Planning view: Browse… then the normal open-here.
   const openClassicPicker = useCallback(async (): Promise<void> => {
     const { path } = await window.mc.pickProjectFolder();
     if (path) await openProjectHere(path);
   }, [openProjectHere]);
+
+  // New project (issue 82): the guided flow just created and committed the
+  // workbench project — land this Window on it through the NORMAL open flow
+  // (so ownership/identity work exactly as any open), then show the nudge
+  // toward Big feature or Quick fix on the empty Map. The nudge is set AFTER
+  // the open, because a project switch deliberately clears it.
+  const landOnNewProject = useCallback(
+    async (created: { workbenchDir: string; label: string }): Promise<void> => {
+      await openProjectHere(created.workbenchDir);
+      setOnboardNudge(created.label);
+    },
+    [openProjectHere],
+  );
 
   // Just talk (issue 81): one warm bare Pane — CORE.md injected for workbench
   // projects (main reads it at the spawn edge), nothing claimed or tracked.
@@ -2703,6 +2723,28 @@ export function App(): JSX.Element {
             current even while you watch a Pane. */}
         <div className="app__slot" style={{ display: view === 'map' ? 'flex' : 'none' }}>
           <div className="app__map-col">
+          {/* The New-project landing nudge (issue 82): one quiet dismissible
+              line on the fresh (empty) project's Map pointing at the two ways
+              to put something in the backlog. */}
+          {onboardNudge !== null && (
+            <div className="app__inbox-focus">
+              <span className="app__inbox-focus-text">
+                <strong>{onboardNudge}</strong> is set up — its backlog is empty. Plan a{' '}
+                <strong>Big feature</strong> or add a <strong>Quick fix</strong> from{' '}
+                <button className="app__nudge-home" onClick={() => setView('launcher')}>
+                  Home
+                </button>
+                .
+              </span>
+              <button
+                className="app__inbox-focus-dismiss"
+                title="Dismiss"
+                onClick={() => setOnboardNudge(null)}
+              >
+                ✕
+              </button>
+            </div>
+          )}
           {/* An Inbox click-through's file reference (issue 80): the curator
               proposal / HUMAN-SETUP path the item pointed at, as one quiet
               dismissible line — issue references additionally select their
@@ -2980,7 +3022,7 @@ export function App(): JSX.Element {
               }
               onBackToProject={activeProjectKey !== null ? () => setView('map') : null}
               onContinue={(p) => void openProjectHere(p.workbenchDir)}
-              onNewProject={() => void openClassicPicker()}
+              onProjectCreated={(created) => void landOnNewProject(created)}
               onBigFeature={() => void openClassicPicker()}
               onJustTalkProject={talkToProject}
               onJustTalkFolder={() => void talkToFolder()}

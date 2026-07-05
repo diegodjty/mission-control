@@ -1763,3 +1763,40 @@ body.is-col-resizing {
   font-size: 12px;
   color: #9ccc9c;
 }
+
+/* --- New project form (issue 82) --- */
+
+.launcher__repo-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.launcher__input--path {
+  flex: 1;
+}
+
+.launcher__input--key {
+  width: 110px;
+}
+
+.launcher__warning {
+  margin: 0;
+  font-size: 12px;
+  color: #e8c58a;
+}
+
+/* The New-project landing nudge's inline Home link (issue 82). */
+.app__nudge-home {
+  background: none;
+  border: none;
+  padding: 0;
+  color: #6cb2f0;
+  cursor: pointer;
+  font-size: inherit;
+  text-decoration: underline;
+}
+
+.app__nudge-home:hover {
+  color: #8fc6f7;
+}

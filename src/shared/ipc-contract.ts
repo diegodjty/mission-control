@@ -211,6 +211,16 @@ export const IpcChannel = {
    * to a QuickFixCreateResult.
    */
   QuickFixCreate: 'quickfix:create',
+  /**
+   * renderer → main (invoke): the Launcher's New project flow (issue 82,
+   * ADR-0016) — validate a project name + repo drafts against the workbench
+   * and, unless `dryRun`, perform the ADR-0015 setup: project dir (CONFIG,
+   * empty issues/+completions/, memory skeleton with empty CORE.md), active
+   * registry entries (one per repo), ONE boring workbench commit. Refusals
+   * (collisions, already-registered repos) name every problem; non-git paths
+   * warn but are allowed. Resolves to an OnboardingCreateResult.
+   */
+  OnboardingCreate: 'onboarding:create',
 } as const;
 
 export type IpcChannel = (typeof IpcChannel)[keyof typeof IpcChannel];
@@ -855,6 +865,36 @@ export interface QuickFixCreateResult {
   title: string | null;
 }
 
+/** One repo row of the New project form: a short key + a path (issue 82). */
+export interface OnboardingRepoDraft {
+  /** The CONFIG `repos:` map key (no spaces/colons). */
+  key: string;
+  /** The code-repo path as entered (absolute or `~/`-prefixed). */
+  path: string;
+}
+
+export interface OnboardingCreateRequest {
+  /** The project display name; slugged into the workbench directory name. */
+  name: string;
+  /** One or more repo drafts; the FIRST becomes `default_repo`. */
+  repos: OnboardingRepoDraft[];
+  /** Validate only — report errors/warnings, write nothing. */
+  dryRun?: boolean;
+}
+
+export interface OnboardingCreateResult {
+  /** True when the plan holds (and, unless dryRun, everything was written). */
+  ok: boolean;
+  /** Refusal reasons — every problem named, not just the first. */
+  errors: string[];
+  /** Non-blocking notes (non-git / missing path) — warn, then allow. */
+  warnings: string[];
+  /** The workbench directory name, when the plan holds. */
+  dirName: string | null;
+  /** The absolute workbench project root, when the plan holds. */
+  workbenchDir: string | null;
+}
+
 /**
  * The surface preload exposes on `window.mc`. Declared here so main, preload,
  * and renderer all agree on one shape.
@@ -962,6 +1002,11 @@ export interface MissionControlApi {
    * the chosen workbench backlog, auto-committed.
    */
   createQuickFix(req: QuickFixCreateRequest): Promise<QuickFixCreateResult>;
+  /**
+   * The Launcher's New project flow (issue 82): validate (dryRun) or perform
+   * the ADR-0015 project setup + registry entries + one workbench commit.
+   */
+  createProject(req: OnboardingCreateRequest): Promise<OnboardingCreateResult>;
   spawnPty(req: PtySpawnRequest): Promise<PtySpawnResult>;
   writePty(msg: PtyWriteMessage): void;
   resizePty(msg: PtyResizeMessage): void;

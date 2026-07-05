@@ -12,7 +12,7 @@ import { promisify } from 'node:util';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { commitWorkbenchProject } from './workbench-git';
+import { commitWorkbenchPaths, commitWorkbenchProject } from './workbench-git';
 import { workbenchCommitMessage } from '../shared/workbench-run-events';
 
 const exec = promisify(execFile);
@@ -105,6 +105,51 @@ describe('commitWorkbenchProject (issue 72)', () => {
     const loose = await mkdtemp(join(tmpdir(), 'mc-no-git-'));
     try {
       const outcome = await commitWorkbenchProject(loose, 'x: issue 01 claim');
+      expect(outcome.committed).toBe(false);
+      expect(outcome.error).not.toBeNull();
+    } finally {
+      await rm(loose, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('commitWorkbenchPaths (issue 82)', () => {
+  it('commits exactly the named pathspecs — a project dir plus registry.md — in ONE commit', async () => {
+    const fresh = join(workbench, 'new-proj');
+    await mkdir(join(fresh, 'memory'), { recursive: true });
+    await writeFile(join(fresh, 'CONFIG.md'), '---\nrepos:\n  app: ~/x\ndefault_repo: app\n---\n');
+    await writeFile(join(fresh, 'memory', 'CORE.md'), '');
+    await writeFile(join(workbench, 'registry.md'), '- repo: ~/x\n  project: new-proj\n  status: active\n');
+    // Sibling dirt that must NOT ride along.
+    await writeFile(join(projectRoot, 'issues', '05-x.md'), '---\nstatus: wip\n---\n# 05\n');
+
+    const outcome = await commitWorkbenchPaths(
+      workbench,
+      ['new-proj', 'registry.md'],
+      'new-proj: project onboarded',
+    );
+    expect(outcome).toEqual({ committed: true, error: null });
+    expect(await commitCount()).toBe(2);
+    const shown = await git(workbench, 'show', '--stat', '--format=%s', 'HEAD');
+    expect(shown).toContain('new-proj: project onboarded');
+    expect(shown).toContain('new-proj/CONFIG.md');
+    expect(shown).toContain('new-proj/memory/CORE.md');
+    expect(shown).toContain('registry.md');
+    expect(shown).not.toContain('billing/');
+    // The sibling's flip is still uncommitted, untouched.
+    expect(await git(workbench, 'status', '--porcelain')).toContain('billing/');
+  });
+
+  it('is a quiet no-op when nothing under the pathspecs changed', async () => {
+    const outcome = await commitWorkbenchPaths(workbench, ['billing'], 'billing: nothing');
+    expect(outcome).toEqual({ committed: false, error: null });
+    expect(await commitCount()).toBe(1);
+  });
+
+  it('reports (never throws) outside a git repo', async () => {
+    const loose = await mkdtemp(join(tmpdir(), 'mc-no-git-'));
+    try {
+      const outcome = await commitWorkbenchPaths(loose, ['x'], 'x: y');
       expect(outcome.committed).toBe(false);
       expect(outcome.error).not.toBeNull();
     } finally {
