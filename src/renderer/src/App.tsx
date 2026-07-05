@@ -4,15 +4,18 @@ import { Map } from './Map';
 import { ProjectBar } from './ProjectBar';
 import { DispatcherPanel } from './DispatcherPanel';
 import { Inbox } from './Inbox';
+import { Launcher, type QuickFixIssueRef } from './Launcher';
 import type { AttentionItem } from '../../shared/attention-model';
 import { workbenchProjectPath } from '../../shared/inbox-model';
 import type { Backlog, IssueStatus } from '../../shared/backlog-model';
 import type {
   AttentionSnapshot,
   DispatcherTarget,
+  LauncherProject,
   ProjectView,
   RunLogRecord,
   RunTarget,
+  TalkTarget,
 } from '../../shared/ipc-contract';
 import {
   renderCompletionEvent,
@@ -161,7 +164,7 @@ function slugOf(fileName: string): string {
   return fileName.replace(/\.md$/, '');
 }
 
-type View = 'map' | 'pane' | 'inbox';
+type View = 'launcher' | 'map' | 'pane' | 'inbox';
 
 /**
  * An Inbox click-through's focus request (issue 80): the thing the clicked
@@ -202,7 +205,10 @@ function newRun(target: RunTarget): TrackedRun {
  * slots free.
  */
 export function App(): JSX.Element {
-  const [view, setView] = useState<View>('map');
+  // Every EMPTY Window is the Launcher (issue 81, ADR-0016): the front door
+  // is the initial view; opening/re-attaching a Project lands on the Map, and
+  // the Home tab returns here any time — without closing the open Project.
+  const [view, setView] = useState<View>('launcher');
   const [paneStatus, setPaneStatus] = useState('starting…');
 
   // The live backlog + resolved Project path, lifted from the Map so the
@@ -254,9 +260,10 @@ export function App(): JSX.Element {
         void openProjectHere(decision.path);
       } else if (decision.kind === 'reattach') {
         setActiveProjectKey(decision.key);
+        setView('map');
       }
-      // 'empty' → leave activeProjectKey null; the empty "open a Project"
-      // state renders. We never open the backend cwd here.
+      // 'empty' → leave activeProjectKey null; the Window stays on the
+      // Launcher (issue 81). We never open the backend cwd here.
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -312,6 +319,31 @@ export function App(): JSX.Element {
   // re-clicking the same item re-focuses it in the Map.
   const [inboxFocus, setInboxFocus] = useState<InboxFocus | null>(null);
   const [inboxFocusSeq, setInboxFocusSeq] = useState(0);
+
+  // --- Launcher state (issue 81, ADR-0016) ----------------------------------
+  // The Launcher's project list: every active workbench-registry project with
+  // truthful backlog counts, re-read from disk each time the Launcher is
+  // shown — coming home always sees current state lines, never a stale cache.
+  const [launcherProjects, setLauncherProjects] = useState<LauncherProject[]>([]);
+  useEffect(() => {
+    if (view !== 'launcher') return;
+    let disposed = false;
+    void window.mc
+      .listLauncherProjects()
+      .then((res) => {
+        if (!disposed) setLauncherProjects(res.projects);
+      })
+      .catch(() => {
+        // A transient read error keeps the previous list; re-entering retries.
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [view]);
+  // The "Just talk" Pane (issue 81): one warm bare session — no issue, no
+  // tracking. Deliberately NOT per-Project state: it is anchored to the cwd it
+  // was started on, so a Project switch does not clear it.
+  const [talk, setTalk] = useState<TalkTarget | null>(null);
 
   // --- Run state -----------------------------------------------------------
   const [runs, setRuns] = useState<TrackedRun[]>([]);
@@ -654,6 +686,9 @@ export function App(): JSX.Element {
       }
       setActiveProjectKey(res.activeProjectKey);
       setNewRepoPath('');
+      // An explicit open lands on the Map — in particular off the Launcher
+      // (issue 81); a no-op elsewhere (opens already happen from the Map).
+      setView((cur) => (cur === 'launcher' ? 'map' : cur));
     }
   }, [resetForProjectSwitch]);
 
@@ -1157,8 +1192,14 @@ export function App(): JSX.Element {
       committedWorktreeIds.current.delete(target.issueId);
 
       // The workbench-aware target (issue 72): a workbench Project's spawn
-      // prompt carries the explicit workbench paths; legacy adds nothing.
-      const enriched: RunTarget = { ...target, workbench: workbenchPathsForRun };
+      // prompt carries the explicit workbench paths; legacy adds nothing. A
+      // caller that already resolved them (the Launcher's quick-fix Run-now,
+      // issue 81 — it fires before the Map has loaded the backlog) keeps its
+      // own; Map-started Runs carry none and get the active Project's.
+      const enriched: RunTarget = {
+        ...target,
+        workbench: target.workbench ?? workbenchPathsForRun,
+      };
 
       // No resolved Project path yet: can't reconcile isolation, so fall back to
       // spawning on the target's given path (a lone Run). Never blocks the Pane.
@@ -1271,6 +1312,90 @@ export function App(): JSX.Element {
       workbenchPathsForRun,
       activeProject,
     ],
+  );
+
+  // --- Launcher actions (issue 81, ADR-0016) --------------------------------
+
+  // The classic folder picker — what New project / Big feature open until
+  // issues 82/83 wire their real flows: Browse… then the normal open-here.
+  const openClassicPicker = useCallback(async (): Promise<void> => {
+    const { path } = await window.mc.pickProjectFolder();
+    if (path) await openProjectHere(path);
+  }, [openProjectHere]);
+
+  // Just talk (issue 81): one warm bare Pane — CORE.md injected for workbench
+  // projects (main reads it at the spawn edge), nothing claimed or tracked.
+  const startTalk = useCallback((target: TalkTarget): void => {
+    setTalk(target);
+    setView('pane');
+  }, []);
+
+  const talkToProject = useCallback(
+    (p: LauncherProject): void =>
+      startTalk({ cwd: p.defaultRepoPath, workbenchProjectRoot: p.workbenchDir, label: p.label }),
+    [startTalk],
+  );
+
+  const talkToFolder = useCallback(async (): Promise<void> => {
+    const { path } = await window.mc.pickProjectFolder();
+    if (!path) return;
+    startTalk({
+      cwd: path,
+      workbenchProjectRoot: null,
+      label: path.split('/').filter(Boolean).pop() ?? path,
+    });
+  }, [startTalk]);
+
+  const endTalk = useCallback((): void => setTalk(null), []);
+
+  // Quick fix's Run now (issue 81): open the chosen project through the
+  // NORMAL open/claim flow, then launch exactly ONE bare Run on the freshly
+  // written issue (no Dispatcher — ADR-0010: a single manual Run stays a bare
+  // Pane). The target carries its own resolved repo + workbench paths because
+  // this fires before the Map has loaded the new project's backlog.
+  const runQuickFixNow = useCallback(
+    async (p: LauncherProject, issue: QuickFixIssueRef): Promise<void> => {
+      const res = await window.mc.openProject({ path: p.workbenchDir });
+      setProjects(res.projects);
+      setProjectError(res.error);
+      if (!res.ok) {
+        // Owned by another Window (or any open failure): the issue is safely
+        // queued in the backlog either way — surface the reason and stay put.
+        return;
+      }
+      const switched = isProjectSwitch(activeProjectKeyRef.current, res.activeProjectKey);
+      if (switched) resetForProjectSwitch();
+      setActiveProjectKey(res.activeProjectKey);
+      const projectView = res.projects.find((v) => v.key === res.activeProjectKey) ?? null;
+      const target: RunTarget = {
+        issueId: issue.issueId,
+        issueFileName: issue.fileName,
+        issueTitle: issue.title,
+        projectPath: projectView?.defaultRepoPath ?? p.defaultRepoPath,
+        workbench: {
+          issuesRoot: projectView?.issuesRoot ?? p.issuesRoot,
+          completionsRoot: projectView?.completionsRoot ?? p.completionsRoot,
+        },
+      };
+      if (switched) {
+        // The Window just landed on this project: the per-Project state
+        // (backlog, scan, runs) in this closure is the PREVIOUS project's —
+        // or empty — so `startRun`'s isolation reconcile must not run against
+        // it. The freshly created issue is by construction the lone Run here:
+        // add it directly, exactly as startRun's unresolved-project fallback
+        // does — a single bare Pane on the issue's target repo.
+        setRuns((prev) =>
+          prev.some((r) => r.target.issueId === target.issueId) ? prev : [...prev, newRun(target)],
+        );
+        setFocusedId(target.issueId);
+        setView('pane');
+      } else {
+        // Same project already open: the normal path, with its duplicate and
+        // concurrency-isolation guards against the live Run set.
+        startRun(target);
+      }
+    },
+    [resetForProjectSwitch, startRun],
   );
 
   const stopRun = useCallback((issueId: number): void => {
@@ -2494,8 +2619,10 @@ export function App(): JSX.Element {
   }, [projectPath, aborting]);
 
   // Adaptive tiled grid: the pure layout function decides the shape from the
-  // live Run count (issue 12). A maximized tile overrides it with a single cell.
-  const shape = gridShape(runs.length);
+  // live Run count (issue 12) — plus the Just-talk Pane when one is live
+  // (issue 81), which tiles beside the Runs like any other session. A
+  // maximized tile overrides it with a single cell.
+  const shape = gridShape(runs.length + (talk !== null ? 1 : 0));
   const maximizedRun = runs.find((r) => r.target.issueId === maximizedId) ?? null;
 
   return (
@@ -2514,6 +2641,15 @@ export function App(): JSX.Element {
           error={projectError}
         />
         <nav className="app__nav">
+          {/* The home affordance (issue 81): return this Window to the
+              Launcher — without closing its Project (the Map tab goes back). */}
+          <button
+            className={`app__tab${view === 'launcher' ? ' app__tab--active' : ''}`}
+            onClick={() => setView('launcher')}
+            title="Home — the Launcher"
+          >
+            Home
+          </button>
           <button
             className={`app__tab${view === 'map' ? ' app__tab--active' : ''}`}
             onClick={() => setView('map')}
@@ -2651,7 +2787,7 @@ export function App(): JSX.Element {
             once instead of hidden behind tabs. Maximizing a tile collapses the
             grid to one cell and hides (but keeps mounted) the others. A plain
             shell Pane (issue 01) shows when no Run is tracked. */}
-        {runs.length > 0 && (
+        {(runs.length > 0 || talk !== null) && (
           <div
             className={`app__grid${shape.scroll ? ' app__grid--scroll' : ''}`}
             style={{
@@ -2797,11 +2933,59 @@ export function App(): JSX.Element {
                 </div>
               );
             })}
+            {/* The Just-talk Pane (issue 81): a warm bare session tiled like a
+                Run but tracked by nothing — closing it is the only lifecycle. */}
+            {talk !== null && (
+              <div
+                className="app__tile"
+                style={{ display: maximizedRun !== null ? 'none' : 'flex' }}
+              >
+                <div className="app__tile-head">
+                  <span className="run-status run-status--running">talk</span>
+                  <span className="app__tile-title">Just talk · {talk.label}</span>
+                  <span className="app__tile-controls">
+                    <button
+                      className="app__tile-dismiss"
+                      title="End this session and close the Pane"
+                      onClick={endTalk}
+                    >
+                      ✕
+                    </button>
+                  </span>
+                </div>
+                <Pane
+                  talk={talk}
+                  onStatusChange={runs.length === 0 ? setPaneStatus : undefined}
+                />
+              </div>
+            )}
           </div>
         )}
-        {runs.length === 0 && view === 'pane' && (
+        {runs.length === 0 && talk === null && view === 'pane' && (
           <div className="app__slot" style={{ display: 'flex' }}>
             <Pane onStatusChange={setPaneStatus} onExit={() => setPaneStatus('exited')} />
+          </div>
+        )}
+
+        {/* The Launcher (issue 81): the front door every empty Window shows,
+            and where the Home tab returns any Window — with its Project (if
+            any) left open and untouched. */}
+        {view === 'launcher' && (
+          <div className="app__slot" style={{ display: 'flex' }}>
+            <Launcher
+              projects={launcherProjects}
+              attention={attention}
+              activeProjectLabel={
+                projects.find((p) => p.key === activeProjectKey)?.label ?? null
+              }
+              onBackToProject={activeProjectKey !== null ? () => setView('map') : null}
+              onContinue={(p) => void openProjectHere(p.workbenchDir)}
+              onNewProject={() => void openClassicPicker()}
+              onBigFeature={() => void openClassicPicker()}
+              onJustTalkProject={talkToProject}
+              onJustTalkFolder={() => void talkToFolder()}
+              onQuickFixRunNow={(p, issue) => void runQuickFixNow(p, issue)}
+            />
           </div>
         )}
 

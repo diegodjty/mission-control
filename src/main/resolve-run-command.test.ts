@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { buildRunPrompt, receiptPathFor, resolveRunCommand } from './resolve-run-command';
+import {
+  buildRunPrompt,
+  buildTalkPrompt,
+  receiptPathFor,
+  resolveRunCommand,
+  resolveTalkCommand,
+} from './resolve-run-command';
 import {
   CORE_MEMORY_CHAR_CAP,
   CORE_MEMORY_LABEL,
@@ -159,5 +165,43 @@ describe('memory injection (issue 73, ADR-0015)', () => {
     const prompt = buildRunPrompt({ ...ISSUE, memoryCore: 'should not appear' });
     expect(prompt).toBe(buildRunPrompt(ISSUE));
     expect(prompt).not.toContain('should not appear');
+  });
+});
+
+describe('buildTalkPrompt / resolveTalkCommand (issue 81)', () => {
+  it('no memory ⇒ no initial prompt at all — a genuinely bare warm session', () => {
+    expect(buildTalkPrompt(null)).toBeNull();
+    expect(buildTalkPrompt('')).toBeNull();
+    expect(buildTalkPrompt('  \n ')).toBeNull();
+    const cmd = resolveTalkCommand({}, null);
+    expect(cmd.file).toBe('claude');
+    expect(cmd.args).toEqual([]);
+  });
+
+  it('memory present ⇒ the labeled, capped CORE section rides the initial prompt', () => {
+    const prompt = buildTalkPrompt('- Stack: Electron + React');
+    expect(prompt).not.toBeNull();
+    expect(prompt).toContain(CORE_MEMORY_LABEL);
+    expect(prompt).toContain('- Stack: Electron + React');
+    expect(prompt).toContain('no issue is claimed');
+    const cmd = resolveTalkCommand({ CLAUDE_BIN: '/opt/claude' }, '- Stack: Electron + React');
+    expect(cmd.file).toBe('/opt/claude');
+    expect(cmd.args).toEqual([prompt]);
+  });
+
+  it('oversized memory is capped with the explicit truncation marker', () => {
+    const prompt = buildTalkPrompt('x'.repeat(CORE_MEMORY_CHAR_CAP * 4));
+    expect(prompt).not.toBeNull();
+    expect(prompt).toContain(CORE_TRUNCATION_MARKER);
+    expect(prompt!.length).toBeLessThan(CORE_MEMORY_CHAR_CAP * 2);
+  });
+
+  it('MC_RUN_CMD override keeps working, with and without a memory prompt', () => {
+    const bare = resolveTalkCommand({ MC_RUN_CMD: 'node fake.js --talk' }, null);
+    expect(bare).toEqual({ file: 'node', args: ['fake.js', '--talk'] });
+    const warm = resolveTalkCommand({ MC_RUN_CMD: 'node fake.js --talk' }, 'facts');
+    expect(warm.file).toBe('node');
+    expect(warm.args.slice(0, 2)).toEqual(['fake.js', '--talk']);
+    expect(warm.args[2]).toContain(CORE_MEMORY_LABEL);
   });
 });

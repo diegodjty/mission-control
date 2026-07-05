@@ -20,6 +20,9 @@ import {
   type DrainJournalResult,
   type IsolationApplyRequest,
   type IsolationApplyResult,
+  type LauncherListResult,
+  type QuickFixCreateRequest,
+  type QuickFixCreateResult,
   type IssueStatusObserveRequest,
   type IssueStatusObserveResult,
   type MainCommitRequest,
@@ -147,6 +150,12 @@ const api: MissionControlApi = {
 
   markAttentionSeen: (): Promise<AttentionMarkSeenResult> =>
     ipcRenderer.invoke(IpcChannel.AttentionMarkSeen),
+
+  listLauncherProjects: (): Promise<LauncherListResult> =>
+    ipcRenderer.invoke(IpcChannel.LauncherList),
+
+  createQuickFix: (req: QuickFixCreateRequest): Promise<QuickFixCreateResult> =>
+    ipcRenderer.invoke(IpcChannel.QuickFixCreate, req),
 
   spawnPty: (req: PtySpawnRequest): Promise<PtySpawnResult> =>
     ipcRenderer.invoke(IpcChannel.PtySpawn, req),

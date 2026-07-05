@@ -8,7 +8,7 @@
 import { randomUUID } from 'node:crypto';
 import * as pty from 'node-pty';
 import { resolveShell } from './resolve-shell';
-import { resolveRunCommand } from './resolve-run-command';
+import { resolveRunCommand, resolveTalkCommand } from './resolve-run-command';
 import { resolveDispatcherCommand } from './dispatcher-session';
 import type {
   PtyDataMessage,
@@ -82,10 +82,16 @@ export class PtySessionManager {
             // Same CORE.md injection for the Dispatcher seed (issue 73).
             memoryCore: context.memoryCore ?? null,
           })
-        : resolveShell(process.env, process.platform);
+        : req.talk
+          ? // A "Just talk" Pane (issue 81): a warm bare `claude` session —
+            // the labeled CORE.md context is its whole initial prompt, or no
+            // prompt at all when the project has no memory.
+            resolveTalkCommand(process.env, context.memoryCore ?? null)
+          : resolveShell(process.env, process.platform);
     const cwd =
       req.run?.projectPath ||
       req.dispatcher?.projectPath ||
+      req.talk?.cwd ||
       process.env.HOME ||
       process.cwd();
     const sessionId = randomUUID();

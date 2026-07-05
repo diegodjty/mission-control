@@ -1548,3 +1548,218 @@ body.is-col-resizing {
 .app__inbox-focus-dismiss:hover {
   color: #c7d2dd;
 }
+
+/* --- Launcher (issue 81, ADR-0016): the front door ----------------------- */
+
+.launcher {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  justify-content: center;
+}
+
+.launcher__body {
+  width: min(680px, 100%);
+  padding: 48px 24px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.launcher__back {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  color: #8296aa;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 0;
+}
+
+.launcher__back:hover {
+  color: #c7d2dd;
+}
+
+.launcher__title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  color: #e6edf3;
+}
+
+.launcher__subtitle {
+  margin: 18px 0 0;
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #8296aa;
+}
+
+.launcher__hint {
+  margin: 0;
+  font-size: 12px;
+  color: #8296aa;
+}
+
+.launcher__actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.launcher__action {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 14px;
+  background: #10161d;
+  border: 1px solid #232d38;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.launcher__action:hover {
+  border-color: #2b6cb0;
+  background: #121a24;
+}
+
+.launcher__action-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #e6edf3;
+}
+
+.launcher__action-hint {
+  font-size: 11px;
+  color: #8296aa;
+}
+
+.launcher__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.launcher__project {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 12px;
+  background: #10161d;
+  border: 1px solid #232d38;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.launcher__project:hover {
+  border-color: #2b6cb0;
+  background: #121a24;
+}
+
+.launcher__project-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #c7d2dd;
+}
+
+.launcher__project-state {
+  font-size: 12px;
+  color: #8296aa;
+  margin-left: auto;
+}
+
+.launcher__empty {
+  font-size: 12px;
+  color: #6b7a89;
+  margin: 4px 0 0;
+}
+
+.launcher__form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.launcher__label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #8296aa;
+}
+
+.launcher__select,
+.launcher__input {
+  background: #0b0f14;
+  border: 1px solid #232d38;
+  border-radius: 6px;
+  color: #e6edf3;
+  font-size: 13px;
+  padding: 8px 10px;
+}
+
+.launcher__input:focus,
+.launcher__select:focus {
+  outline: none;
+  border-color: #2b6cb0;
+}
+
+.launcher__row {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.launcher__primary {
+  background: #2b6cb0;
+  border: 1px solid #2b6cb0;
+  border-radius: 6px;
+  color: #fff;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 8px 14px;
+}
+
+.launcher__primary:hover {
+  background: #3b7cc0;
+}
+
+.launcher__primary:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.launcher__secondary {
+  background: none;
+  border: 1px solid #232d38;
+  border-radius: 6px;
+  color: #c7d2dd;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 8px 14px;
+}
+
+.launcher__secondary:hover {
+  border-color: #3a4757;
+}
+
+.launcher__error {
+  margin: 0;
+  font-size: 12px;
+  color: #f0a0a0;
+}
+
+.launcher__note {
+  margin: 0;
+  font-size: 12px;
+  color: #9ccc9c;
+}

@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
-import type { DispatcherTarget, RunTarget } from '../../shared/ipc-contract';
+import type { DispatcherTarget, RunTarget, TalkTarget } from '../../shared/ipc-contract';
 
 interface PaneProps {
   /**
@@ -16,6 +16,12 @@ interface PaneProps {
    * drain (issue 35) instead of a Run or a shell. Mutually exclusive with `run`.
    */
   dispatcher?: DispatcherTarget;
+  /**
+   * When set, this Pane hosts a warm bare "Just talk" `claude` session (issue
+   * 81): no issue, no tracking, CORE.md injected for workbench projects.
+   * Mutually exclusive with `run` and `dispatcher`.
+   */
+  talk?: TalkTarget;
   onStatusChange?: (status: string) => void;
   /**
    * Fired with each chunk of raw input the user types into this Pane's terminal
@@ -45,7 +51,7 @@ interface PaneProps {
  * output comes back via onPtyData. A Run passes `run` so main spawns `claude`
  * scoped to the issue instead of a shell.
  */
-export function Pane({ run, dispatcher, onStatusChange, onInput, onExit, onSession, stopSignal }: PaneProps): JSX.Element {
+export function Pane({ run, dispatcher, talk, onStatusChange, onInput, onExit, onSession, stopSignal }: PaneProps): JSX.Element {
   const hostRef = useRef<HTMLDivElement>(null);
   const sessionIdRef = useRef<string | null>(null);
   // Keep the latest onSession in a ref so the spawn effect (keyed on the Run
@@ -63,6 +69,7 @@ export function Pane({ run, dispatcher, onStatusChange, onInput, onExit, onSessi
   const runId = run?.issueId ?? null;
   const runPath = run?.projectPath ?? null;
   const dispatcherPath = dispatcher?.projectPath ?? null;
+  const talkPath = talk?.cwd ?? null;
 
   useEffect(() => {
     const host = hostRef.current;
@@ -112,7 +119,7 @@ export function Pane({ run, dispatcher, onStatusChange, onInput, onExit, onSessi
     });
 
     void window.mc
-      .spawnPty({ cols: term.cols, rows: term.rows, run, dispatcher })
+      .spawnPty({ cols: term.cols, rows: term.rows, run, dispatcher, talk })
       .then((res) => {
         if (disposed) {
           window.mc.killPty({ sessionId: res.sessionId });
@@ -122,10 +129,16 @@ export function Pane({ run, dispatcher, onStatusChange, onInput, onExit, onSessi
         sessionIdRef.current = res.sessionId;
         // A Run session's id is needed to capture its Completion block (issue
         // 34); a Dispatcher session's id is needed to feed it Completion blocks
-        // (issue 35). A plain shell Pane needs neither.
+        // (issue 35). A plain shell / Just-talk Pane needs neither.
         if (run || dispatcher) onSessionRef.current?.(res.sessionId);
         onStatusChange?.(
-          run ? `running (${res.file})` : dispatcher ? `dispatcher (${res.file})` : `live (${res.file})`,
+          run
+            ? `running (${res.file})`
+            : dispatcher
+              ? `dispatcher (${res.file})`
+              : talk
+                ? `talking (${res.file})`
+                : `live (${res.file})`,
         );
         term.focus();
       })
@@ -156,7 +169,7 @@ export function Pane({ run, dispatcher, onStatusChange, onInput, onExit, onSessi
       term.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runId, runPath, dispatcherPath]);
+  }, [runId, runPath, dispatcherPath, talkPath]);
 
   // Stop the Run on demand: kill the live session but keep the Pane mounted so
   // its final output (e.g. the agent's blocked reason) stays on screen.

@@ -6,6 +6,7 @@
  * between xterm.js (renderer) and node-pty (here in main).
  */
 import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent } from 'electron';
+import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { PtySessionManager } from './pty-session-manager';
@@ -30,6 +31,14 @@ import { RunLogStore } from './run-log-store';
 import { ReceiptWatcher } from './receipt-watcher';
 import { commitWorkbenchProject } from './workbench-git';
 import { readCoreMemory, writeDrainJournal } from './memory-files';
+import {
+  buildQuickFixIssue,
+  nextIssueNumber,
+  padIssueNumber,
+  quickFixFileName,
+  sortLauncherProjects,
+} from '../shared/launcher-model';
+import { parseRegistry } from '../shared/workbench-model';
 import {
   claimEventsBetween,
   receiptRunEvent,
@@ -56,6 +65,10 @@ import {
   type IsolationApplyResult,
   type IssueStatusObserveRequest,
   type IssueStatusObserveResult,
+  type LauncherListResult,
+  type LauncherProject,
+  type QuickFixCreateRequest,
+  type QuickFixCreateResult,
   type MainCommitRequest,
   type MainCommitResult,
   type WorktreeCommitRequest,
@@ -695,6 +708,11 @@ function registerIpc(): void {
       if (identity?.kind === 'workbench') {
         memoryCore = await readCoreMemory(join(identity.key, 'memory'));
       }
+    } else if (req.talk?.workbenchProjectRoot) {
+      // A "Just talk" Pane on a workbench project (issue 81): same CORE.md
+      // injection as a Run/Dispatcher; a bare folder passes null and spawns
+      // with no prompt at all.
+      memoryCore = await readCoreMemory(join(req.talk.workbenchProjectRoot, 'memory'));
     }
     return ptyManager.spawn(req, { memoryCore });
   });
@@ -952,6 +970,146 @@ function registerIpc(): void {
           .catch(() => {});
       }
       return { written: outcome.written, path: outcome.path, error: outcome.error };
+    },
+  );
+
+  // --- Launcher (issue 81, ADR-0016) ----------------------------------------
+
+  /** Read a file's text, or null when missing/unreadable — never throw. */
+  const readOrNull = async (path: string): Promise<string | null> => {
+    try {
+      return await readFile(path, 'utf8');
+    } catch {
+      return null;
+    }
+  };
+
+  /** The most recent file mtime across the given dirs (ISO), or null. */
+  const latestActivityIso = async (dirs: string[]): Promise<string | null> => {
+    let latest: number | null = null;
+    for (const dir of dirs) {
+      try {
+        const entries = await readdir(dir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (!entry.isFile()) continue;
+          try {
+            const s = await stat(join(dir, entry.name));
+            if (latest === null || s.mtimeMs > latest) latest = s.mtimeMs;
+          } catch {
+            // A file racing deletion just doesn't count.
+          }
+        }
+      } catch {
+        // A project may not have this dir yet (empty backlog) — fine.
+      }
+    }
+    return latest === null ? null : new Date(latest).toISOString();
+  };
+
+  // The Launcher's project list: every `status: active` workbench-registry
+  // project (open in a Window or not — same population the attention watch
+  // covers) with truthful backlog counts and a last-activity stamp, most
+  // recent first. Read-only: listing never claims, writes, or commits.
+  ipcMain.handle(IpcChannel.LauncherList, async (): Promise<LauncherListResult> => {
+    const registryContent = await readOrNull(join(WORKBENCH_ROOT, 'registry.md'));
+    if (registryContent === null) return { projects: [] };
+    const { entries } = parseRegistry(registryContent);
+    const names = [...new Set(entries.filter((e) => e.active).map((e) => e.project))];
+    const projects = await Promise.all(
+      names.map(async (name): Promise<LauncherProject> => {
+        // The same identity resolution the open flow uses (issue 71), aimed at
+        // the workbench dir — so Continue/Quick fix/Just talk act on exactly
+        // the handles a normal open would resolve.
+        const identity = await resolveProjectIdentity(join(WORKBENCH_ROOT, name));
+        const counts = { open: 0, wip: 0, done: 0 };
+        try {
+          const backlog = await readBacklogAt(identity.issuesRoot);
+          for (const issue of backlog.issues) counts[issue.status] += 1;
+        } catch {
+          // No issues dir yet (a fresh project) — truthful zero counts.
+        }
+        return {
+          dirName: name,
+          label: identity.label,
+          workbenchDir: identity.key,
+          defaultRepoPath: identity.defaultRepoPath,
+          issuesRoot: identity.issuesRoot,
+          completionsRoot: identity.completionsRoot,
+          counts,
+          lastActivity: await latestActivityIso([identity.issuesRoot, identity.completionsRoot]),
+        };
+      }),
+    );
+    return { projects: sortLauncherProjects(projects) };
+  });
+
+  // Quick fix (issue 81): one sentence → a well-formed standalone issue in the
+  // chosen project's workbench backlog, auto-committed via the existing
+  // issue-72 workbench commit path. Not ownership-gated: the backlog is the
+  // workbench claim surface — writing an `open` issue there is exactly what a
+  // human hand-adding a file would do, and the owning Window's backlog watch
+  // picks it up like any other change.
+  ipcMain.handle(
+    IpcChannel.QuickFixCreate,
+    async (_event, req: QuickFixCreateRequest): Promise<QuickFixCreateResult> => {
+      const fail = (error: string): QuickFixCreateResult => ({
+        ok: false,
+        error,
+        issueId: null,
+        fileName: null,
+        title: null,
+      });
+      const sentence = (req.sentence ?? '').replace(/\s+/g, ' ').trim();
+      if (sentence.length === 0) return fail('Type one sentence describing the fix.');
+      try {
+        const identity = await resolveProjectIdentity(normalizeProjectKey(req.workbenchDir));
+        if (identity.kind !== 'workbench') {
+          return fail(
+            'Quick fix writes to a workbench backlog — this project has none (ADR-0015).',
+          );
+        }
+        await mkdir(identity.issuesRoot, { recursive: true });
+        // `wx` never clobbers: a number race (another writer taking the same
+        // NN) surfaces as EEXIST and we re-list and re-number.
+        for (let attempt = 0; attempt < 5; attempt++) {
+          const existing = await readdir(identity.issuesRoot);
+          const id = nextIssueNumber(existing);
+          const fileName = quickFixFileName(id, sentence);
+          const content = buildQuickFixIssue({
+            id,
+            sentence,
+            date: new Date().toISOString().slice(0, 10),
+          });
+          try {
+            await writeFile(join(identity.issuesRoot, fileName), content, {
+              encoding: 'utf8',
+              flag: 'wx',
+            });
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code === 'EEXIST') continue;
+            throw err;
+          }
+          // The existing workbench auto-commit path (issue 72): serialized on
+          // the project key so it can't race a Run-event commit; quiet on
+          // failure — the backlog write itself already succeeded.
+          const num = padIssueNumber(id);
+          void repoSerializer
+            .run(normalizeProjectKey(identity.key), () =>
+              commitWorkbenchProject(identity.key, `${identity.label}: issue ${num} quick fix`),
+            )
+            .catch(() => {});
+          return {
+            ok: true,
+            error: null,
+            issueId: id,
+            fileName,
+            title: `${num} — ${sentence}`,
+          };
+        }
+        return fail('Could not find a free issue number (concurrent writers?) — try again.');
+      } catch (err) {
+        return fail(err instanceof Error ? err.message : String(err));
+      }
     },
   );
 }

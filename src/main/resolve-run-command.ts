@@ -151,3 +151,41 @@ export function resolveRunCommand(
   const bin = env.CLAUDE_BIN?.trim() || 'claude';
   return { file: bin, args: [prompt] };
 }
+
+/**
+ * The initial prompt for a "Just talk" Pane (issue 81, ADR-0016): a warm bare
+ * `claude` session — no issue is claimed, nothing is tracked — carrying the
+ * workbench project's CORE.md as labeled background context (issue 73's cap
+ * and label). No memory ⇒ null: the session spawns with NO initial prompt at
+ * all, a genuinely bare warm start.
+ */
+export function buildTalkPrompt(memoryCore: string | null | undefined): string | null {
+  const section = coreMemorySection(memoryCore ?? null);
+  if (section === '') return null;
+  return (
+    `This is a free-form working session — no issue is claimed and nothing is ` +
+    `tracked. The user will drive the conversation; wait for their first ` +
+    `message.` + section
+  );
+}
+
+/**
+ * Resolve the executable + args for a "Just talk" Pane: same precedence as a
+ * Run (`MC_RUN_CMD` override → `CLAUDE_BIN`/`claude`), but the prompt is only
+ * the labeled memory context — and absent entirely when the project has none.
+ */
+export function resolveTalkCommand(
+  env: Record<string, string | undefined>,
+  memoryCore: string | null | undefined,
+): ShellCommand {
+  const prompt = buildTalkPrompt(memoryCore);
+
+  const override = env.MC_RUN_CMD?.trim();
+  if (override) {
+    const parts = override.split(/\s+/);
+    return { file: parts[0], args: prompt === null ? parts.slice(1) : [...parts.slice(1), prompt] };
+  }
+
+  const bin = env.CLAUDE_BIN?.trim() || 'claude';
+  return { file: bin, args: prompt === null ? [] : [prompt] };
+}

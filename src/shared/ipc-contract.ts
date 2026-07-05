@@ -194,6 +194,23 @@ export const IpcChannel = {
    * of the next snapshot. Resolves to an AttentionMarkSeenResult.
    */
   AttentionMarkSeen: 'attention:mark-seen',
+  /**
+   * renderer → main (invoke): the Launcher's project list (issue 81,
+   * ADR-0016) — every `status: active` workbench-registry project with its
+   * truthful backlog counts and last-activity stamp, most recent first, for
+   * the Continue / Quick fix / Just talk actions. A read-only aggregation
+   * (like the attention watch): listing never claims or writes anything.
+   * Resolves to a LauncherListResult.
+   */
+  LauncherList: 'launcher:list',
+  /**
+   * renderer → main (invoke): the Launcher's Quick fix (issue 81, ADR-0016)
+   * — turn one sentence into a well-formed STANDALONE issue (`## Source`, no
+   * Parent, next free number) in the chosen project's workbench backlog, and
+   * auto-commit the workbench via the existing issue-72 commit path. Resolves
+   * to a QuickFixCreateResult.
+   */
+  QuickFixCreate: 'quickfix:create',
 } as const;
 
 export type IpcChannel = (typeof IpcChannel)[keyof typeof IpcChannel];
@@ -246,6 +263,26 @@ export interface DispatcherTarget {
   activePrd: string | null;
 }
 
+/**
+ * A "Just talk" target (issue 81, ADR-0016): one warm bare `claude` session —
+ * no issue claimed, nothing tracked — in a project's default repo (or any
+ * bare folder). For a workbench project, main reads its `memory/CORE.md` at
+ * the spawn edge and injects it as the labeled context section (issue 73);
+ * a bare folder spawns with no initial prompt at all.
+ */
+export interface TalkTarget {
+  /** Absolute cwd for the session: the project's default repo / bare folder. */
+  cwd: string;
+  /**
+   * The workbench project root (`~/Workbench/<project>`) when talking to a
+   * workbench project — where `memory/CORE.md` is read from. Null for a bare
+   * folder or a legacy project: nothing is injected.
+   */
+  workbenchProjectRoot: string | null;
+  /** Compact display label for the Pane header. */
+  label: string;
+}
+
 export interface PtySpawnRequest {
   cols: number;
   rows: number;
@@ -260,6 +297,11 @@ export interface PtySpawnRequest {
    * with `run`.
    */
   dispatcher?: DispatcherTarget;
+  /**
+   * When present, spawn a warm bare "Just talk" `claude` session (issue 81).
+   * Mutually exclusive with `run` and `dispatcher`.
+   */
+  talk?: TalkTarget;
 }
 
 export interface PtySpawnResult {
@@ -765,6 +807,55 @@ export interface AttentionMarkSeenResult {
 }
 
 /**
+ * One project as the Launcher's Continue / Quick fix / Just talk actions see
+ * it (issue 81, ADR-0016): an active workbench-registry project — open in a
+ * Window or not — with its resolved handles and truthful backlog counts.
+ */
+export interface LauncherProject {
+  /** The workbench directory name (matches attention items' `project`). */
+  dirName: string;
+  /** Compact display name. */
+  label: string;
+  /** The workbench project root — the handle the open/Continue flow uses. */
+  workbenchDir: string;
+  /** The repo a Run without a `repo:` key targets (Just talk's cwd). */
+  defaultRepoPath: string;
+  /** Where the project's `NN-slug.md` issue files live. */
+  issuesRoot: string;
+  /** Where the project's Receipts land. */
+  completionsRoot: string;
+  /** The backlog's status counts, read fresh off disk. */
+  counts: { open: number; wip: number; done: number };
+  /** ISO-8601 of the most recent issue/Receipt file change, or null. */
+  lastActivity: string | null;
+}
+
+export interface LauncherListResult {
+  /** Active workbench projects, most recently active first. */
+  projects: LauncherProject[];
+}
+
+export interface QuickFixCreateRequest {
+  /** The chosen project's workbench root (`~/Workbench/<project>`). */
+  workbenchDir: string;
+  /** The user's one sentence describing the fix. */
+  sentence: string;
+}
+
+export interface QuickFixCreateResult {
+  /** True when the issue file landed in the workbench backlog. */
+  ok: boolean;
+  /** A user-facing reason when `ok` is false; null on success. */
+  error: string | null;
+  /** The created issue's number, on success. */
+  issueId: number | null;
+  /** The created issue's `NN-slug.md` file name, on success. */
+  fileName: string | null;
+  /** The created issue's title (its heading text), on success. */
+  title: string | null;
+}
+
+/**
  * The surface preload exposes on `window.mc`. Declared here so main, preload,
  * and renderer all agree on one shape.
  */
@@ -861,6 +952,16 @@ export interface MissionControlApi {
    * (app userData) and re-derive, so seen journal entries stop surfacing.
    */
   markAttentionSeen(): Promise<AttentionMarkSeenResult>;
+  /**
+   * The Launcher's project list (issue 81): every active workbench-registry
+   * project with truthful backlog counts, most recently active first.
+   */
+  listLauncherProjects(): Promise<LauncherListResult>;
+  /**
+   * The Launcher's Quick fix (issue 81): one sentence → a standalone issue in
+   * the chosen workbench backlog, auto-committed.
+   */
+  createQuickFix(req: QuickFixCreateRequest): Promise<QuickFixCreateResult>;
   spawnPty(req: PtySpawnRequest): Promise<PtySpawnResult>;
   writePty(msg: PtyWriteMessage): void;
   resizePty(msg: PtyResizeMessage): void;
