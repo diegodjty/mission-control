@@ -29,6 +29,7 @@ import {
 import { mergeRuns, abortMerge } from './run-merge';
 import { RunLogStore } from './run-log-store';
 import { ReceiptWatcher } from './receipt-watcher';
+import { PlanningWatcher } from './planning-watcher';
 import { commitWorkbenchProject } from './workbench-git';
 import { createWorkbenchProject } from './onboarding';
 import { readCoreMemory, writeDrainJournal } from './memory-files';
@@ -40,6 +41,7 @@ import {
   sortLauncherProjects,
 } from '../shared/launcher-model';
 import { parseRegistry } from '../shared/workbench-model';
+import { isAllowedPlanningDoc } from '../shared/planning-model';
 import {
   claimEventsBetween,
   receiptRunEvent,
@@ -70,6 +72,9 @@ import {
   type LauncherProject,
   type OnboardingCreateRequest,
   type OnboardingCreateResult,
+  type PlanningDocReadRequest,
+  type PlanningDocReadResult,
+  type PlanningWatchRequest,
   type QuickFixCreateRequest,
   type QuickFixCreateResult,
   type MainCommitRequest,
@@ -377,6 +382,11 @@ let attentionLastSeen: AttentionLastSeenStore;
 // per renderer WebContents like the Backlog Watcher, so a closing Window never
 // leaks a watch.
 const receiptWatcher = new ReceiptWatcher();
+
+// The Planning view's live doc watch (issue 83, ADR-0016): per-renderer, over
+// the project's planning roots (workbench PRDs + issues, repo CONTEXT/ADRs).
+// Read-only by contract — it stats and reads docs, never writes.
+const planningWatcher = new PlanningWatcher();
 
 // Per-Project dedupe memory for the Receipt edge: record id (issue + finished)
 // → fingerprint of the ingested content, or null for ids seeded from the
@@ -1140,6 +1150,53 @@ function registerIpc(): void {
       };
     },
   );
+
+  // The Planning view's live doc watch (issue 83, ADR-0016): keyed per
+  // renderer like the Backlog watch; the workbench PRDs + issues and the
+  // repo's CONTEXT.md + docs/adr are watched, and the ordered doc list is
+  // pushed on real change (and once immediately). An empty workbenchDir stops
+  // the calling Window's watch (the Planning view was closed).
+  ipcMain.on(IpcChannel.PlanningWatch, (event, req: PlanningWatchRequest) => {
+    const sender = event.sender;
+    const key = String(sender.id);
+    const workbenchDir = req?.workbenchDir?.trim() ?? '';
+    if (workbenchDir === '') {
+      planningWatcher.unwatch(key);
+      return;
+    }
+    planningWatcher.watch(
+      key,
+      { workbenchDir, repoPath: req?.repoPath?.trim() ?? '' },
+      (docs) => {
+        if (!sender.isDestroyed())
+          sender.send(IpcChannel.PlanningChanged, { workbenchDir, docs });
+      },
+    );
+    sender.once('destroyed', () => planningWatcher.unwatch(key));
+  });
+
+  // Read ONE watched planning doc for the preview (issue 83). Allowlisted
+  // against the calling Window's live watch roots via the pure
+  // `isAllowedPlanningDoc` — the preview channel is not an arbitrary-file read.
+  ipcMain.handle(
+    IpcChannel.PlanningDocRead,
+    async (event, req: PlanningDocReadRequest): Promise<PlanningDocReadResult> => {
+      const path = req?.path ?? '';
+      const roots = planningWatcher.rootsFor(String(event.sender.id));
+      if (roots === null || !isAllowedPlanningDoc(roots, path)) {
+        return { path, content: null, error: 'Not a watched planning document.' };
+      }
+      try {
+        return { path, content: await readFile(path, 'utf8'), error: null };
+      } catch (err) {
+        return {
+          path,
+          content: null,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+  );
 }
 
 app.whenReady().then(async () => {
@@ -1168,6 +1225,7 @@ app.on('window-all-closed', () => {
   ptyManager.killAll();
   backlogWatcher.closeAll();
   receiptWatcher.closeAll();
+  planningWatcher.closeAll();
   if (process.platform !== 'darwin') app.quit();
 });
 
@@ -1175,6 +1233,7 @@ app.on('before-quit', () => {
   ptyManager.killAll();
   backlogWatcher.closeAll();
   receiptWatcher.closeAll();
+  planningWatcher.closeAll();
   // The attention watch closes on QUIT only — it deliberately survives
   // window-all-closed (macOS keeps the app alive; the Inbox keeps watching).
   attentionWatcher?.close();

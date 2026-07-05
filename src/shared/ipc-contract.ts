@@ -8,6 +8,7 @@
  */
 import type { AttentionItem } from './attention-model';
 import type { Backlog, IssueStatus } from './backlog-model';
+import type { PlanningDoc } from './planning-model';
 import type { CompletionRecord, RunOutcome } from './completion-parser';
 import type { IsolationRun } from './isolation-policy';
 import type { PipelineStage } from './project-registry';
@@ -211,6 +212,25 @@ export const IpcChannel = {
    * to a QuickFixCreateResult.
    */
   QuickFixCreate: 'quickfix:create',
+  /**
+   * renderer → main (send): watch a project's planning roots (issue 83,
+   * ADR-0016) — the workbench project dir (top-level PRDs + `issues/`) and
+   * the repo's `CONTEXT.md` + `docs/adr/` — for the Planning view's live
+   * preview. An empty `workbenchDir` stops the calling Window's watch.
+   */
+  PlanningWatch: 'planning:watch',
+  /**
+   * main → renderer (send): the watched planning doc set changed (a doc was
+   * written/added/removed) — the ordered list, most-recently-changed first.
+   * Also pushed once, immediately, when the watch starts.
+   */
+  PlanningChanged: 'planning:changed',
+  /**
+   * renderer → main (invoke): read ONE watched planning document for the
+   * preview (issue 83). Restricted to the calling Window's watched planning
+   * roots — never an arbitrary-file read. Resolves to a PlanningDocReadResult.
+   */
+  PlanningDocRead: 'planning:read-doc',
   /**
    * renderer → main (invoke): the Launcher's New project flow (issue 82,
    * ADR-0016) — validate a project name + repo drafts against the workbench
@@ -865,6 +885,39 @@ export interface QuickFixCreateResult {
   title: string | null;
 }
 
+/**
+ * Watch (or, with an empty `workbenchDir`, stop watching) a project's planning
+ * roots for the Planning view's live doc preview (issue 83, ADR-0016).
+ */
+export interface PlanningWatchRequest {
+  /** The workbench project root (`~/Workbench/<project>`); '' = unwatch. */
+  workbenchDir: string;
+  /** The project's default code repo (`CONTEXT.md` / `docs/adr/` live here). */
+  repoPath: string;
+}
+
+/** Pushed whenever the watched planning doc set changes (and once on watch). */
+export interface PlanningChangedMessage {
+  /** The workbench root the watch was started for (matches pushes to views). */
+  workbenchDir: string;
+  /** The watched docs, most-recently-changed first. */
+  docs: PlanningDoc[];
+}
+
+export interface PlanningDocReadRequest {
+  /** Absolute path of the doc to read — must be within the watched roots. */
+  path: string;
+}
+
+export interface PlanningDocReadResult {
+  /** The requested path, echoed so a stale response can be discarded. */
+  path: string;
+  /** The document text, or null when it could not be read. */
+  content: string | null;
+  /** Why reading failed (unwatched path / fs error), else null. */
+  error: string | null;
+}
+
 /** One repo row of the New project form: a short key + a path (issue 82). */
 export interface OnboardingRepoDraft {
   /** The CONFIG `repos:` map key (no spaces/colons). */
@@ -1007,6 +1060,15 @@ export interface MissionControlApi {
    * the ADR-0015 project setup + registry entries + one workbench commit.
    */
   createProject(req: OnboardingCreateRequest): Promise<OnboardingCreateResult>;
+  /**
+   * Start (or, with an empty `workbenchDir`, stop) the Planning view's live
+   * doc watch over the project's planning roots (issue 83).
+   */
+  watchPlanning(req: PlanningWatchRequest): void;
+  /** Subscribe to planning doc-set changes; returns an unsubscribe function. */
+  onPlanningChanged(listener: (msg: PlanningChangedMessage) => void): () => void;
+  /** Read one watched planning document for the read-only preview (issue 83). */
+  readPlanningDoc(req: PlanningDocReadRequest): Promise<PlanningDocReadResult>;
   spawnPty(req: PtySpawnRequest): Promise<PtySpawnResult>;
   writePty(msg: PtyWriteMessage): void;
   resizePty(msg: PtyResizeMessage): void;

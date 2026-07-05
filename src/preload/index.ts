@@ -23,6 +23,10 @@ import {
   type LauncherListResult,
   type OnboardingCreateRequest,
   type OnboardingCreateResult,
+  type PlanningChangedMessage,
+  type PlanningDocReadRequest,
+  type PlanningDocReadResult,
+  type PlanningWatchRequest,
   type QuickFixCreateRequest,
   type QuickFixCreateResult,
   type IssueStatusObserveRequest,
@@ -161,6 +165,19 @@ const api: MissionControlApi = {
 
   createProject: (req: OnboardingCreateRequest): Promise<OnboardingCreateResult> =>
     ipcRenderer.invoke(IpcChannel.OnboardingCreate, req),
+
+  watchPlanning: (req: PlanningWatchRequest): void => {
+    ipcRenderer.send(IpcChannel.PlanningWatch, req);
+  },
+
+  onPlanningChanged: (listener: (msg: PlanningChangedMessage) => void): (() => void) => {
+    const handler = (_e: IpcRendererEvent, msg: PlanningChangedMessage): void => listener(msg);
+    ipcRenderer.on(IpcChannel.PlanningChanged, handler);
+    return () => ipcRenderer.removeListener(IpcChannel.PlanningChanged, handler);
+  },
+
+  readPlanningDoc: (req: PlanningDocReadRequest): Promise<PlanningDocReadResult> =>
+    ipcRenderer.invoke(IpcChannel.PlanningDocRead, req),
 
   spawnPty: (req: PtySpawnRequest): Promise<PtySpawnResult> =>
     ipcRenderer.invoke(IpcChannel.PtySpawn, req),

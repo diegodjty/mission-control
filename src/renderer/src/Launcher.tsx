@@ -32,8 +32,11 @@ interface LauncherProps {
    * Quick fix nudge).
    */
   onProjectCreated: (created: { workbenchDir: string; label: string }) => void;
-  /** Big feature — wired by issue 83; until then the classic folder picker. */
-  onBigFeature: () => void;
+  /**
+   * Big feature (issue 83): open the Planning view — a warm Pane beside the
+   * live doc preview — on the chosen workbench project.
+   */
+  onBigFeatureProject: (project: LauncherProject) => void;
   /** Just talk: one warm bare Pane on this project (CORE.md injected). */
   onJustTalkProject: (project: LauncherProject) => void;
   /** Just talk on a bare folder (native picker; no memory, no tracking). */
@@ -42,7 +45,7 @@ interface LauncherProps {
   onQuickFixRunNow: (project: LauncherProject, issue: QuickFixIssueRef) => void;
 }
 
-type LauncherMode = 'menu' | 'newproject' | 'quickfix' | 'talk';
+type LauncherMode = 'menu' | 'newproject' | 'bigfeature' | 'quickfix' | 'talk';
 
 /** One repo row of the New project form. */
 interface RepoRow {
@@ -59,11 +62,11 @@ const EMPTY_ROW: RepoRow = { key: '', path: '', keyTouched: false };
  * *what are we doing?* — and the home affordance returns any Window to it
  * without closing its project. Five actions: New project (issue 82 — the
  * guided onboarding flow: name + repo paths → workbench project + registry
- * entries + one commit, then land on the new project), Big feature (present;
- * wired by issue 83 — until then the classic folder picker), Quick fix (one
- * sentence → a standalone workbench issue, auto-committed, with a Run-now
- * offer), Just talk (one warm bare Pane), and Continue (recent projects with
- * a truthful one-line state).
+ * entries + one commit, then land on the new project), Big feature (issue 83
+ * — pick a project, open the Planning view: a warm Pane beside the live doc
+ * preview), Quick fix (one sentence → a standalone workbench issue,
+ * auto-committed, with a Run-now offer), Just talk (one warm bare Pane), and
+ * Continue (recent projects with a truthful one-line state).
  */
 export function Launcher({
   projects,
@@ -72,7 +75,7 @@ export function Launcher({
   onBackToProject,
   onContinue,
   onProjectCreated,
-  onBigFeature,
+  onBigFeatureProject,
   onJustTalkProject,
   onJustTalkFolder,
   onQuickFixRunNow,
@@ -277,8 +280,11 @@ export function Launcher({
               </button>
               <button
                 className="launcher__action"
-                onClick={onBigFeature}
-                title="Plan a big feature (the Planning view lands with issue 83 — for now this opens the classic folder picker)"
+                onClick={() => {
+                  setMode('bigfeature');
+                  setQueuedNote(null);
+                }}
+                title="Plan a big feature: a Planning session beside a live preview of the docs as they're written"
               >
                 <span className="launcher__action-name">Big feature</span>
                 <span className="launcher__action-hint">grill → PRD → issues</span>
@@ -428,6 +434,22 @@ export function Launcher({
                   Cancel
                 </button>
               </div>
+            </div>
+          </>
+        )}
+
+        {mode === 'bigfeature' && (
+          <>
+            <h1 className="launcher__title">Big feature</h1>
+            <p className="launcher__hint">
+              grill → PRD → issues. Pick the project: a warm planning session opens beside a
+              live preview of the documents as they are written.
+            </p>
+            {projectRows(onBigFeatureProject, 'Plan in')}
+            <div className="launcher__row">
+              <button className="launcher__secondary" onClick={backToMenu}>
+                Cancel
+              </button>
             </div>
           </>
         )}

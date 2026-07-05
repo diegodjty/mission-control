@@ -5,6 +5,8 @@ import { ProjectBar } from './ProjectBar';
 import { DispatcherPanel } from './DispatcherPanel';
 import { Inbox } from './Inbox';
 import { Launcher, type QuickFixIssueRef } from './Launcher';
+import { PlanningView } from './PlanningView';
+import { stageInvocation, type PlanningStage } from '../../shared/planning-model';
 import type { AttentionItem } from '../../shared/attention-model';
 import { workbenchProjectPath } from '../../shared/inbox-model';
 import type { Backlog, IssueStatus } from '../../shared/backlog-model';
@@ -164,7 +166,17 @@ function slugOf(fileName: string): string {
   return fileName.replace(/\.md$/, '');
 }
 
-type View = 'launcher' | 'map' | 'pane' | 'inbox';
+type View = 'launcher' | 'map' | 'pane' | 'inbox' | 'planning';
+
+/**
+ * What the Planning view (issue 83) is planning: the chosen project's two
+ * planning roots plus its label. Per-Project state — cleared on a switch.
+ */
+interface PlanningTargetState {
+  workbenchDir: string;
+  repoPath: string;
+  label: string;
+}
 
 /**
  * An Inbox click-through's focus request (issue 80): the thing the clicked
@@ -349,6 +361,27 @@ export function App(): JSX.Element {
   // toward Big feature (planning) or Quick fix. Cleared on dismissal and on
   // any Project switch — it is about the project just created, nothing else.
   const [onboardNudge, setOnboardNudge] = useState<string | null>(null);
+
+  // --- Planning view state (issue 83, ADR-0016) ------------------------------
+  // Big feature opens the thin Planning view on the chosen project: a warm
+  // Pane beside the live doc preview. Per-Project — cleared on a switch. The
+  // stage buttons (Grill / PRD / Issues) type their skill invocation into the
+  // Pane through a DEDICATED submit-pump instance (issue 60's tested module),
+  // honoring its own defer-while-typing gate — the planning session's compose
+  // state, not the Dispatcher's.
+  const [planning, setPlanning] = useState<PlanningTargetState | null>(null);
+  const planningTyping = useRef<TypingState>(INITIAL_TYPING_STATE);
+  const planningPumpRef = useRef<DispatcherPump | null>(null);
+  if (planningPumpRef.current === null) {
+    planningPumpRef.current = createDispatcherPump({
+      write: (sessionId, data) => window.mc.writePty({ sessionId, data }),
+      canFlush: (now) => canFlushChat(planningTyping.current, now),
+    });
+  }
+  const planningPump = planningPumpRef.current;
+  // Monotonic per-click id so re-clicking a stage button re-sends (the pump
+  // dedupes by key; each click is deliberately its own delivery).
+  const planningStageSeq = useRef(0);
 
   // --- Run state -----------------------------------------------------------
   const [runs, setRuns] = useState<TrackedRun[]>([]);
@@ -674,6 +707,14 @@ export function App(): JSX.Element {
     setInboxFocus(null);
     // Same for the New-project landing nudge (issue 82).
     setOnboardNudge(null);
+    // The Planning view is about ONE project (issue 83): drop it — and its
+    // pump/typing state — so the next project never inherits a planning Pane
+    // or a queued stage invocation. If this Window was ON the Planning view,
+    // land on the Map (the view would otherwise render nothing).
+    setPlanning(null);
+    planningPumpRef.current?.reset();
+    planningTyping.current = INITIAL_TYPING_STATE;
+    setView((cur) => (cur === 'planning' ? 'map' : cur));
     setBacklog(null);
     setProjectPath(null);
   }, []);
@@ -1323,12 +1364,58 @@ export function App(): JSX.Element {
 
   // --- Launcher actions (issue 81, ADR-0016) --------------------------------
 
-  // The classic folder picker — what Big feature opens until issue 83 wires
-  // the Planning view: Browse… then the normal open-here.
-  const openClassicPicker = useCallback(async (): Promise<void> => {
-    const { path } = await window.mc.pickProjectFolder();
-    if (path) await openProjectHere(path);
-  }, [openProjectHere]);
+  // Big feature (issue 83): open the chosen project through the NORMAL
+  // open/claim flow (ownership rules and all — a refusal shows in the project
+  // bar and the Window stays on the Launcher), then land on the Planning view:
+  // a warm Pane beside the live doc preview.
+  const startPlanning = useCallback(
+    async (p: LauncherProject): Promise<void> => {
+      const res = await window.mc.openProject({ path: p.workbenchDir });
+      setProjects(res.projects);
+      setProjectError(res.error);
+      if (!res.ok) return;
+      if (isProjectSwitch(activeProjectKeyRef.current, res.activeProjectKey)) {
+        resetForProjectSwitch();
+      }
+      setActiveProjectKey(res.activeProjectKey);
+      const projectView = res.projects.find((v) => v.key === res.activeProjectKey) ?? null;
+      setPlanning({
+        workbenchDir: p.workbenchDir,
+        repoPath: projectView?.defaultRepoPath ?? p.defaultRepoPath,
+        label: p.label,
+      });
+      setView('planning');
+    },
+    [resetForProjectSwitch],
+  );
+
+  // The planning Pane's session lifecycle: attach the pump to the live PTY so
+  // stage invocations reach THIS session (and are requeued for a replacement
+  // if it dies mid-delivery — the pump's issue-60 guarantees).
+  const handlePlanningSession = useCallback(
+    (sessionId: string): void => planningPump.attachSession(sessionId),
+    [planningPump],
+  );
+  const handlePlanningSessionEnd = useCallback(
+    (): void => planningPump.attachSession(null),
+    [planningPump],
+  );
+  // Fold the user's keystrokes into the planning compose state (issue 48's
+  // gate): a stage invocation never interleaves with the user's own typing.
+  const handlePlanningInput = useCallback((data: string): void => {
+    planningTyping.current = reduceTyping(planningTyping.current, data, Date.now());
+  }, []);
+  // A stage button click: type + submit the skill invocation through the pump.
+  const submitPlanningStage = useCallback(
+    (stage: PlanningStage): void => {
+      planningStageSeq.current += 1;
+      planningPump.enqueue({
+        key: `planning-stage:${stage}:${planningStageSeq.current}`,
+        text: stageInvocation(stage),
+      });
+    },
+    [planningPump],
+  );
 
   // New project (issue 82): the guided flow just created and committed the
   // workbench project — land this Window on it through the NORMAL open flow
@@ -2682,6 +2769,16 @@ export function App(): JSX.Element {
           >
             Pane{runs.length > 0 ? ` (${runs.length})` : ''}
           </button>
+          {/* The Planning view's tab (issue 83): present only while a Big
+              feature planning session is open on this Window's project. */}
+          {planning !== null && (
+            <button
+              className={`app__tab${view === 'planning' ? ' app__tab--active' : ''}`}
+              onClick={() => setView('planning')}
+            >
+              Plan
+            </button>
+          )}
           {/* The Inbox is a place you look (ADR-0012): a plain tab — no count,
               no badge, no pulse — that shows what awaits you when YOU choose
               to look. */}
@@ -3009,6 +3106,27 @@ export function App(): JSX.Element {
           </div>
         )}
 
+        {/* The Planning view (issue 83): a warm Pane beside the live doc
+            preview. Kept MOUNTED (hidden) while other views show, so the
+            planning session — and its file watch — survive tab switches;
+            it unmounts only when the project switches (state cleared). */}
+        {planning !== null && (
+          <div
+            className="app__slot"
+            style={{ display: view === 'planning' ? 'flex' : 'none' }}
+          >
+            <PlanningView
+              workbenchDir={planning.workbenchDir}
+              repoPath={planning.repoPath}
+              label={planning.label}
+              onSession={handlePlanningSession}
+              onSessionEnd={handlePlanningSessionEnd}
+              onInput={handlePlanningInput}
+              onStage={submitPlanningStage}
+            />
+          </div>
+        )}
+
         {/* The Launcher (issue 81): the front door every empty Window shows,
             and where the Home tab returns any Window — with its Project (if
             any) left open and untouched. */}
@@ -3023,7 +3141,7 @@ export function App(): JSX.Element {
               onBackToProject={activeProjectKey !== null ? () => setView('map') : null}
               onContinue={(p) => void openProjectHere(p.workbenchDir)}
               onProjectCreated={(created) => void landOnNewProject(created)}
-              onBigFeature={() => void openClassicPicker()}
+              onBigFeatureProject={(p) => void startPlanning(p)}
               onJustTalkProject={talkToProject}
               onJustTalkFolder={() => void talkToFolder()}
               onQuickFixRunNow={(p, issue) => void runQuickFixNow(p, issue)}

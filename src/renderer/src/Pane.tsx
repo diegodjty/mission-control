@@ -129,8 +129,10 @@ export function Pane({ run, dispatcher, talk, onStatusChange, onInput, onExit, o
         sessionIdRef.current = res.sessionId;
         // A Run session's id is needed to capture its Completion block (issue
         // 34); a Dispatcher session's id is needed to feed it Completion blocks
-        // (issue 35). A plain shell / Just-talk Pane needs neither.
-        if (run || dispatcher) onSessionRef.current?.(res.sessionId);
+        // (issue 35); a talk session's id is needed by the Planning view's
+        // stage buttons, which type skill invocations through the submit pump
+        // (issue 83). A plain shell Pane needs none.
+        if (run || dispatcher || talk) onSessionRef.current?.(res.sessionId);
         onStatusChange?.(
           run
             ? `running (${res.file})`
