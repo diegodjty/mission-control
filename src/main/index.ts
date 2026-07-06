@@ -32,6 +32,7 @@ import { ReceiptWatcher } from './receipt-watcher';
 import { PlanningWatcher } from './planning-watcher';
 import { commitWorkbenchProject } from './workbench-git';
 import { createWorkbenchProject } from './onboarding';
+import { deleteIssueFile, readIssueText, writeIssueText } from './issue-file-store';
 import { readCoreMemory, writeDrainJournal } from './memory-files';
 import {
   buildQuickFixIssue,
@@ -67,6 +68,11 @@ import {
   type DrainJournalResult,
   type IsolationApplyRequest,
   type IsolationApplyResult,
+  type IssueFileDeleteRequest,
+  type IssueFileEditRequest,
+  type IssueFileReadRequest,
+  type IssueFileReadResult,
+  type IssueFileWriteResult,
   type IssueStatusObserveRequest,
   type IssueStatusObserveResult,
   type LauncherListResult,
@@ -486,6 +492,58 @@ function registerIpc(): void {
     // never outlive the Window that needed them.
     sender.once('destroyed', () => backlogWatcher.unwatch(key));
   });
+
+  // --- Issue-file Edit / Delete (issue 89, ADR-0016 finding) ---------------
+  // The Map's one write exception: issue FILES. Decisions (what a valid save
+  // is, why a delete is refused) live in the pure shared/issue-file-ops; the
+  // fs work in main/issue-file-store. Like QuickFixCreate these are not
+  // ownership-gated: writing/deleting a backlog file is exactly what a human
+  // hand-edit in the workbench would be, and the owning Window's backlog
+  // watch picks the change up like any other. Workbench projects get one
+  // boring auto-commit per operation (`<project>: issue NN edited/deleted`)
+  // through the same serialized commit path as every other Run event; legacy
+  // projects leave the change uncommitted, as usual.
+  const commitIssueFileOp = (projectKey: string, fileName: string, verb: string): void => {
+    const identity = identityFor(projectKey);
+    if (identity === null || identity.kind !== 'workbench') return;
+    const num = /^(\d+)-/.exec(fileName)?.[1] ?? fileName;
+    void repoSerializer
+      .run(normalizeProjectKey(identity.key), () =>
+        commitWorkbenchProject(identity.key, `${identity.label}: issue ${num} ${verb}`),
+      )
+      .catch(() => {});
+  };
+
+  ipcMain.handle(
+    IpcChannel.IssueFileRead,
+    async (_event, req: IssueFileReadRequest): Promise<IssueFileReadResult> => {
+      const fileName = req?.fileName ?? '';
+      const outcome = await readIssueText(issuesRootFor(req.projectPath), fileName);
+      return { fileName, content: outcome.content, error: outcome.error };
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannel.IssueFileEdit,
+    async (_event, req: IssueFileEditRequest): Promise<IssueFileWriteResult> => {
+      const outcome = await writeIssueText(
+        issuesRootFor(req.projectPath),
+        req?.fileName ?? '',
+        req?.content ?? '',
+      );
+      if (outcome.ok) commitIssueFileOp(req.projectPath, req.fileName, 'edited');
+      return outcome;
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannel.IssueFileDelete,
+    async (_event, req: IssueFileDeleteRequest): Promise<IssueFileWriteResult> => {
+      const outcome = await deleteIssueFile(issuesRootFor(req.projectPath), req?.fileName ?? '');
+      if (outcome.ok) commitIssueFileOp(req.projectPath, req.fileName, 'deleted');
+      return outcome;
+    },
+  );
 
   // Observe an isolated Run's completion from its own worktree/branch (issue
   // 13): a parallel Run flips its issue to `done` inside its worktree, which

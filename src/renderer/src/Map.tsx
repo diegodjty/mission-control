@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Backlog, BacklogIssue } from '../../shared/backlog-model';
+import { deleteRefusal } from '../../shared/issue-file-ops';
 import type { RunLogRecord, RunTarget } from '../../shared/ipc-contract';
 import { runnableNow, type InFlightRuns } from '../../shared/run-eligibility';
 import {
@@ -176,6 +177,25 @@ export function Map({
   const [loading, setLoading] = useState(false);
   const [selectedId, setSelectedId] = useState<number | null>(null);
 
+  // Issue-file Edit / Delete (issue 89): the Map's one write exception. The
+  // editor seeds from a FRESH disk read (never a possibly-stale push), saves
+  // are parser-validated in main (a refusal shows here with its reason), and
+  // the delete sits behind an inline confirm naming the file. All of it
+  // resets whenever the selection changes.
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [issueOpBusy, setIssueOpBusy] = useState(false);
+  const [issueOpError, setIssueOpError] = useState<string | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+
+  useEffect(() => {
+    setEditing(false);
+    setDraft('');
+    setIssueOpBusy(false);
+    setIssueOpError(null);
+    setConfirmingDelete(false);
+  }, [selectedId]);
+
   // An Inbox click-through focuses its referenced issue (issue 80): select it
   // so the detail panel opens on it. Keyed on the bump too, so clicking the
   // same item again re-focuses even after the user selected something else.
@@ -253,6 +273,82 @@ export function Map({
   }, [reloadKey]);
 
   const selected = backlog?.issues.find((i) => i.id === selectedId) ?? null;
+
+  // Open the editor on a fresh disk read of the full file (frontmatter +
+  // body) — the backlog push only carries the body, and could be stale.
+  async function startEdit(): Promise<void> {
+    if (!selected || resolvedPath === null) return;
+    setIssueOpBusy(true);
+    setIssueOpError(null);
+    setConfirmingDelete(false);
+    try {
+      const res = await window.mc.readIssueFile({
+        projectPath: resolvedPath,
+        fileName: selected.fileName,
+      });
+      if (res.content === null) {
+        setIssueOpError(res.error ?? 'Could not read the issue file.');
+        return;
+      }
+      setDraft(res.content);
+      setEditing(true);
+    } catch (err) {
+      setIssueOpError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIssueOpBusy(false);
+    }
+  }
+
+  async function saveEdit(): Promise<void> {
+    if (!selected || resolvedPath === null) return;
+    setIssueOpBusy(true);
+    setIssueOpError(null);
+    try {
+      const res = await window.mc.editIssueFile({
+        projectPath: resolvedPath,
+        fileName: selected.fileName,
+        content: draft,
+      });
+      if (!res.ok) {
+        // A refused save (parse-breaking text) keeps the editor open with the
+        // draft intact, so the user fixes the text instead of losing it.
+        setIssueOpError(res.error ?? 'Save failed.');
+        return;
+      }
+      setEditing(false);
+      setDraft('');
+      // The reparsed backlog arrives via the live watch push — nothing to do.
+    } catch (err) {
+      setIssueOpError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIssueOpBusy(false);
+    }
+  }
+
+  async function confirmDelete(): Promise<void> {
+    if (!selected || resolvedPath === null) return;
+    setIssueOpBusy(true);
+    setIssueOpError(null);
+    try {
+      const res = await window.mc.deleteIssueFile({
+        projectPath: resolvedPath,
+        fileName: selected.fileName,
+      });
+      if (!res.ok) {
+        setIssueOpError(res.error ?? 'Delete failed.');
+        setConfirmingDelete(false);
+        return;
+      }
+      // The file is gone; clear the selection (the watch push drops the row).
+      setConfirmingDelete(false);
+      setSelectedId(null);
+    } catch (err) {
+      setIssueOpError(err instanceof Error ? err.message : String(err));
+      setConfirmingDelete(false);
+    } finally {
+      setIssueOpBusy(false);
+    }
+  }
 
   return (
     <div className="map">
@@ -559,7 +655,104 @@ export function Map({
               {backlog && (
                 <DependencySection issue={selected} issues={backlog.issues} />
               )}
-              <pre className="issue__body">{selected.body}</pre>
+
+              {/* Edit / Delete (issue 89): the Map's one write exception —
+                  issue FILES only. Edit is a raw editor over the whole file
+                  (frontmatter + body), saved back verbatim after the real
+                  backlog parser accepts it; Delete is refused for wip (the
+                  flip is a claim — someone owns it) and puts done behind an
+                  explicit "delete anyway". */}
+              {resolvedPath !== null && !editing && (
+                <div className="map__issue-ops">
+                  <button
+                    className="map__issue-op"
+                    onClick={() => void startEdit()}
+                    disabled={issueOpBusy}
+                    title="Edit this issue file (raw text: frontmatter + body)"
+                  >
+                    ✎ Edit
+                  </button>
+                  {(() => {
+                    const refusal = deleteRefusal(selected.status);
+                    return (
+                      <button
+                        className="map__issue-op map__issue-op--delete"
+                        onClick={() => {
+                          setIssueOpError(null);
+                          setConfirmingDelete(true);
+                        }}
+                        disabled={issueOpBusy || confirmingDelete || refusal !== null}
+                        title={refusal ?? `Delete ${selected.fileName}`}
+                      >
+                        🗑 Delete
+                      </button>
+                    );
+                  })()}
+                </div>
+              )}
+
+              {confirmingDelete && !editing && (
+                <div className="map__delete-confirm">
+                  <span className="map__delete-confirm-text">
+                    Delete <code>{selected.fileName}</code>?
+                    {selected.status === 'done'
+                      ? ' This issue is done — its Receipt and history survive in git, but the file goes.'
+                      : ' This removes the issue from the backlog.'}
+                  </span>
+                  <button
+                    className="map__issue-op map__issue-op--delete"
+                    onClick={() => void confirmDelete()}
+                    disabled={issueOpBusy}
+                  >
+                    {selected.status === 'done' ? 'Delete anyway' : 'Delete file'}
+                  </button>
+                  <button
+                    className="map__issue-op"
+                    onClick={() => setConfirmingDelete(false)}
+                    disabled={issueOpBusy}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+
+              {issueOpError && <div className="map__issue-op-error">{issueOpError}</div>}
+
+              {editing ? (
+                <div className="issue-editor">
+                  <textarea
+                    className="issue-editor__textarea"
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    spellCheck={false}
+                  />
+                  <div className="issue-editor__row">
+                    <button
+                      className="map__issue-op map__issue-op--save"
+                      onClick={() => void saveEdit()}
+                      disabled={issueOpBusy}
+                    >
+                      {issueOpBusy ? 'Saving…' : 'Save'}
+                    </button>
+                    <button
+                      className="map__issue-op"
+                      onClick={() => {
+                        setEditing(false);
+                        setDraft('');
+                        setIssueOpError(null);
+                      }}
+                      disabled={issueOpBusy}
+                    >
+                      Cancel
+                    </button>
+                    <span className="issue-editor__hint">
+                      Saved verbatim once it parses (status: open | wip | done).
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <pre className="issue__body">{selected.body}</pre>
+              )}
             </>
           ) : (
             <div className="map__detail-empty">Select an issue to see its full body.</div>

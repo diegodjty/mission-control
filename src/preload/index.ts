@@ -29,6 +29,11 @@ import {
   type PlanningWatchRequest,
   type QuickFixCreateRequest,
   type QuickFixCreateResult,
+  type IssueFileReadRequest,
+  type IssueFileReadResult,
+  type IssueFileEditRequest,
+  type IssueFileDeleteRequest,
+  type IssueFileWriteResult,
   type IssueStatusObserveRequest,
   type IssueStatusObserveResult,
   type MainCommitRequest,
@@ -165,6 +170,15 @@ const api: MissionControlApi = {
 
   createProject: (req: OnboardingCreateRequest): Promise<OnboardingCreateResult> =>
     ipcRenderer.invoke(IpcChannel.OnboardingCreate, req),
+
+  readIssueFile: (req: IssueFileReadRequest): Promise<IssueFileReadResult> =>
+    ipcRenderer.invoke(IpcChannel.IssueFileRead, req),
+
+  editIssueFile: (req: IssueFileEditRequest): Promise<IssueFileWriteResult> =>
+    ipcRenderer.invoke(IpcChannel.IssueFileEdit, req),
+
+  deleteIssueFile: (req: IssueFileDeleteRequest): Promise<IssueFileWriteResult> =>
+    ipcRenderer.invoke(IpcChannel.IssueFileDelete, req),
 
   watchPlanning: (req: PlanningWatchRequest): void => {
     ipcRenderer.send(IpcChannel.PlanningWatch, req);

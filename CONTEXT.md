@@ -17,6 +17,7 @@ _Avoid_: "repo" as a synonym for Project — a Project may span several repos.
 
 **Map**:
 The structured, birds-eye view of a backlog — issue statuses (open/wip/done), the dependency graph, git state, and completion blocks. Rendered from the **artifacts on disk**, never from a live agent stream.
+Exception (issue 89): issue FILES only — the detail panel can edit (parser-validated, saved verbatim) or delete (never `wip`) an issue file; everything else the Map shows stays read-only.
 _Avoid_: dashboard, board.
 
 **Pane** (a.k.a. cockpit):

@@ -1210,6 +1210,110 @@ body.is-col-resizing {
   margin: 0;
 }
 
+/* --- Issue-file Edit / Delete (issue 89) -------------------------------------
+   The Map's one write exception: a raw editor over the issue file plus a
+   confirmed delete, in the detail panel. */
+.map__issue-ops {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+}
+
+.map__issue-op {
+  background: #101b2e;
+  color: #8fb7f0;
+  border: 1px solid #2c4a7a;
+  border-radius: 6px;
+  padding: 3px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.map__issue-op:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.map__issue-op--delete {
+  background: #2a1212;
+  color: #f0a0a0;
+  border-color: #7a2323;
+}
+
+.map__issue-op--save {
+  background: #0f2416;
+  color: #7fd18c;
+  border-color: #2a6b3c;
+}
+
+.map__delete-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid #7a2323;
+  border-radius: 8px;
+  background: #1a0d0d;
+}
+
+.map__delete-confirm-text {
+  font-size: 12px;
+  color: #e8b8b8;
+  flex: 1 1 260px;
+}
+
+.map__delete-confirm-text code {
+  color: #f0d0a0;
+}
+
+.map__issue-op-error {
+  margin: 0 0 10px;
+  padding: 7px 10px;
+  border: 1px solid #7a2323;
+  border-radius: 8px;
+  background: #1a0d0d;
+  color: #f0a0a0;
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.issue-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.issue-editor__textarea {
+  width: 100%;
+  min-height: 320px;
+  resize: vertical;
+  box-sizing: border-box;
+  background: #0a0f14;
+  color: #c8d2dc;
+  border: 1px solid #22303c;
+  border-radius: 8px;
+  padding: 10px;
+  font-family: Menlo, Monaco, 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.issue-editor__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.issue-editor__hint {
+  font-size: 11px;
+  color: #708090;
+}
+
 /* --- Run-log feed (issue 34) ------------------------------------------------
    The durable, per-Project history of finished Runs, one card each, parsed from
    their Completion blocks. Sits between the guidance banner and the backlog. */

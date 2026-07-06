@@ -213,6 +213,32 @@ export const IpcChannel = {
    */
   QuickFixCreate: 'quickfix:create',
   /**
+   * renderer → main (invoke): read ONE issue file's raw text (frontmatter +
+   * body) for the Map's Edit affordance (issue 89, ADR-0016 finding). Reads
+   * fresh off disk at edit-open so the editor never seeds from a stale push.
+   * Restricted to plain `NN-slug.md` names inside the Project's resolved
+   * issues root — never an arbitrary-file read. Resolves to an
+   * IssueFileReadResult.
+   */
+  IssueFileRead: 'issue:read-file',
+  /**
+   * renderer → main (invoke): save one issue file's full replacement text
+   * (issue 89). Validated through the real backlog parser's rules BEFORE the
+   * write — a parse-breaking save is refused with the reason; a valid one is
+   * written verbatim (byte-what-was-typed) and, for a workbench Project,
+   * auto-committed (`<project>: issue NN edited`). Resolves to an
+   * IssueFileWriteResult.
+   */
+  IssueFileEdit: 'issue:edit-file',
+  /**
+   * renderer → main (invoke): delete one issue file after the UI's confirm
+   * (issue 89). Refused for `wip` issues — the flip is a claim; someone owns
+   * it — based on the CURRENT on-disk status, not the renderer's view. For a
+   * workbench Project the delete is auto-committed (`<project>: issue NN
+   * deleted`). Resolves to an IssueFileWriteResult.
+   */
+  IssueFileDelete: 'issue:delete-file',
+  /**
    * renderer → main (send): watch a project's planning roots (issue 83,
    * ADR-0016) — the workbench project dir (top-level PRDs + `issues/`) and
    * the repo's `CONTEXT.md` + `docs/adr/` — for the Planning view's live
@@ -885,6 +911,46 @@ export interface QuickFixCreateResult {
   title: string | null;
 }
 
+export interface IssueFileReadRequest {
+  /** The Project key whose resolved issues root holds the file. */
+  projectPath: string;
+  /** The plain `NN-slug.md` file name (no directories). */
+  fileName: string;
+}
+
+export interface IssueFileReadResult {
+  /** The file name echoed back, so a stale response can be discarded. */
+  fileName: string;
+  /** The raw file text (frontmatter + body), or null when unreadable. */
+  content: string | null;
+  /** Why reading failed, else null. */
+  error: string | null;
+}
+
+export interface IssueFileEditRequest {
+  /** The Project key whose resolved issues root holds the file. */
+  projectPath: string;
+  /** The plain `NN-slug.md` file name (no directories). */
+  fileName: string;
+  /** The FULL replacement text, written verbatim when it validates. */
+  content: string;
+}
+
+export interface IssueFileDeleteRequest {
+  /** The Project key whose resolved issues root holds the file. */
+  projectPath: string;
+  /** The plain `NN-slug.md` file name (no directories). */
+  fileName: string;
+}
+
+/** The outcome of an issue-file edit or delete (issue 89). */
+export interface IssueFileWriteResult {
+  /** True when the write/delete landed on disk. */
+  ok: boolean;
+  /** The refusal (parse-breaking save, wip delete) or fs failure, else null. */
+  error: string | null;
+}
+
 /**
  * Watch (or, with an empty `workbenchDir`, stop watching) a project's planning
  * roots for the Planning view's live doc preview (issue 83, ADR-0016).
@@ -1060,6 +1126,21 @@ export interface MissionControlApi {
    * the ADR-0015 project setup + registry entries + one workbench commit.
    */
   createProject(req: OnboardingCreateRequest): Promise<OnboardingCreateResult>;
+  /**
+   * Read one issue file's raw text for the Map's editor (issue 89) — fresh
+   * off disk, restricted to the Project's issues root.
+   */
+  readIssueFile(req: IssueFileReadRequest): Promise<IssueFileReadResult>;
+  /**
+   * Save one issue file's full replacement text (issue 89): parser-validated
+   * before the write, written verbatim, workbench auto-committed.
+   */
+  editIssueFile(req: IssueFileEditRequest): Promise<IssueFileWriteResult>;
+  /**
+   * Delete one issue file (issue 89): refused for `wip` (someone owns it),
+   * workbench auto-committed.
+   */
+  deleteIssueFile(req: IssueFileDeleteRequest): Promise<IssueFileWriteResult>;
   /**
    * Start (or, with an empty `workbenchDir`, stop) the Planning view's live
    * doc watch over the project's planning roots (issue 83).
