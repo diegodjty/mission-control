@@ -1,0 +1,29 @@
+# Repo-less projects: plan first, let the drain create the code
+
+**Status:** accepted. Refines ADR-0015 (the Project model — "one or more repos" becomes **zero or more**) and ADR-0002 (isolation lifecycle — adds an unisolatable target). Builds on ADR-0016 (Launcher, Inbox).
+
+The New-project flow (issue 82) makes you pick existing repo(s) at creation. But the real greenfield flow is **planning-first**: grill → PRD → issues, and the **drain** is what creates the codebases. At creation there are no repos yet, so the wizard can't model it. This is a conflation in the Project model, not a wizard bug: **planning needs zero repos, but some early issues are the thing that creates the repos.** The unlock is a realization already true in the code: planning (grill/PRD/issues) writes only to `~/Workbench/<project>/`, **never to code** — so nothing about planning needs a repo. A repo is needed only when a **Run** needs a working directory. So the fix is not "defer the repo" but "stop pretending a repo is required at creation."
+
+## Decisions
+
+- **Zero-repo is a legal Project state.** A Project's `repos:` map may be empty and `default_repo` absent. The Launcher's **New project** flow requires only a **name** and a **workspace root**; the repo step is skippable. Planning works the instant the project exists.
+- **Workspace root — a new first-class Project field:** the directory where the project's code will live (default `~/Developer/<name>/`). It is distinct from the **Workbench entry** (artifacts, `~/Workbench/<project>/`) and from any **repo**. A **no-repo issue** (no `repo:` on a repo-less project) runs with **cwd = the workspace root** — where a scaffold (`mkdir api && git init && npm create`) naturally works. This fixes the latent mis-model at `project-identity.ts:193`, where a repo-less project fell back to the *Workbench* root — the single shared artifacts repo, where `git init` would nest repos.
+- **No scaffold issue type.** Repo creation is ordinary **no-repo issue** work the drain executes. Multi-repo falls out of the dependency graph — `01 creates api`, `02 creates web`, `03 repo: api depends_on 01`. `repo:` resolves **only at run time** (already lazy — `run-targeting.ts:34`, enforced only at Run-launch, never written back to the issue file), so an issue may name `repo: api` before `api` exists, as long as it `depends_on` the issue that creates it.
+- **Self-heal registration via the Inbox, not silent auto-register.** When a new git repo appears under the workspace root, MC surfaces it in the **Inbox** for one-click confirm (which adds the `repos:` entry + registry line). Registration decides *where future Runs execute* — too load-bearing to guess. This is deliberately weaker than issue 62, which auto-*adopts* a **known** artifact (a stray Receipt); a newly-appeared repo is new *state*, which the Inbox (ADR-0016) exists to surface. The watch is scoped to the workspace root only (ADR-0006 discipline, cheap fs-watch); a repo living **outside** the workspace root is legal but must be registered explicitly.
+- **Isolation: the workspace root is an isolation key that cannot cut worktrees.** No-repo issues therefore **serialize solo against each other**, but run **in parallel** with repo-targeted issues. This is uniform with the per-repo keying already in `decideIsolationByRepo` (`isolation-policy.ts:129`, groups Runs by `run.repoPath ?? defaultRepoPath`), plus one new rule: a group whose key is **unisolatable** (a non-repo directory) serializes rather than attempting worktrees.
+- **Planned repos (optional).** A `repos:` entry may be **declared before the repo exists**; the Map renders it — and its `repo:`-targeted issues — as **planned** (grayed) until the directory appears and is confirmed. This is the payoff of planning-first: the intended codebase shape is visible on the Map before any code exists.
+
+## Considered Options
+
+- **`git init` the workspace root as one repo (monorepo-root)** — dissolves the isolation fork, but forecloses separate `api`/`web` repos: a later `mkdir api && git init` nests a repo inside a repo, which worktrees and merges handle badly. Rejects the multi-repo shape ADR-0015 deliberately supports.
+- **Wizard creates the first repo at creation** — presumes the codebase shape at creation time (is `api` first, or `web`?), the exact prematureness planning-first escapes; handles only the single-repo case; duplicates scaffold logic the drain needs anyway for repo 2+. Kept only as an optional convenience shortcut that *runs the same no-repo scaffold step eagerly* — not a second mechanism.
+- **Reuse the Workbench dir as the no-repo cwd** — `git init` inside the single shared artifacts repo nests repos and pollutes artifacts with scaffold code. This is precisely why the workspace root must be its own directory.
+- **Silent auto-register of appeared repos** — cheaper, but registration routes future Runs; a wrong guess silently mis-executes work. Inbox-confirm keeps it honest.
+
+## Consequences
+
+- The Project model is now **zero-or-more** repos and `default_repo` is optional. Call sites that assumed a non-null default repo path (the `project-identity.ts:193` "callers always get a repo path" contract) must handle the workspace-root fallback instead — a breaking refactor across identity, isolation, and Run-launch.
+- The New-project flow (issue 82) gets **simpler**: name + workspace root, repo step optional.
+- A new **Inbox** item class: *"a new repo appeared under `<workspace root>` — register it?"*
+- The isolation policy gains an **"unisolatable target serializes"** rule; two no-repo issues never parallelize with each other.
+- The e2e harness needs a **repo-less fixture**: create a project with no repo → a scaffold no-repo issue creates a repo → self-heal confirm registers it → a downstream `repo:`-targeted issue resolves and runs. Both this and the existing workbench/legacy fixtures stay green before any human walkthrough.

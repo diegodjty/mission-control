@@ -9,9 +9,11 @@
 import { describe, it, expect } from 'vitest';
 import {
   contractTilde,
+  defaultWorkspaceRoot,
   planOnboarding,
   projectDirName,
   repoKeyFor,
+  workspaceRootFor,
   type OnboardingInput,
 } from './onboarding-model';
 import { parseProjectConfig, parseRegistry, resolveProject } from './workbench-model';
@@ -152,6 +154,74 @@ describe('planOnboarding — the happy path round-trips through the real parsers
   });
 });
 
+describe('workspaceRootFor / defaultWorkspaceRoot (ADR-0017)', () => {
+  it('defaults to ~/Developer/<dirName> in the registry house style', () => {
+    expect(defaultWorkspaceRoot('Billing Platform')).toBe('~/Developer/billing-platform');
+    expect(workspaceRootFor('Billing Platform', '', HOME)).toBe('~/Developer/billing-platform');
+    expect(workspaceRootFor('Billing Platform', undefined, HOME)).toBe(
+      '~/Developer/billing-platform',
+    );
+  });
+
+  it('honors an entered root, normalized and contracted back to ~/ under home', () => {
+    expect(workspaceRootFor('Billing Platform', '/Users/dev/code/billing/', HOME)).toBe(
+      '~/code/billing',
+    );
+    // A foreign path (outside home) passes through, trailing slash trimmed.
+    expect(workspaceRootFor('Billing Platform', '/opt/billing/', HOME)).toBe('/opt/billing');
+  });
+
+  it('degrades to empty when the name has nothing usable (the caller refuses)', () => {
+    expect(defaultWorkspaceRoot('???')).toBe('');
+  });
+});
+
+describe('planOnboarding — repo-less projects (ADR-0017)', () => {
+  it('accepts zero repos: workspace_root, empty repos, NO default_repo, no registry lines', () => {
+    const plan = planOnboarding(input({ repos: [] }));
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) return;
+
+    // The default workspace root is written (name + workspace root is enough).
+    expect(plan.workspaceRoot).toBe('~/Developer/billing-platform');
+
+    // The CONFIG round-trips through the REAL parser: workspace_root present,
+    // repos empty, no default_repo — exactly the repo-less shape sessions read.
+    const config = parseProjectConfig(plan.configContent);
+    expect(config.workspaceRoot).toBe('~/Developer/billing-platform');
+    expect(config.repos).toEqual({});
+    expect(config.defaultRepo).toBeNull();
+    expect(config.notes).toEqual([]);
+
+    // No repos ⇒ no registry lines (registration is deferred to self-heal).
+    expect(plan.registryAppend).toBe('');
+    const { entries } = parseRegistry(`${REGISTRY}\n${plan.registryAppend}`);
+    expect(entries.filter((e) => e.project === 'billing-platform')).toEqual([]);
+  });
+
+  it('writes an entered workspace root into the CONFIG (contracted to ~/)', () => {
+    const plan = planOnboarding(input({ repos: [], workspaceRoot: '/Users/dev/code/billing' }));
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) return;
+    expect(plan.workspaceRoot).toBe('~/code/billing');
+    expect(parseProjectConfig(plan.configContent).workspaceRoot).toBe('~/code/billing');
+  });
+
+  it('warns (but allows) when the workspace root already exists and is non-empty', () => {
+    const plan = planOnboarding(input({ repos: [], workspaceRootNonEmpty: true }));
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) return;
+    expect(plan.warnings.some((w) => /already exists and is not empty/i.test(w))).toBe(true);
+  });
+
+  it('still refuses a colliding name even with zero repos (name is validated first)', () => {
+    const plan = planOnboarding(input({ name: 'Mission Control', repos: [] }));
+    expect(plan.ok).toBe(false);
+    if (plan.ok) return;
+    expect(plan.errors.join(' ')).toMatch(/mission-control/);
+  });
+});
+
 describe('planOnboarding — refusals name every problem', () => {
   it('refuses an unusable project name', () => {
     const plan = planOnboarding(input({ name: '!!!' }));
@@ -200,9 +270,9 @@ describe('planOnboarding — refusals name every problem', () => {
     expect(plan.errors.join(' ')).toContain('legacy-tool');
   });
 
-  it('refuses zero repos, empty paths, duplicate keys, and duplicate paths', () => {
-    expect(planOnboarding(input({ repos: [] })).ok).toBe(false);
-
+  it('refuses empty paths, duplicate keys, and duplicate paths', () => {
+    // Zero repos is NOT refused (ADR-0017 — repo-less projects are valid); its
+    // own positive test lives in the repo-less describe block below.
     const empty = planOnboarding(
       input({ repos: [{ key: 'app', path: '   ', exists: false, isGit: false }] }),
     );

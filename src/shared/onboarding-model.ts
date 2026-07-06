@@ -1,23 +1,29 @@
 /**
  * Onboarding model (PURE) — the Launcher's New project flow (issue 82,
- * ADR-0016), on top of the ADR-0015 workbench shapes.
+ * ADR-0016; repo-less projects, issue 93 / ADR-0017), on top of the ADR-0015
+ * workbench shapes.
  *
- * Given a project name and one or more code-repo drafts (each a short key +
- * path; the first is the default repo), plus the current workbench facts the
- * edge gathered (registry content, existing project dirs, which paths exist /
- * are git repos), `planOnboarding` either:
+ * Given a project name, a **workspace root** (where the code lives / will
+ * live; default `~/Developer/<name>`), and ZERO or more code-repo drafts (each
+ * a short key + path; the first is the default repo), plus the current
+ * workbench facts the edge gathered (registry content, existing project dirs,
+ * which paths exist / are git repos, whether the workspace root is non-empty),
+ * `planOnboarding` either:
  *
  *  - **refuses**, naming EVERY problem at once — unusable/colliding project
  *    name, a repo path already registered to another project (says which),
  *    duplicate keys/paths, an unparsable key; or
- *  - **plans**: the workbench directory name, the full `CONFIG.md` content
- *    (frontmatter `repos:` map + `default_repo`), and the `registry.md`
- *    append block (one `status: active` entry per repo path) — both of which
- *    round-trip through `workbench-model`'s own parsers, because those are
- *    what every later session reads.
+ *  - **plans**: the workbench directory name, the resolved workspace root, the
+ *    full `CONFIG.md` content (frontmatter `workspace_root` + `repos:` map +
+ *    `default_repo`), and the `registry.md` append block (one `status: active`
+ *    entry per repo path) — all of which round-trip through `workbench-model`'s
+ *    own parsers, because those are what every later session reads.
  *
- * Non-git and not-yet-existing paths WARN but never refuse: some projects
- * start docs-first (ADR-0016). Warnings ride both outcomes.
+ * **Zero repos is valid** (ADR-0017): a repo-less project starts with just a
+ * name + workspace root, so planning can begin before any code exists; the
+ * drain creates the codebases. Non-git / not-yet-existing repo paths, and an
+ * existing non-empty workspace root, WARN but never refuse. Warnings ride both
+ * outcomes.
  *
  * House PURE contract: no file/network/Electron I/O, any input yields a
  * value, never a throw. The directory creation, file writes, registry append,
@@ -53,6 +59,33 @@ export function repoKeyFor(path: string): string {
 }
 
 /**
+ * The default workspace root for a project name: `~/Developer/<dirName>` in the
+ * registry's `~/` house style (ADR-0017 — the common case, so the user doesn't
+ * have to think about where code lives). Empty when the name has nothing usable
+ * (the caller already refuses on the name; this just has nothing to build from).
+ */
+export function defaultWorkspaceRoot(name: string): string {
+  const dir = projectDirName(name);
+  return dir.length > 0 ? `~/Developer/${dir}` : '';
+}
+
+/**
+ * The effective workspace root to WRITE into CONFIG: the entered value
+ * (normalized + written `~/`-style) when the user gave one, else the default
+ * `~/Developer/<dirName>`. Pure and shared so the edge (which must stat the
+ * path for the non-empty warning) and the plan resolve the SAME root.
+ */
+export function workspaceRootFor(
+  name: string,
+  entered: string | null | undefined,
+  homeDir: string | null,
+): string {
+  const raw = typeof entered === 'string' ? entered.trim() : '';
+  if (raw.length > 0) return contractTilde(trimSlash(expandTilde(raw, homeDir)), homeDir);
+  return defaultWorkspaceRoot(name);
+}
+
+/**
  * The inverse of `expandTilde`, for WRITING workbench artifacts: a path under
  * the home directory is written `~/...` — the registry's house style — so
  * entries stay readable and machine-portable. Foreign paths pass through.
@@ -84,8 +117,19 @@ export interface RepoFact {
 export interface OnboardingInput {
   /** The project display name; slugged into the workbench directory name. */
   name: string;
-  /** One or more repo drafts; the FIRST is the project's default repo. */
+  /**
+   * Zero or more repo drafts; the FIRST is the project's default repo. Empty is
+   * valid — a repo-less project (ADR-0017): name + workspace root, no repos, so
+   * planning can start before any code exists.
+   */
   repos: readonly RepoFact[];
+  /**
+   * The workspace root the user entered, or empty/absent for the default
+   * `~/Developer/<name>` (ADR-0017). Where the project's code lives / will live.
+   */
+  workspaceRoot?: string;
+  /** Edge fact: the resolved workspace root exists on disk and is non-empty. */
+  workspaceRootNonEmpty?: boolean;
   /** Current `registry.md` content, or null when none exists yet. */
   registryContent: string | null;
   /** Directory names already present under the workbench root. */
@@ -99,9 +143,15 @@ export type OnboardingPlan =
       ok: true;
       /** The workbench directory name (`~/Workbench/<dirName>`). */
       dirName: string;
+      /** The resolved workspace root written into CONFIG (`~/`-style). */
+      workspaceRoot: string;
       /** Full `CONFIG.md` content for the new project. */
       configContent: string;
-      /** The block to append to `registry.md` (ends with a newline). */
+      /**
+       * The block to append to `registry.md` (ends with a newline) — one entry
+       * per repo actually given. EMPTY for a repo-less project: no repos, no
+       * registry lines (registration is deferred to when a repo appears).
+       */
       registryAppend: string;
       warnings: string[];
     }
@@ -150,11 +200,18 @@ export function planOnboarding(input: OnboardingInput): OnboardingPlan {
     }
   }
 
-  // --- Repo drafts -----------------------------------------------------------
-  if (repos.length === 0) {
-    errors.push('At least one code-repo path is required.');
+  // --- Workspace root --------------------------------------------------------
+  // Zero repos is valid (repo-less project, ADR-0017): the workspace root is
+  // what makes planning-before-code possible. An existing non-empty root warns
+  // but is allowed — don't silently plan on top of unrelated files.
+  const workspaceRoot = workspaceRootFor(name, input?.workspaceRoot, homeDir);
+  if (input?.workspaceRootNonEmpty === true && workspaceRoot.length > 0) {
+    warnings.push(
+      `The workspace root ${workspaceRoot} already exists and is not empty — allowed, but planning will sit alongside whatever is already there.`,
+    );
   }
 
+  // --- Repo drafts (optional — a repo-less project gives none) ---------------
   const { entries } = parseRegistry(input?.registryContent ?? null);
   const seenKeys = new Set<string>();
   const seenPaths = new Set<string>();
@@ -216,31 +273,45 @@ export function planOnboarding(input: OnboardingInput): OnboardingPlan {
   return {
     ok: true,
     dirName,
-    configContent: buildProjectConfig(dirName, cleaned),
+    workspaceRoot,
+    configContent: buildProjectConfig(dirName, workspaceRoot, cleaned),
     registryAppend: buildRegistryAppend(dirName, cleaned),
     warnings,
   };
 }
 
 /**
- * The new project's `CONFIG.md`: the frontmatter `repos:` map (first key =
- * `default_repo`) plus the two stable body sections the afk-issue-runner
- * skill reads — parsed back by `parseProjectConfig`, so the shape is exactly
- * the one issue 70 fixed.
+ * The new project's `CONFIG.md`: the frontmatter `workspace_root` (ADR-0017),
+ * the `repos:` map (first key = `default_repo`), plus the two stable body
+ * sections the afk-issue-runner skill reads — parsed back by
+ * `parseProjectConfig`, so the shape is exactly the one issues 70/0017 fixed.
+ *
+ * A **repo-less** project (no repos) emits an empty `repos:` and NO
+ * `default_repo`: there is no repo to default to, and a no-repo issue Runs at
+ * the workspace root instead. Existing single/multi-repo projects are
+ * unchanged (`default_repo` still names the first key).
  */
-function buildProjectConfig(dirName: string, repos: readonly { key: string; writePath: string }[]): string {
+function buildProjectConfig(
+  dirName: string,
+  workspaceRoot: string,
+  repos: readonly { key: string; writePath: string }[],
+): string {
   return [
     '---',
+    `workspace_root: ${workspaceRoot}`,
     'repos:',
     ...repos.map((r) => `  ${r.key}: ${r.writePath}`),
-    `default_repo: ${repos[0]?.key ?? ''}`,
+    // No default_repo for a repo-less project — there is nothing to default to.
+    ...(repos.length > 0 ? [`default_repo: ${repos[0].key}`] : []),
     '---',
     '',
     `# ${dirName} — project CONFIG`,
     '',
-    'Workbench project config per ADR-0015. `repos:` maps a short key → code-repo path;',
-    "an issue's optional `repo:` frontmatter names one of these keys (omitted =",
-    '`default_repo`). One issue targets exactly one repo.',
+    'Workbench project config per ADR-0015/0017. `workspace_root` is where the code lives',
+    '(a no-repo issue Runs there); `repos:` maps a short key → code-repo path, and may be',
+    "empty for a repo-less project the drain will scaffold. An issue's optional `repo:`",
+    'frontmatter names one of these keys (omitted = `default_repo`, or the workspace root',
+    'when there are no repos). One issue targets exactly one repo.',
     '',
     '## Test commands',
     '',

@@ -85,6 +85,7 @@ describe('resolveProjectIdentity (real filesystem)', () => {
       issuesRoot: join(sandbox, 'issues'),
       completionsRoot: join(sandbox, 'issues', 'completions'),
       defaultRepoPath: sandbox,
+      workspaceRoot: null, // legacy projects declare no workspace root (ADR-0017)
       repoPaths: [sandbox],
       repos: {},
     });

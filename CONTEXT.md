@@ -11,9 +11,16 @@ _Avoid_: dashboard (too narrow — it also controls), orchestrator (implies head
 **Window**:
 One view onto the single backend, scoped to one **Project**. Multiple windows run at once (billing in one, vapi in another) without a second backend — no port collisions, no double-managing a repo.
 
-**Project** (redefined by ADR-0015):
-A first-class entry in Mission Control's registry — a **Workbench** entry (backlog, Receipts, PRDs, memory) referencing **one or more code repos** (`repos:` map + `default_repo` in its CONFIG). An issue targets exactly one repo via optional `repo:` frontmatter (omitted = default); cross-repo work is a `depends_on` chain, never one multi-repo issue. The backend owns *many* Projects; each **Window** shows one.
-_Avoid_: "repo" as a synonym for Project — a Project may span several repos.
+**Project** (redefined by ADR-0015, extended by ADR-0017):
+A first-class entry in Mission Control's registry — a **Workbench** entry (backlog, Receipts, PRDs, memory) referencing **zero or more code repos** (`repos:` map + optional `default_repo` in its CONFIG) plus a **workspace root**. An issue targets exactly one repo via optional `repo:` frontmatter (omitted = default); cross-repo work is a `depends_on` chain, never one multi-repo issue. The backend owns *many* Projects; each **Window** shows one.
+_Avoid_: "repo" as a synonym for Project — a Project may span several repos, or none yet.
+
+**Repo-less project** (ADR-0017):
+A Project created with **no repos** — just a name and a **workspace root** — so planning (grill → PRD → issues, all Workbench-only) can start before any code exists. The **drain** creates the codebases: a **no-repo issue** scaffolds a repo, which **self-heals** into the registry. `repo:` frontmatter resolves only at run time, so an issue may name `repo: api` before `api` exists, provided it `depends_on` the issue that creates it.
+
+**Workspace root** (ADR-0017):
+The directory where a Project's **code** will live (default `~/Developer/<name>/`). Distinct from the **Workbench entry** (artifacts) and from any **repo**. A **no-repo issue** runs with its cwd here — where a scaffold (`mkdir api && git init && npm create`) naturally works. MC watches it: a new git repo appearing under it surfaces in the **Inbox** to register (never silent). As an isolation key it **cannot cut worktrees**, so no-repo issues serialize solo against each other while running in parallel with repo-targeted issues.
+_Avoid_: conflating with the **Workbench** dir (`git init` there would nest repos in the shared artifacts repo) or with a **repo**.
 
 **Map**:
 The structured, birds-eye view of a backlog — issue statuses (open/wip/done), the dependency graph, git state, and completion blocks. Rendered from the **artifacts on disk**, never from a live agent stream.

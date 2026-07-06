@@ -103,6 +103,51 @@ describe('createWorkbenchProject (issue 82)', () => {
     expect((await git(workbench, 'status', '--porcelain')).trim()).toBe('');
   });
 
+  it('creates a repo-less project (ADR-0017): workspace_root, empty repos, NO registry lines, one commit', async () => {
+    const before = await commitCount();
+    const registryBefore = await readFile(join(workbench, 'registry.md'), 'utf8');
+
+    const res = await createWorkbenchProject({
+      workbenchRoot: workbench,
+      homeDir: home,
+      name: 'Greenfield App',
+      repos: [], // repo-less: name + workspace root, no code yet
+    });
+
+    expect(res.errors).toEqual([]);
+    expect(res.ok).toBe(true);
+    expect(res.dirName).toBe('greenfield-app');
+
+    // ADR-0015 skeleton is still created in full.
+    const root = join(workbench, 'greenfield-app');
+    expect((await stat(join(root, 'issues'))).isDirectory()).toBe(true);
+    expect((await stat(join(root, 'completions'))).isDirectory()).toBe(true);
+    expect(await readFile(join(root, 'memory', 'CORE.md'), 'utf8')).toBe('');
+
+    // CONFIG carries workspace_root, an empty repos map, and NO default_repo.
+    const config = await readFile(join(root, 'CONFIG.md'), 'utf8');
+    expect(config).toContain('workspace_root: ~/Developer/greenfield-app');
+    expect(config).not.toContain('default_repo:');
+
+    // No repos ⇒ registry.md is byte-for-byte untouched (registration deferred).
+    expect(await readFile(join(workbench, 'registry.md'), 'utf8')).toBe(registryBefore);
+
+    // Still exactly ONE boring commit, clean tree after.
+    expect(await commitCount()).toBe(before + 1);
+    expect((await git(workbench, 'log', '-1', '--format=%s')).trim()).toBe(
+      'greenfield-app: project onboarded',
+    );
+    expect((await git(workbench, 'status', '--porcelain')).trim()).toBe('');
+
+    // The identity a Run resolves: default cwd is the WORKSPACE ROOT (where a
+    // no-repo scaffold Run lands), not the Workbench project root.
+    const id = await resolveProjectIdentity(root, { homeDir: home });
+    expect(id.kind).toBe('workbench');
+    expect(id.workspaceRoot).toBe(join(home, 'Developer', 'greenfield-app'));
+    expect(id.defaultRepoPath).toBe(join(home, 'Developer', 'greenfield-app'));
+    expect(id.repoPaths).toEqual([]);
+  });
+
   it('resolves the new project by workbench dir AND by any member-repo path', async () => {
     await createWorkbenchProject({
       workbenchRoot: workbench,

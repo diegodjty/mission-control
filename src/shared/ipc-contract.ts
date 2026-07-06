@@ -259,12 +259,15 @@ export const IpcChannel = {
   PlanningDocRead: 'planning:read-doc',
   /**
    * renderer → main (invoke): the Launcher's New project flow (issue 82,
-   * ADR-0016) — validate a project name + repo drafts against the workbench
-   * and, unless `dryRun`, perform the ADR-0015 setup: project dir (CONFIG,
-   * empty issues/+completions/, memory skeleton with empty CORE.md), active
-   * registry entries (one per repo), ONE boring workbench commit. Refusals
-   * (collisions, already-registered repos) name every problem; non-git paths
-   * warn but are allowed. Resolves to an OnboardingCreateResult.
+   * ADR-0016; repo-less projects, issue 93 / ADR-0017) — validate a project
+   * name + workspace root + ZERO or more repo drafts against the workbench and,
+   * unless `dryRun`, perform the ADR-0015 setup: project dir (CONFIG with
+   * workspace_root, empty issues/+completions/, memory skeleton with empty
+   * CORE.md), active registry entries (one per repo — none for a repo-less
+   * project), ONE boring workbench commit. Refusals (collisions,
+   * already-registered repos) name every problem; non-git paths and an
+   * existing non-empty workspace root warn but are allowed. Resolves to an
+   * OnboardingCreateResult.
    */
   OnboardingCreate: 'onboarding:create',
   /**
@@ -1024,8 +1027,16 @@ export interface OnboardingRepoDraft {
 export interface OnboardingCreateRequest {
   /** The project display name; slugged into the workbench directory name. */
   name: string;
-  /** One or more repo drafts; the FIRST becomes `default_repo`. */
+  /**
+   * Zero or more repo drafts; the FIRST becomes `default_repo`. Empty is valid
+   * — a repo-less project (ADR-0017): just a name + workspace root, no repos.
+   */
   repos: OnboardingRepoDraft[];
+  /**
+   * The workspace root the user entered, or empty/absent for the default
+   * `~/Developer/<name>` (ADR-0017) — where the project's code lives/will live.
+   */
+  workspaceRoot?: string;
   /** Validate only — report errors/warnings, write nothing. */
   dryRun?: boolean;
 }

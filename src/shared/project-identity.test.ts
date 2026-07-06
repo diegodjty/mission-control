@@ -138,6 +138,7 @@ describe('projectIdentityFor', () => {
       issuesRoot: '/repos/repo-a/issues',
       completionsRoot: '/repos/repo-a/issues/completions',
       defaultRepoPath: '/repos/repo-a',
+      workspaceRoot: null, // legacy projects declare no workspace root (ADR-0017)
       repoPaths: ['/repos/repo-a'],
       repos: {},
     });
@@ -156,6 +157,7 @@ describe('projectIdentityFor', () => {
       issuesRoot: `${WB}/billing/issues`,
       completionsRoot: `${WB}/billing/completions`,
       defaultRepoPath: '/Users/dev/code/api', // tilde-expanded
+      workspaceRoot: null, // this CONFIG declares no workspace_root (pre-0017 shape)
       repoPaths: ['/Users/dev/code/api', '/Users/dev/code/web'],
       repos: { api: '/Users/dev/code/api', web: '/Users/dev/code/web' },
     });
@@ -200,6 +202,24 @@ describe('projectIdentityFor', () => {
       HOME,
     );
     expect(id.defaultRepoPath).toBe('/Users/dev/code/api');
+  });
+
+  it('a repo-less project resolves defaultRepoPath to the workspace root, not the key (ADR-0017)', () => {
+    // No repos, but a workspace_root: a no-repo scaffold Run must land in the
+    // workspace root (where `git init` creates code), NOT the Workbench project
+    // root (the shared artifacts repo, where it would nest repos).
+    const repoLess = `---\nworkspace_root: ~/Developer/billing\nrepos:\n---\n`;
+    const id = projectIdentityFor(
+      { kind: 'workbench', project: 'billing', root: `${WB}/billing` },
+      repoLess,
+      HOME,
+    );
+    expect(id.workspaceRoot).toBe('/Users/dev/Developer/billing');
+    expect(id.defaultRepoPath).toBe('/Users/dev/Developer/billing');
+    expect(id.repoPaths).toEqual([]);
+    expect(id.repos).toEqual({});
+    // The key stays the Workbench project root — identity/ownership is unchanged.
+    expect(id.key).toBe(`${WB}/billing`);
   });
 });
 

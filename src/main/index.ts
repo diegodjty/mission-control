@@ -1211,6 +1211,7 @@ function registerIpc(): void {
         homeDir: homedir(),
         name: req?.name ?? '',
         repos: Array.isArray(req?.repos) ? req.repos : [],
+        workspaceRoot: req?.workspaceRoot,
         dryRun: req?.dryRun === true,
       });
       return {

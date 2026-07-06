@@ -7,7 +7,7 @@ import type {
   QuickFixCreateResult,
 } from '../../shared/ipc-contract';
 import { projectStateLine, quickFixDefaultDir } from '../../shared/launcher-model';
-import { repoKeyFor } from '../../shared/onboarding-model';
+import { defaultWorkspaceRoot, repoKeyFor } from '../../shared/onboarding-model';
 
 /** What a successful Quick fix hands back for the Run-now offer. */
 export interface QuickFixIssueRef {
@@ -97,8 +97,11 @@ export function Launcher({
 }: LauncherProps): JSX.Element {
   const [mode, setMode] = useState<LauncherMode>('menu');
 
-  // --- New project state (issue 82) ------------------------------------------
+  // --- New project state (issue 82; repo-less projects issue 93/ADR-0017) ----
   const [projName, setProjName] = useState('');
+  // The workspace root the user typed; empty = accept the default the hint shows
+  // (~/Developer/<name>). Where the project's code lives / will live (ADR-0017).
+  const [workspaceRoot, setWorkspaceRoot] = useState('');
   const [repoRows, setRepoRows] = useState<RepoRow[]>([EMPTY_ROW]);
   const [onboardErrors, setOnboardErrors] = useState<string[]>([]);
   // Warnings awaiting the human's "Create anyway" (non-git / missing paths).
@@ -144,9 +147,12 @@ export function Launcher({
     setOnboardErrors([]);
     const req = {
       name: projName,
+      // Zero repos is valid (ADR-0017): a repo-less project is name + workspace
+      // root. Empty rows are dropped, so leaving them blank submits no repos.
       repos: repoRows
         .filter((r) => r.path.trim().length > 0 || r.key.trim().length > 0)
         .map((r) => ({ key: r.key.trim(), path: r.path.trim() })),
+      workspaceRoot: workspaceRoot.trim(),
     };
     void window.mc
       .createProject({ ...req, dryRun: !confirmedWarnings })
@@ -170,6 +176,7 @@ export function Launcher({
         }
         onProjectCreated({ workbenchDir: res.workbenchDir, label: res.dirName ?? projName });
         setProjName('');
+        setWorkspaceRoot('');
         setRepoRows([EMPTY_ROW]);
         setOnboardWarnings([]);
       })
@@ -425,9 +432,10 @@ export function Launcher({
           <>
             <h1 className="launcher__title">New project</h1>
             <p className="launcher__hint">
-              Start a project — or register a repo you&apos;ve been working in. This creates
-              ~/Workbench/&lt;project&gt; (CONFIG, empty backlog, memory), adds the registry
-              entries, and commits the workbench.
+              Start a project — with no code yet (just a name + workspace root), or register
+              repos you&apos;ve been working in. This creates ~/Workbench/&lt;project&gt;
+              (CONFIG, empty backlog, memory), adds a registry entry per repo, and commits the
+              workbench.
             </p>
             <div className="launcher__form">
               <label className="launcher__label">
@@ -445,8 +453,39 @@ export function Launcher({
                 />
               </label>
 
+              <label className="launcher__label">
+                Workspace root — where the code lives (optional)
+                <span className="launcher__repo-row">
+                  <input
+                    className="launcher__input launcher__input--path"
+                    type="text"
+                    value={workspaceRoot}
+                    placeholder={defaultWorkspaceRoot(projName) || '~/Developer/<name>'}
+                    title="Where this project's code will live. Leave blank for the default shown."
+                    onChange={(e) => {
+                      setWorkspaceRoot(e.target.value);
+                      setOnboardWarnings([]);
+                    }}
+                  />
+                  <button
+                    className="launcher__secondary"
+                    onClick={() =>
+                      void window.mc.pickProjectFolder().then(({ path }) => {
+                        if (path) {
+                          setWorkspaceRoot(path);
+                          setOnboardWarnings([]);
+                        }
+                      })
+                    }
+                    title="Pick the folder where this project's code will live"
+                  >
+                    Browse…
+                  </button>
+                </span>
+              </label>
+
               <span className="launcher__label">
-                Code repos — the first is the default
+                Code repos — optional; the first is the default (a project can start with none)
                 {repoRows.map((row, i) => (
                   <span className="launcher__repo-row" key={i}>
                     <input

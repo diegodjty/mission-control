@@ -6,15 +6,16 @@
  * (registry content, existing project dirs, which repo paths exist / are git
  * repos), and when the plan holds, performs the ADR-0015 setup itself:
  *
- *   1. `~/Workbench/<project>/` — `CONFIG.md` (repos map + default_repo),
- *      empty `issues/` + `completions/`, memory skeleton (`memory/CORE.md`
- *      empty, `journal/` + `topics/` dirs);
+ *   1. `~/Workbench/<project>/` — `CONFIG.md` (workspace_root + repos map +
+ *      default_repo), empty `issues/` + `completions/`, memory skeleton
+ *      (`memory/CORE.md` empty, `journal/` + `topics/` dirs);
  *   2. appends the active registry entries (one per member repo) to
  *      `~/Workbench/registry.md`, creating it with a minimal header when this
- *      is the first project ever;
+ *      is the first project ever — SKIPPED for a repo-less project (ADR-0017),
+ *      which has no repos to register yet;
  *   3. ONE boring workbench commit (`<project>: project onboarded`) scoped to
- *      the new project dir + `registry.md` — sibling projects' dirt never
- *      rides along.
+ *      the new project dir (+ `registry.md` when it was touched) — sibling
+ *      projects' dirt never rides along.
  *
  * All validation decisions live in the pure model; this file only reads and
  * writes. Refusals (and `dryRun`) write and commit NOTHING. Never throws —
@@ -22,7 +23,7 @@
  */
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { planOnboarding, type RepoFact } from '../shared/onboarding-model';
+import { planOnboarding, workspaceRootFor, type RepoFact } from '../shared/onboarding-model';
 import { expandTilde } from '../shared/workbench-model';
 import { commitWorkbenchPaths } from './workbench-git';
 
@@ -39,8 +40,13 @@ export interface CreateProjectInput {
   homeDir: string;
   /** The project display name; slugged into the directory name. */
   name: string;
-  /** One or more repo drafts; the FIRST becomes `default_repo`. */
+  /** Zero or more repo drafts; the FIRST becomes `default_repo`. */
   repos: OnboardingRepoDraft[];
+  /**
+   * The workspace root the user entered, or empty/absent for the default
+   * `~/Developer/<name>` (ADR-0017) — where the project's code lives/will live.
+   */
+  workspaceRoot?: string;
   /** Validate only: report errors/warnings, write nothing. */
   dryRun?: boolean;
 }
@@ -72,6 +78,20 @@ async function exists(path: string): Promise<boolean> {
   try {
     await stat(path);
     return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True when the path is an existing directory that contains at least one entry
+ * — the fact behind ADR-0017's "existing non-empty workspace root warns". A
+ * missing path, a file, or an empty directory are all "not non-empty".
+ */
+async function isNonEmptyDir(path: string): Promise<boolean> {
+  try {
+    if (!(await stat(path)).isDirectory()) return false;
+    return (await readdir(path)).length > 0;
   } catch {
     return false;
   }
@@ -133,9 +153,19 @@ export async function createWorkbenchProject(
       }),
     );
 
+    // The workspace root (entered or defaulted) — resolved with the SAME pure
+    // helper the plan uses, so the path we stat is the path it writes.
+    const name = typeof input.name === 'string' ? input.name : '';
+    const workspaceRootWrite = workspaceRootFor(name, input.workspaceRoot, homeDir);
+    const workspaceRootNonEmpty =
+      workspaceRootWrite.length > 0 &&
+      (await isNonEmptyDir(expandTilde(workspaceRootWrite, homeDir)));
+
     const plan = planOnboarding({
-      name: typeof input.name === 'string' ? input.name : '',
+      name,
       repos: repoFacts,
+      workspaceRoot: input.workspaceRoot,
+      workspaceRootNonEmpty,
       registryContent,
       existingProjectDirs,
       homeDir,
@@ -181,18 +211,26 @@ export async function createWorkbenchProject(
     }
 
     // --- Append the registry entries ------------------------------------------
+    // A repo-less project (ADR-0017) has NO entries: leave registry.md
+    // untouched — registration is deferred until a repo actually appears
+    // (self-heal via the Inbox). Only rewrite when there is something to add,
+    // so an unchanged registry never churns a spurious commit.
     const registryPath = join(workbenchRoot, 'registry.md');
-    const current = await readOrNull(registryPath);
-    const next =
-      current === null
-        ? `# Registry\n\nMaps code-repo paths → Workbench projects (ADR-0015).\n\n## Entries\n\n${plan.registryAppend}`
-        : `${current.replace(/\n*$/, '\n')}${plan.registryAppend}`;
-    await writeFile(registryPath, next, 'utf8');
+    const committedPaths = [plan.dirName];
+    if (plan.registryAppend.length > 0) {
+      const current = await readOrNull(registryPath);
+      const next =
+        current === null
+          ? `# Registry\n\nMaps code-repo paths → Workbench projects (ADR-0015).\n\n## Entries\n\n${plan.registryAppend}`
+          : `${current.replace(/\n*$/, '\n')}${plan.registryAppend}`;
+      await writeFile(registryPath, next, 'utf8');
+      committedPaths.push('registry.md');
+    }
 
-    // --- ONE boring commit: the new project dir + registry.md -----------------
+    // --- ONE boring commit: the new project dir (+ registry.md when touched) --
     const commit = await commitWorkbenchPaths(
       workbenchRoot,
-      [plan.dirName, 'registry.md'],
+      committedPaths,
       `${plan.dirName}: project onboarded`,
     );
     if (commit.error !== null) {

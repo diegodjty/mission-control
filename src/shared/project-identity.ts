@@ -67,11 +67,22 @@ export interface ProjectIdentity {
   /**
    * The repo a Run WITHOUT a `repo:` key targets (issue 72 makes Runs
    * repo-targeted per issue): the workbench CONFIG's default repo
-   * (tilde-expanded), or — legacy — the repo itself. Falls back to `key` when
-   * a workbench CONFIG names no usable repo, so callers always get *a* path,
-   * never null.
+   * (tilde-expanded), or — legacy — the repo itself. For a **repo-less**
+   * project (ADR-0017 — no repos yet) this degrades to the **workspace root**,
+   * where a scaffold Run naturally creates code; only when no workspace root is
+   * declared either does it fall back to `key`, so callers always get *a* path,
+   * never null. (Before 0017 the repo-less fallback was `key` = the Workbench
+   * project root — the shared artifacts repo, where `git init` would nest
+   * repos; that mis-model is what the workspace-root fallback fixes.)
    */
   defaultRepoPath: string;
+  /**
+   * The project's workspace root (expanded, normalized) — where its code lives
+   * / will live (ADR-0017), distinct from `repoPaths[]` and from `key`. Null
+   * for a legacy project and for a workbench project whose CONFIG declares no
+   * `workspace_root` (pre-0017).
+   */
+  workspaceRoot: string | null;
   /** Every member repo path (expanded, normalized). Legacy: just the repo. */
   repoPaths: string[];
   /**
@@ -171,6 +182,7 @@ export function projectIdentityFor(
       issuesRoot: `${root}/issues`,
       completionsRoot: `${root}/issues/completions`,
       defaultRepoPath: root,
+      workspaceRoot: null,
       repoPaths: [root],
       repos: {},
     };
@@ -183,6 +195,8 @@ export function projectIdentityFor(
   }
   const repoPaths = Object.values(repos);
   const defaultRepo = repoPathForIssue(config, null);
+  const workspaceRoot =
+    config.workspaceRoot !== null ? normalize(expandTilde(config.workspaceRoot, homeDir)) : null;
 
   return {
     key: root,
@@ -190,9 +204,12 @@ export function projectIdentityFor(
     label: located.project ?? basename(root),
     issuesRoot: `${root}/issues`,
     completionsRoot: `${root}/completions`,
+    // Repo-less (no usable default repo) degrades to the workspace root — where
+    // a scaffold Run creates code — not to `root` (the shared artifacts repo).
     defaultRepoPath: defaultRepo.ok
       ? normalize(expandTilde(defaultRepo.path, homeDir))
-      : root,
+      : (workspaceRoot ?? root),
+    workspaceRoot,
     repoPaths,
     repos,
   };

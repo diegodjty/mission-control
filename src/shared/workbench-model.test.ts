@@ -213,6 +213,18 @@ describe('parseProjectConfig — malformed input (never throws)', () => {
   it('has null testCommands when the section is absent', () => {
     expect(parseProjectConfig('---\ndefault_repo: app\n---\n# hi\n').testCommands).toBeNull();
   });
+
+  it('parses workspace_root when present (ADR-0017), verbatim with ~/', () => {
+    const cfg = parseProjectConfig('---\nworkspace_root: ~/Developer/billing\nrepos:\n---\n');
+    expect(cfg.workspaceRoot).toBe('~/Developer/billing');
+    expect(cfg.repos).toEqual({});
+    expect(cfg.defaultRepo).toBeNull();
+  });
+
+  it('has null workspace_root when the scalar is absent (pre-0017 configs)', () => {
+    expect(parseProjectConfig(CONFIG).workspaceRoot).toBeNull();
+    expect(parseProjectConfig('---\nrepos:\n  app: /a\n---\n').workspaceRoot).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------

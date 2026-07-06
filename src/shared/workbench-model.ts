@@ -265,10 +265,25 @@ export function removeRegistryProject(content: unknown, project: string): Regist
 // ---------------------------------------------------------------------------
 
 export interface ProjectConfig {
-  /** `repos:` map from the frontmatter: short key → repo path (verbatim). */
+  /**
+   * `repos:` map from the frontmatter: short key → repo path (verbatim). May be
+   * empty — a repo-less project (ADR-0017) is a legal state, one whose code
+   * doesn't exist yet and is created by the drain.
+   */
   repos: Record<string, string>;
-  /** The `default_repo` key, or null when not declared. */
+  /**
+   * The `default_repo` key, or null when not declared. Absent is normal for a
+   * single-repo project (the only repo is the default) and for a repo-less one
+   * (there is no repo to default to — Runs fall back to the workspace root).
+   */
   defaultRepo: string | null;
+  /**
+   * The `workspace_root` scalar (verbatim, may start with `~`) — the directory
+   * where the project's code lives / will live (ADR-0017). Null when not
+   * declared (pre-0017 configs, legacy layouts). Distinct from any repo path
+   * and from the Workbench project root; a no-repo issue Runs here.
+   */
+  workspaceRoot: string | null;
   /** The `## Test commands` section body, verbatim, or null when absent. */
   testCommands: string | null;
   /** Human-readable notes about malformed items that were skipped. */
@@ -277,11 +292,19 @@ export interface ProjectConfig {
 
 /**
  * Parse a project `CONFIG.md`: the frontmatter's `repos:` map (a `repos:`
- * line followed by more-indented `key: path` lines) and `default_repo`
- * scalar, plus the body's `## Test commands` section verbatim. Never throws.
+ * line followed by more-indented `key: path` lines), the `default_repo` and
+ * `workspace_root` scalars, plus the body's `## Test commands` section
+ * verbatim. An empty `repos:` / absent `default_repo` is valid (a repo-less
+ * project, ADR-0017). Never throws.
  */
 export function parseProjectConfig(content: unknown): ProjectConfig {
-  const empty: ProjectConfig = { repos: {}, defaultRepo: null, testCommands: null, notes: [] };
+  const empty: ProjectConfig = {
+    repos: {},
+    defaultRepo: null,
+    workspaceRoot: null,
+    testCommands: null,
+    notes: [],
+  };
   if (typeof content !== 'string' || content.length === 0) return empty;
 
   const split = splitFrontmatter(content);
@@ -311,6 +334,7 @@ export function parseProjectConfig(content: unknown): ProjectConfig {
   return {
     repos,
     defaultRepo: frontmatterValue(split.frontmatter, 'default_repo'),
+    workspaceRoot: frontmatterValue(split.frontmatter, 'workspace_root'),
     testCommands: sectionBody(split.body, 'Test commands'),
     notes,
   };
