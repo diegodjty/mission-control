@@ -7,6 +7,8 @@ import {
   claimProject,
   releaseProject,
   switchActiveProject,
+  openProjectForWindow,
+  activeProjectKeyFor,
   transitionStage,
   canTransition,
   closeWindow,
@@ -189,6 +191,105 @@ describe('switchActiveProject — one Project per Window, switch within a Window
     const reg = claimProject(withProjects('/repo/a'), '/repo/a', 'win-1').registry;
     const res = switchActiveProject(reg, 'win-1', '/repo/missing');
     expect(res.ok).toBe(false);
+  });
+});
+
+describe('openProjectForWindow — the ProjectOpen decision (issue 87)', () => {
+  it('a fresh Window (no Project) opens a Project: registered, claimed, active', () => {
+    const res = openProjectForWindow(emptyRegistry(), '/repo/b', 'win-1');
+    expect(res.ok).toBe(true);
+    expect(res.project?.key).toBe('/repo/b');
+    expect(activeProjectKeyFor(res.registry, 'win-1')).toBe('/repo/b');
+  });
+
+  it('opening B from a Window that owns A lands the Window on B and releases A (walkthrough-86 stale-switch)', () => {
+    // The reproduction: /repo/a sorts BEFORE /repo/b, so if the open flow
+    // merely claim-accumulates, a first-owned "active" lookup keeps answering
+    // /repo/a — the selector/Map stay on the previous Project (issue 87).
+    let reg = withProjects('/repo/a', '/repo/b');
+    reg = claimProject(reg, '/repo/a', 'win-1').registry;
+    const res = openProjectForWindow(reg, '/repo/b', 'win-1');
+    expect(res.ok).toBe(true);
+    expect(activeProjectKeyFor(res.registry, 'win-1')).toBe('/repo/b');
+    expect(findProject(res.registry, '/repo/a')?.ownerWindowId).toBeNull();
+    expect(findProject(res.registry, '/repo/b')?.ownerWindowId).toBe('win-1');
+  });
+
+  it('the same holds when the target sorts before the current Project', () => {
+    let reg = withProjects('/repo/a', '/repo/b');
+    reg = claimProject(reg, '/repo/b', 'win-1').registry;
+    const res = openProjectForWindow(reg, '/repo/a', 'win-1');
+    expect(res.ok).toBe(true);
+    expect(activeProjectKeyFor(res.registry, 'win-1')).toBe('/repo/a');
+    expect(findProject(res.registry, '/repo/b')?.ownerWindowId).toBeNull();
+  });
+
+  it('opening an unregistered Project registers it first, at the given initial stage', () => {
+    let reg = withProjects('/repo/a');
+    reg = claimProject(reg, '/repo/a', 'win-1').registry;
+    const res = openProjectForWindow(reg, '/repo/new', 'win-1', 'planning');
+    expect(res.ok).toBe(true);
+    expect(res.project?.stage).toBe('planning');
+    expect(activeProjectKeyFor(res.registry, 'win-1')).toBe('/repo/new');
+    expect(findProject(res.registry, '/repo/a')?.ownerWindowId).toBeNull();
+  });
+
+  it('an already-registered target keeps its existing stage', () => {
+    let reg = registerProject(emptyRegistry(), '/repo/a', 'executing').registry;
+    const res = openProjectForWindow(reg, '/repo/a', 'win-1', 'planning');
+    expect(res.ok).toBe(true);
+    expect(res.project?.stage).toBe('executing');
+  });
+
+  it('re-opening the Project the Window is already on is an idempotent no-op', () => {
+    let reg = withProjects('/repo/a');
+    reg = claimProject(reg, '/repo/a', 'win-1').registry;
+    const res = openProjectForWindow(reg, '/repo/a', 'win-1');
+    expect(res.ok).toBe(true);
+    expect(activeProjectKeyFor(res.registry, 'win-1')).toBe('/repo/a');
+    expect(findProject(res.registry, '/repo/a')?.ownerWindowId).toBe('win-1');
+  });
+
+  it('owned-elsewhere still refuses, and the Window keeps its current Project', () => {
+    let reg = withProjects('/repo/a', '/repo/b');
+    reg = claimProject(reg, '/repo/a', 'win-1').registry;
+    reg = claimProject(reg, '/repo/b', 'win-2').registry;
+    const res = openProjectForWindow(reg, '/repo/b', 'win-1');
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/already open in another Window/i);
+    expect(activeProjectKeyFor(res.registry, 'win-1')).toBe('/repo/a');
+    expect(findProject(res.registry, '/repo/b')?.ownerWindowId).toBe('win-2');
+  });
+
+  it('an empty path is refused with the standard message', () => {
+    const res = openProjectForWindow(emptyRegistry(), '  ', 'win-1');
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/needs a path/i);
+  });
+
+  it('self-heals a Window that (historically) accumulated several Projects: after an open it owns exactly one', () => {
+    // Before issue 87 the open flow could leave one Window owning several
+    // Projects. Any open through the fixed flow must collapse that back to
+    // the one-Project-per-Window invariant.
+    let reg = withProjects('/repo/a', '/repo/b', '/repo/c');
+    reg = claimProject(reg, '/repo/a', 'win-1').registry;
+    reg = claimProject(reg, '/repo/b', 'win-1').registry;
+    const res = openProjectForWindow(reg, '/repo/c', 'win-1');
+    expect(res.ok).toBe(true);
+    const owned = res.registry.projects.filter((p) => p.ownerWindowId === 'win-1');
+    expect(owned.map((p) => p.key)).toEqual(['/repo/c']);
+  });
+});
+
+describe('activeProjectKeyFor — the one Project a Window actively manages', () => {
+  it('null when the Window owns nothing', () => {
+    expect(activeProjectKeyFor(withProjects('/repo/a'), 'win-1')).toBeNull();
+  });
+
+  it('the owned key when the Window owns a Project', () => {
+    const reg = claimProject(withProjects('/repo/a'), '/repo/a', 'win-1').registry;
+    expect(activeProjectKeyFor(reg, 'win-1')).toBe('/repo/a');
+    expect(activeProjectKeyFor(reg, 'win-2')).toBeNull();
   });
 });
 

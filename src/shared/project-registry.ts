@@ -247,6 +247,57 @@ export function switchActiveProject(
 }
 
 /**
+ * The whole ProjectOpen decision (issue 87): open `rawKey`'s Project in
+ * `windowId`'s Window — registering it first if it has never been seen (at
+ * `initialStage`; an already-registered Project keeps its stage), then
+ * switching the Window onto it with `switchActiveProject`'s release-then-claim
+ * semantics.
+ *
+ * Open MUST behave like switch, not like a bare claim: a bare `claimProject`
+ * from a Window that already owns another Project leaves the Window owning
+ * BOTH, and any "which Project is this Window on?" lookup then has two answers
+ * — the walkthrough-86 stale-switch, where an Inbox click-through or Launcher
+ * Continue claimed the target fine but the Window's active Project (selector,
+ * Map, watchers) stayed on the previous one. Routing open through the switch
+ * semantics keeps the invariant `activeProjectKeyFor` relies on: a Window owns
+ * at most ONE Project.
+ *
+ * Failure modes are inherited unchanged: an empty key is refused ("a Project
+ * needs a path"), a target owned by a different Window is refused with the
+ * standard ownership message and the registry left untouched — the Window
+ * keeps whatever it had open.
+ */
+export function openProjectForWindow(
+  registry: ProjectRegistry,
+  rawKey: string,
+  windowId: WindowId,
+  initialStage: PipelineStage = 'backlog',
+): RegistryResult {
+  const key = normalizeProjectKey(rawKey);
+  if (!findProject(registry, key)) {
+    const reg = registerProject(registry, key, initialStage);
+    if (!reg.ok) return reg;
+    registry = reg.registry;
+  }
+  return switchActiveProject(registry, windowId, key);
+}
+
+/**
+ * The key of the ONE Project a Window actively manages right now, or null.
+ * Meaningful because every ownership-changing flow (open via
+ * `openProjectForWindow`, switch via `switchActiveProject`, close via
+ * `closeWindow`) preserves the one-Project-per-Window invariant — so "the
+ * first owned Project" and "the Window's current Project" are the same thing.
+ * Never use a first-owned scan where the invariant might not hold (issue 88).
+ */
+export function activeProjectKeyFor(
+  registry: ProjectRegistry,
+  windowId: WindowId,
+): string | null {
+  return registry.projects.find((p) => p.ownerWindowId === windowId)?.key ?? null;
+}
+
+/**
  * Apply a pipeline stage transition to a Project. Rejects an illegal move (not
  * adjacent in the pipeline) with a clear message and leaves the registry
  * unchanged; a legal move updates the Project's stage.

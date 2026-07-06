@@ -109,11 +109,11 @@ import {
 import {
   emptyRegistry,
   registerProject,
-  claimProject,
+  openProjectForWindow,
+  activeProjectKeyFor,
   switchActiveProject,
   transitionStage,
   closeWindow,
-  findProject,
   normalizeProjectKey,
   checkProjectOwnership,
   type ProjectRegistry,
@@ -316,9 +316,14 @@ function projectViewsFor(windowId: string): ProjectView[] {
   });
 }
 
-/** The key of the Project a Window actively manages right now, or null. */
+/**
+ * The key of the Project a Window actively manages right now, or null.
+ * Delegates to the pure `activeProjectKeyFor`, whose answer is unambiguous
+ * because every ownership flow (open/switch/close) keeps a Window on at most
+ * ONE Project (issue 87) — never a "first of several owned" guess (issue 88).
+ */
 function activeKeyFor(windowId: string): string | null {
-  return registry.projects.find((p) => p.ownerWindowId === windowId)?.key ?? null;
+  return activeProjectKeyFor(registry, windowId);
 }
 
 /** Turn a pure RegistryResult into the Window-relative action result + broadcast. */
@@ -770,14 +775,17 @@ function registerIpc(): void {
       // decided, so no Project can be double-owned under two names.
       const identity = await resolveProjectIdentity(opened);
       projectIdentities.set(identity.key, identity);
-      // Register the Project the first time we see it; then claim it for this
-      // Window. Claiming is what rejects a second Window on the same Project.
-      if (!findProject(registry, identity.key)) {
-        const reg = registerProject(registry, identity.key, req.initialStage);
-        if (!reg.ok) return applyResult(reg, windowId);
-        registry = reg.registry;
-      }
-      return applyResult(claimProject(registry, identity.key, windowId), windowId);
+      // Register the Project the first time we see it, then land the Window on
+      // it with switch (release-then-claim) semantics — the whole decision is
+      // the pure `openProjectForWindow`. A bare claim here was issue 87's
+      // stale-switch: a Window that already owned another Project ended up
+      // owning both, and its active Project (selector, Map, watchers) never
+      // moved to the one just clicked. Owned-by-another-Window is still
+      // rejected inside, exactly as before.
+      return applyResult(
+        openProjectForWindow(registry, identity.key, windowId, req.initialStage),
+        windowId,
+      );
     },
   );
 
