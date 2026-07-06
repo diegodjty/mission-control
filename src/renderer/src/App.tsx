@@ -95,6 +95,7 @@ import { hasInFlightRun } from '../../shared/run-eligibility';
 import {
   repoForIssue,
   unknownRepoKeyNote,
+  plannedRepoHoldNote,
   type IssueRepoResolution,
 } from '../../shared/run-targeting';
 import {
@@ -879,6 +880,9 @@ export function App(): JSX.Element {
     const project = {
       repos: activeProject?.repos ?? {},
       defaultRepoPath: activeDefaultRepo ?? projectPath ?? '',
+      // Declared-but-absent repos (ADR-0017): a `repo:` naming one resolves to
+      // `planned` — grayed on the Map, held (not errored) by a drain.
+      plannedRepoKeys: activeProject?.plannedRepoKeys ?? [],
     };
     for (const issue of backlog.issues) {
       // `repo:` keys are a WORKBENCH concept (ADR-0015). A legacy Project has
@@ -901,6 +905,31 @@ export function App(): JSX.Element {
       return resolution?.ok ? resolution.repoPath : (activeDefaultRepo ?? '');
     },
     [issueRepoResolutions, activeDefaultRepo],
+  );
+
+  // Issues whose `repo:` targets a PLANNED (declared-but-absent) repo (issue
+  // 96, ADR-0017): the Map grays these rows — they can't run until their repo
+  // is created. Derived purely from the resolutions, so a repo appearing (its
+  // key dropping out of `plannedRepoKeys`) ungrays its issues automatically.
+  const plannedIssueIds = useMemo(() => {
+    const ids: number[] = [];
+    for (const [id, resolution] of issueRepoResolutions) {
+      if (!resolution.ok && resolution.reason === 'planned') ids.push(id);
+    }
+    return ids;
+  }, [issueRepoResolutions]);
+
+  // The declared-but-absent repos themselves (issue 96) — shown grayed on the
+  // Map so the intended codebase shape is visible before any code exists. A
+  // repo transitions to real (leaves this list) once its directory appears and
+  // is registered (issue 95), which drops its key from `plannedRepoKeys`.
+  const plannedRepos = useMemo(
+    () =>
+      (activeProject?.plannedRepoKeys ?? []).map((key) => ({
+        key,
+        path: activeProject?.repos[key] ?? '',
+      })),
+    [activeProject],
   );
 
   /**
@@ -1311,15 +1340,19 @@ export function App(): JSX.Element {
 
       // The issue's TARGET repo (issue 72): its `repo:` key resolved through
       // the project CONFIG, else the default. An unknown key is an explicit
-      // error — never a guessed path — so the Run is refused with the reason.
+      // error; a declared-but-absent repo is `planned` — held until it exists
+      // (ADR-0017, issue 96). Either way the Run is refused with the reason —
+      // never a guessed path.
       const resolution = issueRepoResolutions.get(target.issueId);
       if (resolution !== undefined && !resolution.ok) {
         window.alert(
-          unknownRepoKeyNote(
-            target.issueId,
-            resolution.unknownKey,
-            Object.keys(activeProject?.repos ?? {}),
-          ),
+          resolution.reason === 'planned'
+            ? plannedRepoHoldNote(target.issueId, resolution.repoKey)
+            : unknownRepoKeyNote(
+                target.issueId,
+                resolution.unknownKey,
+                Object.keys(activeProject?.repos ?? {}),
+              ),
         );
         return;
       }
@@ -2409,22 +2442,36 @@ export function App(): JSX.Element {
   useEffect(() => {
     if (!draining || !backlog || projectPath === null) return;
 
-    // Issues whose `repo:` key doesn't resolve are BLOCKED, not started, and
-    // must not stall their siblings (issue 72): they are excluded from the
-    // plan (their dependents stay blocked naturally — a missing dependency is
-    // an unmet dependency) and surfaced once as an ambient note.
+    // Issues whose `repo:` key doesn't resolve are excluded from the plan and
+    // must not stall their siblings (issue 72), but for two DIFFERENT reasons
+    // (issue 96, ADR-0017):
+    //   - `planned` — the repo is declared but not yet created (planned-first).
+    //     The issue is HELD, not errored: once its creating issue makes the
+    //     repo, it resolves and runs. Surfaced once as a plain hold note.
+    //   - `unknownKey` — the key names neither an existing nor a declared repo
+    //     (a typo/misconfig). Flagged distinctly as an error, as before.
+    // Either way the issue is dropped from `plannable` (its dependents stay
+    // blocked naturally — a missing dependency is an unmet dependency).
     const plannable = backlog.issues.filter((issue) => {
       const resolution = issueRepoResolutions.get(issue.id);
       if (resolution === undefined || resolution.ok) return true;
-      logNote(
-        `repo-unresolved:${issue.id}:${resolution.unknownKey}`,
-        'relay',
-        unknownRepoKeyNote(
-          issue.id,
-          resolution.unknownKey,
-          Object.keys(activeProject?.repos ?? {}),
-        ),
-      );
+      if (resolution.reason === 'planned') {
+        logNote(
+          `repo-planned:${issue.id}:${resolution.repoKey}`,
+          'relay',
+          plannedRepoHoldNote(issue.id, resolution.repoKey),
+        );
+      } else {
+        logNote(
+          `repo-unresolved:${issue.id}:${resolution.unknownKey}`,
+          'relay',
+          unknownRepoKeyNote(
+            issue.id,
+            resolution.unknownKey,
+            Object.keys(activeProject?.repos ?? {}),
+          ),
+        );
+      }
       return false;
     });
 
@@ -2972,6 +3019,8 @@ export function App(): JSX.Element {
             aborting={aborting}
             focusIssueId={inboxFocus?.issueId ?? null}
             focusSeq={inboxFocusSeq}
+            plannedIssueIds={plannedIssueIds}
+            plannedRepos={plannedRepos}
           />
           </div>
           {/* The Dispatcher chat panel beside the Map (ADR-0010): present once a

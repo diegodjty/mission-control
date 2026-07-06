@@ -956,6 +956,40 @@ body.is-col-resizing {
   margin-left: 6px;
 }
 
+/* Planned repos bar (issue 96, ADR-0017): repos declared before they exist.
+   Muted/grayed so it reads as "not yet real" — the intended shape, not live
+   state. Each entry becomes real (leaves this bar) once its directory appears. */
+.map__plannedbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  flex: 0 0 auto;
+}
+
+.map__planned-label {
+  font-size: 11px;
+  color: var(--fg-mute);
+}
+
+.map__planned-repo {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--fg-mute);
+  border: 1px dashed var(--border-strong);
+  border-radius: 999px;
+  padding: 2px 9px;
+}
+
+.map__planned-repo-path {
+  color: var(--fg-faint);
+}
+
 .map__mergebar-row {
   display: flex;
   align-items: center;
@@ -1247,6 +1281,17 @@ body.is-col-resizing {
   background: var(--surface-2);
 }
 
+/* Planned issue (issue 96, ADR-0017): its `repo:` targets a declared-but-absent
+   repo, so it can't run yet. Grayed to read as "part of the intended shape, not
+   live work"; the row ungrays the instant its repo appears. */
+.issue--planned {
+  opacity: 0.55;
+}
+
+.issue--planned .issue__title {
+  color: var(--fg-mute);
+}
+
 .issue__id {
   color: var(--fg-mute);
   font-variant-numeric: tabular-nums;
@@ -1355,6 +1400,17 @@ body.is-col-resizing {
   color: var(--green);
   border-color: var(--green-border);
   background: var(--green-bg);
+}
+
+/* Planned (issue 96, ADR-0017): an issue targeting a declared-but-absent repo.
+   Muted + dashed so it reads as "intended, not yet runnable" — distinct from
+   both a live status and a hard error. */
+.badge--planned,
+.run-badge--planned {
+  color: var(--fg-mute);
+  border-color: var(--border-strong);
+  border-style: dashed;
+  background: transparent;
 }
 
 .map__blocked {
