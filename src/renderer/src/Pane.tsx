@@ -83,11 +83,16 @@ export function Pane({ run, dispatcher, talk, onStatusChange, onInput, onExit, o
     const host = hostRef.current;
     if (!host) return;
 
+    // Match the terminal to the active Atlas theme by reading the CSS tokens
+    // (index.css) off <html>, so a light-theme app doesn't frame a black pane.
+    const css = getComputedStyle(document.documentElement);
+    const themeBg = css.getPropertyValue('--bg1').trim() || '#0c1017';
+    const themeFg = css.getPropertyValue('--fg').trim() || '#eaf2f7';
     const term = new Terminal({
       fontFamily: 'Menlo, Monaco, "Courier New", monospace',
       fontSize: 13,
       cursorBlink: true,
-      theme: { background: '#0b0f14', foreground: '#e6edf3' },
+      theme: { background: themeBg, foreground: themeFg },
     });
     const fit = new FitAddon();
     term.loadAddon(fit);

@@ -133,6 +133,19 @@ import {
 /** localStorage key for the app-wide persisted Dispatcher rail width (issue 44). */
 const DISPATCHER_WIDTH_KEY = 'mc.dispatcherWidth';
 
+/** localStorage key for the persisted UI theme (Atlas design language). */
+const THEME_KEY = 'mc.theme';
+type Theme = 'dark' | 'light';
+
+/** Read the persisted theme; the navy dark stage is the default. */
+function loadTheme(): Theme {
+  try {
+    return window.localStorage.getItem(THEME_KEY) === 'light' ? 'light' : 'dark';
+  } catch {
+    return 'dark';
+  }
+}
+
 /**
  * Grace window before the Receipt audits conclude anything (issue 57,
  * ADR-0012's debounce discipline). A Worker's Receipt can land a beat after
@@ -223,6 +236,19 @@ export function App(): JSX.Element {
   // the Home tab returns here any time — without closing the open Project.
   const [view, setView] = useState<View>('launcher');
   const [paneStatus, setPaneStatus] = useState('starting…');
+
+  // The UI theme (Atlas design language): dark navy stage by default, with a
+  // light variant. Persisted, and mirrored onto <html data-theme> so the CSS
+  // token layer in index.css switches the whole app in one place.
+  const [theme, setTheme] = useState<Theme>(loadTheme);
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try {
+      window.localStorage.setItem(THEME_KEY, theme);
+    } catch {
+      /* private mode / storage disabled — theme still applies for the session */
+    }
+  }, [theme]);
 
   // The live backlog + resolved Project path, lifted from the Map so the
   // Coordinator can plan against them.
@@ -2748,7 +2774,14 @@ export function App(): JSX.Element {
   return (
     <div className="app">
       <header className="app__header">
-        <strong>Mission Control</strong>
+        <div className="app__brand" title="Mission Control">
+          <span className="app__mark" aria-hidden="true" />
+          <span className="app__wordmark">Mission Control</span>
+          <span className="app__presence">
+            <span className="app__pulse" aria-hidden="true" />
+            <span className="app__presence-text">all systems steady</span>
+          </span>
+        </div>
         <ProjectBar
           projects={projects}
           activeProjectKey={activeProjectKey}
@@ -2800,6 +2833,23 @@ export function App(): JSX.Element {
             onClick={() => setView('inbox')}
           >
             Inbox
+          </button>
+          <button
+            className="app__theme-toggle"
+            onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
+            title={theme === 'dark' ? 'Switch to light' : 'Switch to dark'}
+            aria-label="Toggle light / dark theme"
+          >
+            {theme === 'dark' ? (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9z" />
+              </svg>
+            ) : (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="4" />
+                <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+              </svg>
+            )}
           </button>
         </nav>
 
