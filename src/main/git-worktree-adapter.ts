@@ -432,17 +432,35 @@ export async function applyCommands(
   }
 }
 
+/** Options controlling how a Run set is placed against `projectPath`. */
+export interface ApplyIsolationOptions {
+  /**
+   * Whether `projectPath` can host git worktrees (default `true`). `false`
+   * marks a repo-less project's workspace root (ADR-0017): the Run set stays
+   * solo on the shared tree no matter its concurrency, so no worktrees are cut
+   * from a directory that is not a git repo. Every Run's cwd is `projectPath`
+   * (the workspace root) where a scaffold Run creates code.
+   */
+  isolatable?: boolean;
+}
+
 /**
  * The high-level operation the backend drives on every change to the active Run
  * set: decide the desired isolation, reconcile it against disk (creating and
  * removing worktrees, toggling parallel mode), and return each Run's resolved
  * cwd so its Pane spawns in the right place. Idempotent — safe to re-run.
+ *
+ * When `options.isolatable === false` the target is a repo-less project's
+ * workspace root (ADR-0017): the decision is forced solo, so `reconcile` emits
+ * no worktree commands against a non-git directory and every Run's cwd is that
+ * workspace root.
  */
 export async function applyIsolation(
   projectPath: string,
   runs: IsolationRun[],
+  options: ApplyIsolationOptions = {},
 ): Promise<IsolationApplyResult> {
-  const desired = decideIsolation(runs);
+  const desired = decideIsolation(runs, { isolatable: options.isolatable ?? true });
   const state = await currentState(projectPath);
   await applyCommands(projectPath, reconcile(state, desired));
 
