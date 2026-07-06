@@ -3,3 +3,6 @@ out/
 dist/
 *.log
 .DS_Store
+
+# Never commit installed deps (afk worktrees symlink this; committing it self-references — see issue log)
+node_modules/
