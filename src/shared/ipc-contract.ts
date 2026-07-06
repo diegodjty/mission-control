@@ -693,6 +693,15 @@ export interface ProjectView {
    * `repo:` key resolves through. Empty for a legacy Project.
    */
   repos: Record<string, string>;
+  /**
+   * Declared `repos:` keys whose directory does not yet exist on disk (ADR-0017
+   * planned-first, issue 96): a repo may be declared before it's created. The
+   * Map grays a planned repo and its `repo:`-targeting issues; a drain holds
+   * those issues rather than erroring them. A key drops out once its directory
+   * appears (and is registered — issue 95). Empty for a legacy Project and for
+   * a workbench Project whose declared repos all exist.
+   */
+  plannedRepoKeys: string[];
   stage: PipelineStage;
   ownership: 'you' | 'other' | 'free';
 }

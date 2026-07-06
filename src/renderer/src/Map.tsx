@@ -116,6 +116,19 @@ interface MapProps {
    * (the user may have clicked elsewhere in the Map since).
    */
   focusSeq?: number;
+  /**
+   * Issue ids whose `repo:` targets a PLANNED (declared-but-absent) repo (issue
+   * 96, ADR-0017): rendered grayed and un-runnable — they can't start until
+   * their repo is created. An id leaves this set once its repo appears, so the
+   * row ungrays automatically.
+   */
+  plannedIssueIds?: number[];
+  /**
+   * The Project's declared-but-absent repos (issue 96): shown grayed so the
+   * intended codebase shape is visible before any code exists. Each becomes
+   * real (leaves this list) once its directory appears and is registered.
+   */
+  plannedRepos?: { key: string; path: string }[];
 }
 
 /**
@@ -153,8 +166,11 @@ export function Map({
   runLog,
   focusIssueId,
   focusSeq,
+  plannedIssueIds,
+  plannedRepos,
 }: MapProps = {}): JSX.Element {
   const activeRunSet = new Set(activeRunIssueIds ?? []);
+  const plannedIssueSet = new Set(plannedIssueIds ?? []);
   const worktreeRunningSet = new Set(worktreeRunningIds ?? []);
   const finishedUnmergedSet = new Set(finishedUnmergedIds ?? []);
   const strandedSet = new Set(strandedIds ?? []);
@@ -471,6 +487,29 @@ export function Map({
         </div>
       )}
 
+      {/* Planned repos (issue 96, ADR-0017): repos declared in the CONFIG whose
+          directory doesn't exist yet (planning-first). Shown grayed so the
+          intended codebase shape is visible before any code exists; each turns
+          real (leaves this bar, ungrays its issues) once its directory appears
+          and is registered (issue 95). */}
+      {resolvedPath !== null && plannedRepos && plannedRepos.length > 0 && (
+        <div className="map__plannedbar">
+          <span className="map__planned-label">
+            Planned repos — declared, not yet created:
+          </span>
+          {plannedRepos.map((r) => (
+            <span
+              key={r.key}
+              className="map__planned-repo"
+              title={`${r.path || r.key} does not exist yet — a scaffold Run (or issue 95 registration) will create it`}
+            >
+              <code>{r.key}</code>
+              {r.path ? <span className="map__planned-repo-path"> · {r.path}</span> : null}
+            </span>
+          ))}
+        </div>
+      )}
+
       {/* Merge (issue 08, ADR-0002): appears once the parallel Runs have
           finished, integrates their branches into main, and is ALWAYS
           human-triggered — clicking it is the only thing that starts a merge. */}
@@ -586,6 +625,7 @@ export function Map({
               key={issue.id}
               issue={issue}
               selected={issue.id === selectedId}
+              planned={plannedIssueSet.has(issue.id)}
               running={activeRunSet.has(issue.id)}
               worktreeRun={
                 finishedUnmergedSet.has(issue.id)
@@ -640,6 +680,13 @@ export function Map({
                   <span className="run-badge run-badge--commit-failed">commit failed</span>
                 ) : strandedSet.has(selected.id) ? (
                   <span className="run-badge run-badge--stranded">stranded</span>
+                ) : plannedIssueSet.has(selected.id) ? (
+                  <span
+                    className="run-badge run-badge--planned"
+                    title="Targets a planned repo — declared but not yet created; can't run until it exists"
+                  >
+                    planned
+                  </span>
                 ) : (
                   backlog &&
                   onRun &&
@@ -920,6 +967,7 @@ function RunGuidanceBanner({
 function IssueRow({
   issue,
   selected,
+  planned,
   running,
   worktreeRun,
   state,
@@ -928,6 +976,12 @@ function IssueRow({
 }: {
   issue: BacklogIssue;
   selected: boolean;
+  /**
+   * The issue's `repo:` targets a PLANNED (declared-but-absent) repo (issue 96,
+   * ADR-0017): the row grays and offers no Run — it can't start until its repo
+   * is created. Ungrays automatically once the repo appears.
+   */
+  planned: boolean;
   running: boolean;
   /**
    * The issue's isolated-Run state derived from the on-disk `afk/` scan: `running`
@@ -946,15 +1000,28 @@ function IssueRow({
   // A worktree Run (in flight or finished-unmerged) is being worked/awaiting
   // merge — so it is neither "eligible" to start nor offered a Run button, even
   // though the main checkout still reads `open`.
-  const worked = worktreeRun !== null || running;
+  // A planned-repo issue can never start until its repo is created — treat it
+  // like a worked row for Run-affordance purposes so no Run button shows.
+  const worked = worktreeRun !== null || running || planned;
   return (
-    <li className={`issue${selected ? ' issue--selected' : ''}`} onClick={onSelect}>
+    <li
+      className={`issue${selected ? ' issue--selected' : ''}${planned ? ' issue--planned' : ''}`}
+      onClick={onSelect}
+    >
       <StatusBadge status={issue.status} />
       <span className="issue__id">{String(issue.id).padStart(2, '0')}</span>
       <span className="issue__title">{stripId(issue.title)}</span>
       <span className="issue__tags">
         {issue.hitl && <span className="badge badge--hitl">HITL</span>}
         <span className={`badge badge--${classKind(issue)}`}>{kindLabel(issue)}</span>
+        {planned && (
+          <span
+            className="badge badge--planned"
+            title="Targets a planned repo — declared but not yet created; can't run until it exists"
+          >
+            planned
+          </span>
+        )}
         {state.kind === 'blocked' && (
           <span
             className="badge badge--blocked"
@@ -1000,6 +1067,7 @@ function IssueRow({
           </span>
         ) : (
           state.kind === 'eligible' &&
+          !planned &&
           onRun && (
             <button
               className="run-btn run-btn--row"

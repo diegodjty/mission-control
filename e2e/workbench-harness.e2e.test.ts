@@ -66,6 +66,7 @@ import { resolveProject } from '../src/shared/workbench-model';
 import {
   repoForIssue,
   unknownRepoKeyNote,
+  plannedRepoHoldNote,
   type RunTargetProject,
 } from '../src/shared/run-targeting';
 import {
@@ -221,10 +222,20 @@ async function driveDrain(identity: ProjectIdentity, opts: DrainOptions): Promis
     const plannable = backlog.issues.filter((issue) => {
       const resolution = repoForIssue(target, issue.repoKey);
       if (resolution.ok) return true;
-      const key = `repo-unresolved:${issue.id}:${resolution.unknownKey}`;
+      // Mirror App.tsx's drain filter (issue 96): a `planned` repo is HELD with
+      // a plain hold note; a genuinely unknown key is flagged as an error. Both
+      // drop the issue from the plan; siblings continue.
+      const key =
+        resolution.reason === 'planned'
+          ? `repo-planned:${issue.id}:${resolution.repoKey}`
+          : `repo-unresolved:${issue.id}:${resolution.unknownKey}`;
       if (!noteKeys.has(key)) {
         noteKeys.add(key);
-        notes.push(unknownRepoKeyNote(issue.id, resolution.unknownKey, Object.keys(target.repos)));
+        notes.push(
+          resolution.reason === 'planned'
+            ? plannedRepoHoldNote(issue.id, resolution.repoKey)
+            : unknownRepoKeyNote(issue.id, resolution.unknownKey, Object.keys(target.repos)),
+        );
       }
       return false;
     });

@@ -6,6 +6,7 @@
  * between xterm.js (renderer) and node-pty (here in main).
  */
 import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent } from 'electron';
+import { existsSync } from 'node:fs';
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -201,6 +202,23 @@ function requestRepoFor(projectKey: string, repoPath: string | undefined): strin
 }
 
 /**
+ * The declared `repos:` keys whose directory does NOT yet exist on disk
+ * (ADR-0017 planned-first, issue 96): a repo may be declared before it's
+ * created. This is the fs half of the `planned` resolution outcome — the pure
+ * `repoForIssue` grays/holds a `repo:` naming one of these keys. A key drops
+ * out the instant its directory appears (a scaffold Run creates it, issue 95
+ * registers it), so the Map's planned → real transition needs no extra
+ * plumbing beyond the next ProjectView recompute. Legacy Projects have no
+ * repos map, so this is always empty for them.
+ */
+function plannedRepoKeysFor(identity: ProjectIdentity | null): string[] {
+  if (identity === null || identity.kind !== 'workbench') return [];
+  return Object.entries(identity.repos)
+    .filter(([, path]) => path.length === 0 || !existsSync(path))
+    .map(([key]) => key);
+}
+
+/**
  * Every member repo a workbench Project's scan must cover (issue 72): the
  * CONFIG's repos (deduped), else just the default repo. Legacy: the repo.
  */
@@ -319,6 +337,7 @@ function projectViewsFor(windowId: string): ProjectView[] {
         join(normalizeProjectKey(p.key), 'issues', 'completions'),
       defaultRepoPath: gitRepoFor(p.key),
       repos: identity?.repos ?? {},
+      plannedRepoKeys: plannedRepoKeysFor(identity),
       stage: p.stage,
       ownership:
         p.ownerWindowId === null ? 'free' : p.ownerWindowId === windowId ? 'you' : 'other',
