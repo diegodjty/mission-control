@@ -25,6 +25,23 @@ describe('repoForIssue (issue 72, ADR-0015)', () => {
     // A repo: key on a legacy project's issue is unknown by construction.
     expect(repoForIssue(legacy, 'app')).toEqual({ ok: false, unknownKey: 'app' });
   });
+
+  it('repo-less project (issue 94, ADR-0017): a no-repo issue resolves to the workspace root', () => {
+    // A repo-less project's identity resolves defaultRepoPath to the workspace
+    // root (project-identity, issue 93) — so a no-repo issue's Run targets the
+    // workspace root, where a scaffold command creates code.
+    const repoLess = { repos: {}, defaultRepoPath: '/Users/dev/Developer/billing' };
+    expect(repoForIssue(repoLess, null)).toEqual({
+      ok: true,
+      repoPath: '/Users/dev/Developer/billing',
+    });
+  });
+
+  it('a project with repos: keys still resolves each key to its path unchanged', () => {
+    // Regression alongside the repo-less case: real repo keys are untouched.
+    expect(repoForIssue(PROJECT, 'app')).toEqual({ ok: true, repoPath: '/repos/app' });
+    expect(repoForIssue(PROJECT, 'api')).toEqual({ ok: true, repoPath: '/repos/api' });
+  });
 });
 
 describe('unknownRepoKeyNote', () => {

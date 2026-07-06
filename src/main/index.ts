@@ -201,6 +201,24 @@ function requestRepoFor(projectKey: string, repoPath: string | undefined): strin
 }
 
 /**
+ * Can a Run target host git worktrees (issue 94, ADR-0017)? A real member repo
+ * can; a **repo-less** project's workspace root — the `defaultRepoPath` fallback
+ * when the project declares no repos — cannot: it is not a git repo, so a
+ * `git init` there would nest repos and worktrees can't be cut from it. A group
+ * keyed on such a target serializes solo on the shared workspace-root tree
+ * instead. Legacy and repo-backed Projects always report `true`, so their
+ * isolation is byte-identical to before.
+ */
+function isIsolatableTarget(projectKey: string, repo: string): boolean {
+  const identity = identityFor(projectKey);
+  if (identity === null) return true;
+  // A project with real member repos isolates as always; only a repo-less
+  // project (no repos, default resolved to the workspace root) is unisolatable.
+  if (identity.repoPaths.length > 0) return true;
+  return repo !== identity.defaultRepoPath;
+}
+
+/**
  * Every member repo a workbench Project's scan must cover (issue 72): the
  * CONFIG's repos (deduped), else just the default repo. Legacy: the repo.
  */
@@ -706,12 +724,21 @@ function registerIpc(): void {
         // No Runs at all: reconcile the default repo to its solo ground state,
         // exactly as the single-repo path always did.
         return repoSerializer.run(normalizeProjectKey(defaultRepo), () =>
-          applyIsolation(defaultRepo, []),
+          applyIsolation(defaultRepo, [], {
+            isolatable: isIsolatableTarget(req.projectPath, defaultRepo),
+          }),
         );
       }
       const results = await Promise.all(
         [...byRepo.entries()].map(([repo, runs]) =>
-          repoSerializer.run(normalizeProjectKey(repo), () => applyIsolation(repo, runs)),
+          repoSerializer.run(normalizeProjectKey(repo), () =>
+            applyIsolation(repo, runs, {
+              // A repo-less project's workspace-root target can't host worktrees
+              // (ADR-0017) — the group serializes solo instead of failing on a
+              // `git worktree` against a non-git directory.
+              isolatable: isIsolatableTarget(req.projectPath, repo),
+            }),
+          ),
         ),
       );
       return {

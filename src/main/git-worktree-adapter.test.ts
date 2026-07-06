@@ -189,6 +189,30 @@ describe('applyIsolation — the full solo↔parallel lifecycle (real git)', () 
     expect((await listWorktreeSlugs(repo)).sort()).toEqual(['03-a', '04-b']);
   });
 
+  it('an unisolatable workspace root: 2+ Runs stay solo there, no worktrees (issue 94, ADR-0017)', async () => {
+    // A repo-less project's workspace root is a plain (non-git) directory. Two
+    // no-repo Runs must serialize solo IN that directory — never attempt a git
+    // worktree against a non-repo (which would throw) — so a scaffold Run lands
+    // in the workspace root itself.
+    const workspace = join(scratch, 'workspace');
+    await mkdir(workspace, { recursive: true });
+
+    const result = await applyIsolation(
+      workspace,
+      [run(1, '01-scaffold-api'), run(2, '02-scaffold-web')],
+      { isolatable: false },
+    );
+
+    expect(result.parallel).toBe(false);
+    expect(result.placements).toEqual([
+      { issueId: 1, slug: '01-scaffold-api', cwd: workspace, branch: null },
+      { issueId: 2, slug: '02-scaffold-web', cwd: workspace, branch: null },
+    ]);
+    // No worktrees cut from the non-git directory, no parallel flag written.
+    expect(existsSync(worktreeBase(workspace))).toBe(false);
+    expect(isParallel(workspace)).toBe(false);
+  });
+
   it('the surviving Run returns to main, but a dropped Run’s worktree is preserved (issue 28)', async () => {
     await applyIsolation(repo, [run(3, '03-a'), run(4, '04-b')]);
     expect((await listWorktreeSlugs(repo)).length).toBe(2);

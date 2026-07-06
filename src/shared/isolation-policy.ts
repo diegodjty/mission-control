@@ -84,6 +84,22 @@ export function commitMessageForRun(slug: string): string {
   return `afk: complete issue — ${slug}`;
 }
 
+/** Options for a single isolation decision. */
+export interface DecideIsolationOptions {
+  /**
+   * Whether the target can host git worktrees. Default `true` — a real git
+   * repo, decided by concurrency as always. `false` marks an **unisolatable
+   * target** (ADR-0017): a repo-less project's workspace root, where Runs
+   * scaffold code but there is no repo to cut worktrees from. An unisolatable
+   * target stays SOLO no matter the concurrency — `parallel` is false and every
+   * Run is placed on the shared tree (`main`), so `reconcile` emits no worktree
+   * commands. Such Runs still serialize (the coordinator runs them one at a
+   * time because they mutate one un-isolated tree), but that scheduling is the
+   * caller's; this module only refuses to cut worktrees where none can exist.
+   */
+  isolatable?: boolean;
+}
+
 /**
  * Decide the desired isolation state for a set of Runs.
  *
@@ -91,10 +107,18 @@ export function commitMessageForRun(slug: string): string {
  * `>= 2` Runs ⇒ parallel: parallel enabled, every Run gets its own worktree on
  * an `afk/NN-slug` branch. Deterministic (sorted by issueId) so re-deciding the
  * same input yields the same decision.
+ *
+ * When the target is **unisolatable** (`options.isolatable === false`, ADR-0017)
+ * the concurrency check is skipped entirely: the decision is always solo, so a
+ * repo-less project's workspace root never has worktrees cut from it.
  */
-export function decideIsolation(runs: IsolationRun[]): IsolationDecision {
+export function decideIsolation(
+  runs: IsolationRun[],
+  options: DecideIsolationOptions = {},
+): IsolationDecision {
+  const isolatable = options.isolatable ?? true;
   const sorted = [...runs].sort((a, b) => a.issueId - b.issueId);
-  const parallel = sorted.length >= 2;
+  const parallel = isolatable && sorted.length >= 2;
   const placements: PlacedRun[] = sorted.map((run) => ({
     issueId: run.issueId,
     slug: run.slug,
@@ -115,6 +139,19 @@ export interface RepoIsolationGroup {
   decision: IsolationDecision;
 }
 
+/** Options for a per-repo isolation decision. */
+export interface DecideIsolationByRepoOptions {
+  /**
+   * Target paths that cannot host git worktrees (ADR-0017): a repo-less
+   * project's workspace root, where Runs scaffold code but there is no repo to
+   * cut worktrees from. Any group keyed on one of these SERIALIZES — it stays
+   * solo on the shared tree no matter how many Runs it holds, emitting no
+   * worktree commands — while groups keyed on real repos isolate exactly as
+   * before. This is the single new rule ADR-0017 adds to the per-target keying.
+   */
+  unisolatablePaths?: Iterable<string>;
+}
+
 /**
  * Decide isolation PER REPO (issue 72, ADR-0015): group the Runs by the repo
  * each targets and make the concurrency decision independently for each group.
@@ -125,11 +162,20 @@ export interface RepoIsolationGroup {
  * caller-supplied `defaultRepoPath` group (the legacy single-repo behavior).
  * Groups are returned sorted by repoPath; deterministic, like the per-repo
  * decisions themselves.
+ *
+ * A group whose key is an **unisolatable target** (ADR-0017 — listed in
+ * `options.unisolatablePaths`, i.e. a repo-less project's workspace root) is the
+ * one exception: it stays solo regardless of concurrency (no worktrees), so two
+ * no-repo Runs serialize against each other on the shared workspace-root tree,
+ * while a no-repo group and a real-repo group — different keys — still run
+ * concurrently. Real-repo groups are unchanged.
  */
 export function decideIsolationByRepo(
   runs: IsolationRun[],
   defaultRepoPath: string,
+  options: DecideIsolationByRepoOptions = {},
 ): RepoIsolationGroup[] {
+  const unisolatable = new Set(options.unisolatablePaths ?? []);
   const byRepo = new Map<string, IsolationRun[]>();
   for (const run of runs) {
     const repo = run.repoPath ?? defaultRepoPath;
@@ -141,7 +187,10 @@ export function decideIsolationByRepo(
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([repoPath, group]) => {
       const sorted = [...group].sort((a, b) => a.issueId - b.issueId);
-      return { repoPath, runs: sorted, decision: decideIsolation(sorted) };
+      const decision = decideIsolation(sorted, {
+        isolatable: !unisolatable.has(repoPath),
+      });
+      return { repoPath, runs: sorted, decision };
     });
 }
 

@@ -347,3 +347,86 @@ describe('decideIsolationByRepo (issue 72, ADR-0015 — per-repo concurrency)', 
     expect(groups[1].runs.map((r) => r.issueId)).toEqual([1, 9]);
   });
 });
+
+describe('decideIsolation — unisolatable target serializes solo (issue 94, ADR-0017)', () => {
+  it('forces a 2+ Run set solo when the target cannot host worktrees', () => {
+    const d = decideIsolation([run(1, '01-a'), run(2, '02-b')], { isolatable: false });
+    expect(d.parallel).toBe(false);
+    expect(d.placements.map((p) => p.placement)).toEqual([
+      { kind: 'main' },
+      { kind: 'main' },
+    ]);
+  });
+
+  it('an unisolatable-target group emits no worktree commands on reconcile', () => {
+    const d = decideIsolation([run(1, '01-a'), run(2, '02-b')], { isolatable: false });
+    const commands = reconcile({ parallel: false, worktreeSlugs: [] }, d);
+    expect(commands).toEqual([]);
+  });
+
+  it('an isolatable target (the default) still isolates 2+ Runs into worktrees', () => {
+    const d = decideIsolation([run(1, '01-a'), run(2, '02-b')], { isolatable: true });
+    expect(d.parallel).toBe(true);
+    expect(d.placements.map((p) => p.placement.kind)).toEqual(['worktree', 'worktree']);
+  });
+});
+
+describe('decideIsolationByRepo — unisolatable workspace root (issue 94, ADR-0017)', () => {
+  const WORKSPACE = '/Users/dev/Developer/billing'; // repo-less project's workspace root
+
+  it('serializes an unisolatable-target group with 2+ Runs solo (no worktrees)', () => {
+    const groups = decideIsolationByRepo(
+      [
+        { issueId: 1, slug: '01-scaffold-api', repoPath: WORKSPACE },
+        { issueId: 2, slug: '02-scaffold-web', repoPath: WORKSPACE },
+      ],
+      WORKSPACE,
+      { unisolatablePaths: [WORKSPACE] },
+    );
+    expect(groups).toHaveLength(1);
+    const { decision } = groups[0];
+    expect(decision.parallel).toBe(false);
+    expect(decision.placements.map((p) => p.placement)).toEqual([
+      { kind: 'main' },
+      { kind: 'main' },
+    ]);
+    // no worktree commands: reconcile against a clean tree is a no-op
+    expect(reconcile({ parallel: false, worktreeSlugs: [] }, decision)).toEqual([]);
+  });
+
+  it('a real-repo group with 2+ Runs still isolates into worktrees', () => {
+    const groups = decideIsolationByRepo(
+      [
+        { issueId: 1, slug: '01-a', repoPath: '/repos/real' },
+        { issueId: 2, slug: '02-b', repoPath: '/repos/real' },
+      ],
+      WORKSPACE,
+      { unisolatablePaths: [WORKSPACE] },
+    );
+    expect(groups[0].decision.parallel).toBe(true);
+    expect(groups[0].decision.placements.map((p) => p.placement.kind)).toEqual([
+      'worktree',
+      'worktree',
+    ]);
+  });
+
+  it('a no-repo group and a real-repo group run concurrently (different keys)', () => {
+    const groups = decideIsolationByRepo(
+      [
+        { issueId: 1, slug: '01-scaffold', repoPath: WORKSPACE },
+        { issueId: 2, slug: '02-feature', repoPath: '/repos/real' },
+      ],
+      WORKSPACE,
+      { unisolatablePaths: [WORKSPACE] },
+    );
+    // two independent groups — neither blocks the other
+    expect(groups).toHaveLength(2);
+    const workspaceGroup = groups.find((g) => g.repoPath === WORKSPACE);
+    const realGroup = groups.find((g) => g.repoPath === '/repos/real');
+    expect(workspaceGroup?.decision.placements[0].placement).toEqual({ kind: 'main' });
+    expect(realGroup?.decision.placements[0].placement).toEqual({ kind: 'main' });
+    // each is the lone Run in its own key ⇒ both solo, no mutual contention
+    expect(workspaceGroup?.decision.parallel).toBe(false);
+    expect(realGroup?.decision.parallel).toBe(false);
+  });
+});
