@@ -6,7 +6,10 @@
  * project's workbench artifacts off disk — `issues/` (through the backlog
  * reader), `completions/` Receipts, `memory/CORE.proposed.md` presence,
  * `HUMAN-SETUP.md`, and `memory/journal/` entries — into the plain
- * `AttentionInput` value the pure model derives from. All classification
+ * `AttentionInput` value the pure model derives from. For the self-heal
+ * detector (issue 95, ADR-0017) it also reads the project's `CONFIG.md`
+ * (`workspace_root` + `repos:` map), the workspace root's top-level dirs (each
+ * probed for a `.git`), and the workbench `registry.md`. All classification
  * logic lives in `src/shared/attention-model`; this file only reads.
  *
  * Read-only by contract (the whole issue-79 service is): nothing here writes,
@@ -24,6 +27,8 @@ import { readBacklogAt } from './backlog-reader';
 import type { AttentionInput, JournalFile } from '../shared/attention-model';
 import type { Backlog } from '../shared/backlog-model';
 import { parseReceipt, type ReceiptRecord } from '../shared/receipt-parser';
+import type { SelfHealInput, WorkspaceEntry } from '../shared/self-heal';
+import { expandTilde, parseProjectConfig } from '../shared/workbench-model';
 
 /** The empty backlog — what a project with no readable `issues/` derives from. */
 const EMPTY_BACKLOG: Backlog = { activePrd: null, issues: [] };
@@ -60,6 +65,61 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
+/** True when `path` exists at all (a `.git` may be a dir OR a worktree file). */
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * List the workspace root's top-level directories, each tagged with whether it
+ * holds a `.git` — the self-heal detector's raw material (issue 95). A missing/
+ * unreadable workspace root degrades to `[]` (nothing to detect). Only
+ * directories are listed; a stray file at the workspace root is not a repo.
+ */
+async function readWorkspaceEntries(workspaceRoot: string): Promise<WorkspaceEntry[]> {
+  let dirs: string[];
+  try {
+    const entries = await readdir(workspaceRoot, { withFileTypes: true });
+    dirs = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch {
+    return []; // workspace root doesn't exist yet — no candidates
+  }
+  const out: WorkspaceEntry[] = [];
+  for (const name of dirs) {
+    out.push({ name, isGit: await pathExists(join(workspaceRoot, name, '.git')) });
+  }
+  return out;
+}
+
+/**
+ * Gather the self-heal detector's input (issue 95, ADR-0017): the project's
+ * CONFIG (for its `workspace_root` + `repos:` map), the workspace root's
+ * top-level entries, and the whole workbench's registry. Read-only. When the
+ * project declares no workspace root (legacy / pre-0017), returns null — there
+ * is nothing to detect, so the pure model derives no candidates.
+ */
+async function readSelfHealInput(
+  workbenchRoot: string,
+  projectRoot: string,
+  homeDir: string | null,
+): Promise<SelfHealInput | null> {
+  const configContent = await readFile(join(projectRoot, 'CONFIG.md'), 'utf8').catch(() => null);
+  const config = parseProjectConfig(configContent);
+  if (config.workspaceRoot === null) return null;
+
+  const workspaceRoot = expandTilde(config.workspaceRoot, homeDir);
+  const [entries, registryContent] = await Promise.all([
+    readWorkspaceEntries(workspaceRoot),
+    readFile(join(workbenchRoot, 'registry.md'), 'utf8').catch(() => null),
+  ]);
+  return { workspaceRoot, entries, repos: config.repos, registryContent, homeDir };
+}
+
 /**
  * Read one workbench project's artifacts into the pure model's input shape.
  * `lastSeen` is the caller's briefing stamp (app userData, issue 80) — this
@@ -69,6 +129,7 @@ export async function readAttentionInput(
   workbenchRoot: string,
   project: string,
   lastSeen: string | null,
+  homeDir: string | null = null,
 ): Promise<AttentionInput> {
   const projectRoot = join(workbenchRoot, project);
 
@@ -86,5 +147,7 @@ export async function readAttentionInput(
 
   const journal = await readMarkdownFiles(join(projectRoot, 'memory', 'journal'));
 
-  return { project, backlog, receipts, coreProposedPresent, humanSetup, journal, lastSeen };
+  const selfHeal = await readSelfHealInput(workbenchRoot, projectRoot, homeDir);
+
+  return { project, backlog, receipts, coreProposedPresent, humanSetup, journal, lastSeen, selfHeal };
 }

@@ -8,6 +8,11 @@ interface InboxProps {
   snapshot: AttentionSnapshot;
   /** Open/switch to an item's project and focus its referenced thing. */
   onOpenItem: (item: AttentionItem) => void;
+  /**
+   * Confirm a `new-repo-candidate` (issue 95): register the appeared repo in
+   * place — this kind acts, it does not open the project.
+   */
+  onRegisterRepo: (item: AttentionItem) => void;
   /** A quiet outcome line from the last click-through (e.g. owned-elsewhere). */
   notice: string | null;
 }
@@ -25,7 +30,7 @@ interface InboxProps {
  * entries — but what you are currently reading must not blink out from under
  * you, so the mount-time lines stay for the life of this view.
  */
-export function Inbox({ snapshot, onOpenItem, notice }: InboxProps): JSX.Element {
+export function Inbox({ snapshot, onOpenItem, onRegisterRepo, notice }: InboxProps): JSX.Element {
   // Freeze the briefing as it stood when the Inbox was opened.
   const [frozenBriefing] = useState<AttentionItem[]>(() => splitInbox(snapshot.items).briefing);
 
@@ -76,24 +81,42 @@ export function Inbox({ snapshot, onOpenItem, notice }: InboxProps): JSX.Element
           <section key={group.project} className="inbox__group">
             <h3 className="inbox__group-title">{group.project}</h3>
             <ul className="inbox__list">
-              {group.items.map((item) => (
-                <li key={item.id}>
-                  <button
-                    className="inbox__item"
-                    onClick={() => onOpenItem(item)}
-                    title={
-                      item.fileRef
-                        ? `Open ${group.project} and focus ${item.fileRef}`
-                        : `Open ${group.project}`
-                    }
-                  >
-                    <span className={`inbox__badge inbox__badge--${item.kind}`}>
-                      {kindLabel(item.kind)}
-                    </span>
-                    <span className="inbox__text">{item.text}</span>
-                  </button>
-                </li>
-              ))}
+              {group.items.map((item) =>
+                item.kind === 'new-repo-candidate' && item.candidate ? (
+                  /* A candidate isn't opened — it's registered in place (issue
+                     95). One click confirms; a new repo is new state, so MC
+                     proposes and the human decides (never auto-registered). */
+                  <li key={item.id}>
+                    <button
+                      className="inbox__item"
+                      onClick={() => onRegisterRepo(item)}
+                      title={`Register ${item.candidate.path} in ${group.project} as "${item.candidate.suggestedKey}"`}
+                    >
+                      <span className={`inbox__badge inbox__badge--${item.kind}`}>
+                        {kindLabel(item.kind)}
+                      </span>
+                      <span className="inbox__text">{item.text}</span>
+                    </button>
+                  </li>
+                ) : (
+                  <li key={item.id}>
+                    <button
+                      className="inbox__item"
+                      onClick={() => onOpenItem(item)}
+                      title={
+                        item.fileRef
+                          ? `Open ${group.project} and focus ${item.fileRef}`
+                          : `Open ${group.project}`
+                      }
+                    >
+                      <span className={`inbox__badge inbox__badge--${item.kind}`}>
+                        {kindLabel(item.kind)}
+                      </span>
+                      <span className="inbox__text">{item.text}</span>
+                    </button>
+                  </li>
+                ),
+              )}
             </ul>
           </section>
         ))}

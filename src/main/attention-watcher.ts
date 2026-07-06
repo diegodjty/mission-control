@@ -4,11 +4,19 @@
  *
  * Reads `~/Workbench/registry.md` and, for EVERY `status: active` project —
  * open in a Window or not — lightly watches its workbench project directory
- * (`issues/`, `completions/`, `memory/`, `HUMAN-SETUP.md`) with one recursive
- * `fs.watch` per project. A relevant change debounces into one re-read through
- * the attention reader and one re-derivation through the pure attention model
- * (issue 78); the aggregated cross-project item list is pushed via `onChange`
- * only when it actually differs. No polling, no timers except the debounce.
+ * (`issues/`, `completions/`, `memory/`, `HUMAN-SETUP.md`, `CONFIG.md`) with
+ * one recursive `fs.watch` per project. A relevant change debounces into one
+ * re-read through the attention reader and one re-derivation through the pure
+ * attention model (issue 78); the aggregated cross-project item list is pushed
+ * via `onChange` only when it actually differs. No polling, no timers except
+ * the debounce.
+ *
+ * Self-heal (issue 95, ADR-0017): each project that declares a `workspace_root`
+ * also gets ONE debounced `fs.watch` scoped to that workspace root only (never
+ * recursively into the code tree) — when a `git init` lands a repo under it,
+ * the re-derive surfaces a `new-repo-candidate` Inbox item. The watch follows
+ * the project's current workspace root (a CONFIG edit re-points it) and is torn
+ * down when the project deactivates, exactly like the project-dir watch.
  *
  * The registry itself is watched too: adding/activating a project attaches its
  * watcher (and derives once), deactivating/removing detaches it and drops its
@@ -44,6 +52,14 @@ interface ProjectWatch {
   /** The recursive watcher on the project dir; null when attach failed (the
    * dir may not exist yet — a later registry reconcile retries). */
   watcher: FSWatcher | null;
+  /**
+   * The self-heal watch on the project's workspace root (issue 95): null when
+   * the project declares none, or when the root doesn't exist yet (a later
+   * derive retries the attach once the root appears).
+   */
+  wsWatcher: FSWatcher | null;
+  /** The workspace root `wsWatcher` currently covers (a CONFIG edit re-points it). */
+  wsRoot: string | null;
   /** Pending debounce timer for this project's re-derive. */
   timer: ReturnType<typeof setTimeout> | null;
   /** The last derivation for this project (null until the first completes). */
@@ -62,6 +78,13 @@ export interface AttentionWatcherOptions {
    * this app has never looked. Lives in app userData (issue 80) — never here.
    */
   lastSeenFor?: (project: string) => string | null;
+  /**
+   * The edge-discovered home dir, used to expand `~/` in each project's
+   * `workspace_root` / `repos:` paths and registry entries for the self-heal
+   * detector (issue 95). Null when unknown — tilde paths then simply won't
+   * match, which only means a `~/`-written workspace root isn't watched.
+   */
+  homeDir?: string | null;
 }
 
 /** Is a project-relative changed path one the attention model reads from? */
@@ -71,6 +94,10 @@ export function isAttentionRelevant(rel: string | null): boolean {
   if (norm === '.git' || norm.startsWith('.git/')) return false;
   return (
     norm === 'HUMAN-SETUP.md' ||
+    // CONFIG.md carries the `repos:` map + `workspace_root` the self-heal
+    // detector reads (issue 95): registering an appeared repo edits it, and
+    // that edit must re-derive so the resolved candidate item clears.
+    norm === 'CONFIG.md' ||
     norm === 'issues' ||
     norm.startsWith('issues/') ||
     norm === 'completions' ||
@@ -85,6 +112,7 @@ export class AttentionWatcher {
   private readonly onChange: (snapshot: AttentionSnapshot) => void;
   private readonly debounceMs: number;
   private readonly lastSeenFor: (project: string) => string | null;
+  private readonly homeDir: string | null;
 
   private readonly projects = new Map<string, ProjectWatch>();
   private registryWatcher: FSWatcher | null = null;
@@ -99,6 +127,7 @@ export class AttentionWatcher {
     this.onChange = opts.onChange;
     this.debounceMs = opts.debounceMs ?? DEFAULT_DEBOUNCE_MS;
     this.lastSeenFor = opts.lastSeenFor ?? (() => null);
+    this.homeDir = opts.homeDir ?? null;
     this.latest = { workbenchRoot: this.workbenchRoot, items: [], notes: [] };
     this.lastPushed = JSON.stringify(this.latest);
   }
@@ -166,6 +195,7 @@ export class AttentionWatcher {
     for (const entry of this.projects.values()) {
       if (entry.timer) clearTimeout(entry.timer);
       entry.watcher?.close();
+      entry.wsWatcher?.close();
     }
     this.projects.clear();
   }
@@ -204,6 +234,7 @@ export class AttentionWatcher {
       if (active.has(project)) continue;
       if (entry.timer) clearTimeout(entry.timer);
       entry.watcher?.close();
+      entry.wsWatcher?.close();
       this.projects.delete(project);
       removedAny = true;
     }
@@ -215,7 +246,13 @@ export class AttentionWatcher {
         if (existing.watcher === null) existing.watcher = this.attach(project);
         continue;
       }
-      const entry: ProjectWatch = { watcher: this.attach(project), timer: null, result: null };
+      const entry: ProjectWatch = {
+        watcher: this.attach(project),
+        wsWatcher: null,
+        wsRoot: null,
+        timer: null,
+        result: null,
+      };
       this.projects.set(project, entry);
       void this.derive(project); // initial derivation — items already on disk count
     }
@@ -267,13 +304,54 @@ export class AttentionWatcher {
       this.workbenchRoot,
       project,
       this.lastSeenFor(project),
+      this.homeDir,
     );
     // The project may have been deactivated (or the service closed) while the
     // read ran — a stale derivation must not resurrect its entry.
     const entry = this.projects.get(project);
     if (!entry || this.closed) return;
+    // Keep the self-heal watch pointed at the project's CURRENT workspace root
+    // (issue 95): a CONFIG edit that sets/changes it re-points the watch here.
+    this.reconcileWorkspaceWatch(entry, project, input.selfHeal?.workspaceRoot ?? null);
     entry.result = deriveAttention(input);
     this.push();
+  }
+
+  /**
+   * Point the project's self-heal watch at `wsRoot` — the workspace root the
+   * latest derive resolved (issue 95, ADR-0017). A no-op when it already covers
+   * that exact root and the watcher is live; otherwise the old watch is torn
+   * down and a fresh one attached. `null` (legacy / pre-0017, no workspace root)
+   * tears the watch down entirely. The watch is scoped to the workspace root
+   * ONLY (non-recursive — never into the code tree): a top-level change (a
+   * `git init` landing a repo dir) debounces into the same re-derive path.
+   */
+  private reconcileWorkspaceWatch(
+    entry: ProjectWatch,
+    project: string,
+    wsRoot: string | null,
+  ): void {
+    if (wsRoot === entry.wsRoot && entry.wsWatcher !== null) return; // already covered
+    if (wsRoot !== entry.wsRoot) {
+      entry.wsWatcher?.close();
+      entry.wsWatcher = null;
+      entry.wsRoot = wsRoot;
+    }
+    if (wsRoot === null) return;
+    try {
+      const watcher = watch(wsRoot, { persistent: false });
+      watcher.on('change', () => this.schedule(project));
+      // The root may not exist yet (planning-first: code before the dir). A
+      // watcher error drops it; the next derive retries the attach.
+      watcher.on('error', () => {
+        watcher.close();
+        const live = this.projects.get(project);
+        if (live && live.wsWatcher === watcher) live.wsWatcher = null;
+      });
+      entry.wsWatcher = watcher;
+    } catch {
+      entry.wsWatcher = null; // workspace root absent — a later derive retries
+    }
   }
 
   /** Re-aggregate every project's items and push only on a real change. */

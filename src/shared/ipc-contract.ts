@@ -282,6 +282,17 @@ export const IpcChannel = {
    * ProjectRemoveResult.
    */
   ProjectRemove: 'project:remove',
+  /**
+   * renderer → main (invoke): the self-heal confirm (issue 95, ADR-0017) —
+   * register a git repo that appeared under a project's workspace root, from
+   * its Inbox `new-repo-candidate` item. Reuses the ADR-0015 registration path:
+   * adds the repo to the project's CONFIG `repos:` map (promoted to
+   * `default_repo` when the project was repo-less), appends one active
+   * `registry.md` entry, and lands ONE boring workbench commit. Refuses (a
+   * taken key, a path already a member or already registered) without writing.
+   * Resolves to a RepoRegisterResult.
+   */
+  RepoRegister: 'repo:register',
 } as const;
 
 export type IpcChannel = (typeof IpcChannel)[keyof typeof IpcChannel];
@@ -943,6 +954,29 @@ export interface ProjectRemoveResult {
   warning: string | null;
 }
 
+export interface RepoRegisterRequest {
+  /** The workbench project directory name the repo joins. */
+  project: string;
+  /** The appeared repo's absolute path (from the Inbox candidate). */
+  repoPath: string;
+  /** The short `repos:` key to register it under (the candidate's suggestion). */
+  key: string;
+}
+
+export interface RepoRegisterResult {
+  /** True when the repo was registered (CONFIG + registry written + committed). */
+  ok: boolean;
+  /** Refusal reasons when `ok` is false (a taken key, an already-registered path). */
+  errors: string[];
+  /**
+   * Set when the write succeeded but the workbench auto-commit did not — the
+   * repo is registered on disk; commit it by hand.
+   */
+  warning: string | null;
+  /** The key actually registered, on success. */
+  key: string | null;
+}
+
 export interface IssueFileReadRequest {
   /** The Project key whose resolved issues root holds the file. */
   projectPath: string;
@@ -1172,6 +1206,12 @@ export interface MissionControlApi {
    * while the project is open in a Window.
    */
   removeProject(req: ProjectRemoveRequest): Promise<ProjectRemoveResult>;
+  /**
+   * Self-heal confirm (issue 95, ADR-0017): register a repo that appeared under
+   * a project's workspace root, from its Inbox `new-repo-candidate` item — adds
+   * the CONFIG `repos:` entry + a registry line, auto-committed.
+   */
+  registerRepo(req: RepoRegisterRequest): Promise<RepoRegisterResult>;
   /**
    * Read one issue file's raw text for the Map's editor (issue 89) — fresh
    * off disk, restricted to the Project's issues root.

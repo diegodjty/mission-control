@@ -287,9 +287,12 @@ describe('isAttentionRelevant', () => {
     expect(isAttentionRelevant('memory/CORE.proposed.md')).toBe(true);
     expect(isAttentionRelevant('memory/journal/2026-07-04.md')).toBe(true);
     expect(isAttentionRelevant('HUMAN-SETUP.md')).toBe(true);
+    // CONFIG.md carries the repos: map + workspace_root the self-heal detector
+    // reads (issue 95): registering an appeared repo edits it, so the edit must
+    // re-derive to clear the resolved candidate item.
+    expect(isAttentionRelevant('CONFIG.md')).toBe(true);
     expect(isAttentionRelevant(null)).toBe(true); // unknown → re-derive, safe
 
-    expect(isAttentionRelevant('CONFIG.md')).toBe(false);
     expect(isAttentionRelevant('.git/index')).toBe(false);
     expect(isAttentionRelevant('scratch/notes.md')).toBe(false);
   });
