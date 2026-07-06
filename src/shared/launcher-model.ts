@@ -181,6 +181,40 @@ export function quickFixDefaultDir(
   return match?.workbenchDir ?? '';
 }
 
+/**
+ * The names of every workbench project the Launcher should list — the union of
+ * two truths that only coincide for repo-full projects:
+ *
+ *  - **registry-active projects** — every distinct project named by a
+ *    `status: active` registry entry (one workbench project may have several
+ *    member repos, hence the dedupe); and
+ *  - **repo-less project directories** — every `~/Workbench/<dir>` that is a
+ *    repo-less project (a `CONFIG.md` with an empty `repos:` map), which by
+ *    definition has no registry entry to be found under the first source.
+ *
+ * A **repo-less project** (ADR-0017) is exactly the case these diverge: New
+ * project writes its `~/Workbench/<dir>` skeleton but NO registry entry
+ * (registration is deferred until a repo appears via self-heal), so a
+ * registry-only list renders it invisible even though its directory exists —
+ * the "created it, but it shows in no list, yet re-creating is refused because
+ * it already exists" bug. Listing the union makes a just-created repo-less
+ * project appear immediately; the two collapse back into one the moment a repo
+ * is registered. (The edge intentionally passes only *repo-less* directories as
+ * the second source, so a repo-full project whose registry entries were removed
+ * — issue 92, removal is registry-only — does not reappear.) Returns a deduped,
+ * ascending set (the caller re-orders by recency), so the contract is
+ * deterministic and pure.
+ */
+export function workbenchProjectNames(
+  activeRegistryProjects: readonly string[],
+  workbenchProjectDirs: readonly string[],
+): string[] {
+  const names = new Set<string>();
+  for (const name of activeRegistryProjects) if (typeof name === 'string' && name.length > 0) names.add(name);
+  for (const dir of workbenchProjectDirs) if (typeof dir === 'string' && dir.length > 0) names.add(dir);
+  return [...names].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
 // ---------------------------------------------------------------------------
 // Continue — truthful one-line project state + recency ordering
 // ---------------------------------------------------------------------------

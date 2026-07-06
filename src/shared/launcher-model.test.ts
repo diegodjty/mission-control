@@ -10,6 +10,7 @@ import {
   quickFixRunTarget,
   quickFixSlug,
   sortLauncherProjects,
+  workbenchProjectNames,
 } from './launcher-model';
 import { buildBacklog } from './backlog-model';
 
@@ -177,6 +178,44 @@ describe('localDateStamp', () => {
     // 23:55 local (a UTC-slice stamp is TOMORROW in zones behind UTC).
     expect(localDateStamp(new Date(2026, 6, 4, 0, 5, 0))).toBe('2026-07-04');
     expect(localDateStamp(new Date(2026, 6, 4, 23, 55, 0))).toBe('2026-07-04');
+  });
+});
+
+describe('workbenchProjectNames', () => {
+  it('unions registry-active projects with workbench project directories', () => {
+    expect(workbenchProjectNames(['billing', 'atlas'], ['atlas', 'billing'])).toEqual([
+      'atlas',
+      'billing',
+    ]);
+  });
+
+  it('includes a repo-less project present as a directory but absent from the registry', () => {
+    // The issue-99 bug: New project wrote ~/Workbench/repoless-qa but no
+    // registry entry (ADR-0017 defers registration), so a registry-only list
+    // hid it even though its directory exists.
+    expect(workbenchProjectNames(['billing'], ['billing', 'repoless-qa'])).toEqual([
+      'billing',
+      'repoless-qa',
+    ]);
+  });
+
+  it('dedupes a project that is both registered and on disk', () => {
+    expect(workbenchProjectNames(['billing', 'billing'], ['billing'])).toEqual(['billing']);
+  });
+
+  it('still lists a registered project whose directory listing was unreadable', () => {
+    expect(workbenchProjectNames(['billing'], [])).toEqual(['billing']);
+  });
+
+  it('ignores empty/non-string names from either source', () => {
+    expect(workbenchProjectNames(['', 'billing'], ['', 'repoless-qa'])).toEqual([
+      'billing',
+      'repoless-qa',
+    ]);
+  });
+
+  it('returns an ascending, deterministic set', () => {
+    expect(workbenchProjectNames(['zed', 'alpha'], ['mid'])).toEqual(['alpha', 'mid', 'zed']);
   });
 });
 

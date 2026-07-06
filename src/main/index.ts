@@ -33,6 +33,7 @@ import { ReceiptWatcher } from './receipt-watcher';
 import { PlanningWatcher } from './planning-watcher';
 import { commitWorkbenchPaths, commitWorkbenchProject } from './workbench-git';
 import { createWorkbenchProject } from './onboarding';
+import { listWorkbenchProjectNames } from './workbench-projects';
 import { registerAppearedRepo } from './register-repo';
 import { deleteIssueFile, readIssueText, writeIssueText } from './issue-file-store';
 import { readCoreMemory, writeDrainJournal } from './memory-files';
@@ -44,7 +45,7 @@ import {
   quickFixFileName,
   sortLauncherProjects,
 } from '../shared/launcher-model';
-import { parseRegistry, removeRegistryProject } from '../shared/workbench-model';
+import { removeRegistryProject } from '../shared/workbench-model';
 import { isAllowedPlanningDoc } from '../shared/planning-model';
 import {
   claimEventsBetween,
@@ -1138,15 +1139,14 @@ function registerIpc(): void {
     return latest === null ? null : new Date(latest).toISOString();
   };
 
-  // The Launcher's project list: every `status: active` workbench-registry
-  // project (open in a Window or not — same population the attention watch
-  // covers) with truthful backlog counts and a last-activity stamp, most
-  // recent first. Read-only: listing never claims, writes, or commits.
+  // The Launcher's project list: every workbench project — a `status: active`
+  // registry project OR a repo-less project directory (a CONFIG.md with an
+  // empty repos map; ADR-0017 defers its registration, so it has no registry
+  // entry — issue 99) — open in a Window or not, with truthful backlog counts
+  // and a last-activity stamp, most recent first. Read-only: listing never
+  // claims, writes, or commits.
   ipcMain.handle(IpcChannel.LauncherList, async (): Promise<LauncherListResult> => {
-    const registryContent = await readOrNull(join(WORKBENCH_ROOT, 'registry.md'));
-    if (registryContent === null) return { projects: [] };
-    const { entries } = parseRegistry(registryContent);
-    const names = [...new Set(entries.filter((e) => e.active).map((e) => e.project))];
+    const names = await listWorkbenchProjectNames(WORKBENCH_ROOT);
     const projects = await Promise.all(
       names.map(async (name): Promise<LauncherProject> => {
         // The same identity resolution the open flow uses (issue 71), aimed at
