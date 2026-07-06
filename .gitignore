@@ -1,8 +1,16 @@
-node_modules/
-out/
-dist/
+# Local install artifacts — never track these. An afk worktree symlinks its
+# node_modules at the main repo's real install; committing that symlink makes it
+# self-reference and corrupts main on merge (issue 98).
+#
+# NOTE: the pattern is slash-less on purpose. `node_modules/` (trailing slash)
+# matches a DIRECTORY only — it does NOT match the node_modules *symlink* a
+# worktree creates (git treats a symlink as a file), which is the exact artifact
+# that reached main. Slash-less `node_modules` matches the dir AND the symlink.
+# Covered here (durable, all worktrees) and enforced by the commit +
+# merge-preflight guards in code.
+node_modules
+out
+dist
+
 *.log
 .DS_Store
-
-# Never commit installed deps (afk worktrees symlink this; committing it self-references — see issue log)
-node_modules/

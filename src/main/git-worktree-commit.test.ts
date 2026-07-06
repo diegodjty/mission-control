@@ -14,7 +14,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -124,6 +124,31 @@ describe('commitFinishedWorktree — auto-commit on the done transition', () => 
     expect((await commitFinishedWorktree(repo, SLUG)).committed).toBe(false);
     expect(await commitCount(SLUG)).toBe(1);
     expect(await readCommittedIssueStatus(repo, SLUG)).toBe('wip');
+  });
+
+  it('EXCLUDES a node_modules symlink from the worktree commit — guard, not gitignore (issue 98)', async () => {
+    // This scratch repo has NO .gitignore, so the ONLY thing that can keep the
+    // artifact out of the commit is the structural guard in commitFinishedWorktree.
+    const wt = await createWorktree(repo, SLUG, branchFor(SLUG));
+    await simulateAgent(wt, 'done');
+    // Reproduce the exact failure shape: a node_modules symlink pointing at the
+    // main repo's real install (git object mode 120000, absolute target).
+    await symlink(join(repo, 'node_modules'), join(wt, 'node_modules'));
+
+    const outcome = await commitFinishedWorktree(repo, SLUG);
+    expect(outcome.committed).toBe(true);
+    expect(outcome.error).toBeNull();
+
+    // The real work landed on the branch; the symlink did NOT enter tracked scope.
+    const tracked = await git(wt, 'ls-files');
+    expect(tracked).toContain(FEATURE_PATH);
+    expect(tracked).not.toContain('node_modules');
+    // Belt-and-braces: nothing under node_modules is tracked at any depth.
+    expect(tracked.split('\n').some((p) => p.split('/').includes('node_modules'))).toBe(false);
+    // The symlink still exists on disk (unstaged, not deleted) — the guard only
+    // keeps it out of the commit, it does not disturb the working tree.
+    const status = await git(wt, 'status', '--porcelain');
+    expect(status).toContain('node_modules');
   });
 });
 

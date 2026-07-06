@@ -41,6 +41,11 @@ import { ensureLocallyIgnored } from './local-ignore';
 import { afkMergeConfContent } from '../shared/merge-plan';
 import { branchFor } from '../shared/isolation-policy';
 import {
+  ignoredArtifactPaths,
+  artifactMergeRefusalMessage,
+  type ArtifactOffender,
+} from '../shared/artifact-hygiene';
+import {
   parseMergeSummary,
   classifyMergeFailure,
   parsePartialMerge,
@@ -87,6 +92,32 @@ async function dirtyMainPaths(projectPath: string): Promise<string[]> {
       cwd: projectPath,
     });
     return dirtyPathsFromPorcelain(stdout);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The ignored install-artifact paths a branch would INTRODUCE relative to the
+ * default branch (issue 98) — `git diff --name-only <default>...<branch>` (the
+ * changes on the branch since it diverged) filtered through the pure hygiene rule.
+ * Empty when the branch adds none, or when the branch/diff can't be read (a
+ * missing branch is reported later by afk-merge.sh's own "no branch" skip).
+ */
+async function branchIntroducedArtifacts(
+  projectPath: string,
+  branch: string,
+  defaultBranch: string,
+): Promise<string[]> {
+  try {
+    const { stdout } = await exec(
+      'git',
+      ['diff', '--name-only', `${defaultBranch}...${branch}`],
+      { cwd: projectPath, maxBuffer: 16 * 1024 * 1024 },
+    );
+    return ignoredArtifactPaths(
+      stdout.split('\n').map((line) => line.trim()).filter((line) => line.length > 0),
+    );
   } catch {
     return [];
   }
@@ -210,6 +241,32 @@ export async function mergeRuns(
   // The branch afk-merge.sh integrates into is the repo's default branch, not a
   // hardcoded `main` (issue 27) — detect it so every message names the real one.
   const defaultBranch = await detectDefaultBranch(projectPath);
+
+  // Ignored-artifact preflight (issue 98): refuse — BEFORE running afk-merge.sh at
+  // all — any branch that would add a local install artifact (a committed
+  // `node_modules` symlink, a `dist/`/`out/` build output) to the default branch.
+  // Merging such a branch makes the self-referential symlink point at its own
+  // location, an infinite loop that clobbers the real install and kills every
+  // build (observed during the 94/95/96 drain). We check every requested slug so
+  // the message names them all at once, then halt with the truthful cause —
+  // mirroring the issue-23/59 dirty-tree / stray-Receipt preflights. Halting here
+  // means the script never runs, so the target repo's install is never touched.
+  const artifactOffenders: ArtifactOffender[] = [];
+  for (const slug of slugs) {
+    const paths = await branchIntroducedArtifacts(projectPath, branchFor(slug), defaultBranch);
+    if (paths.length > 0) artifactOffenders.push({ slug, paths });
+  }
+  if (artifactOffenders.length > 0) {
+    return {
+      ok: false,
+      conflicted: false,
+      midMerge: false,
+      merged: [],
+      adopted,
+      message: artifactMergeRefusalMessage(defaultBranch, artifactOffenders),
+      output: '',
+    };
+  }
 
   // --keep: never let the script touch worktree paths/branches (see file header
   // — its <slug>/<label> layout does not match ours). --no-test: Mission
