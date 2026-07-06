@@ -135,6 +135,82 @@ export function normalizeCap(maxConcurrent: number): number {
 }
 
 /**
+ * Whether starting a drain right now has any real work ahead of it, and — when
+ * it does not — the truthful reason the Drain control shows instead of a dead
+ * click (issue 90).
+ *
+ * The drain has work when at least one issue is **startable now or unblockable
+ * by the drain itself**: `open` with every dependency either already `done`,
+ * itself drain-startable (the drain will run it first), or `wip` **with a live
+ * Run** (`runningIssueIds` — the coming `done` flip lands without the human).
+ * A plain `wip` (parked HITL, or claimed by another session) is *awaiting the
+ * human*, so it never counts as satisfiable — an all-parked backlog must read
+ * unavailable, not "the drain will sort it out".
+ *
+ * PURE and derived from the same `BacklogIssue` statuses `planDrain` plans
+ * over, so the control and the coordinator agree by construction. Reasons:
+ *   - `no issues` — the backlog is empty.
+ *   - `nothing eligible — all issues done` — the batch is finished.
+ *   - `nothing eligible — X wip awaiting you, Y running, Z blocked` — only the
+ *     non-zero parts, in that order.
+ */
+export interface DrainAvailability {
+  /** True when a drain started now would actually start (or unblock) work. */
+  available: boolean;
+  /** The truthful inline reason when unavailable; null when available. */
+  reason: string | null;
+}
+
+export function drainAvailability(
+  issues: BacklogIssue[],
+  runningIssueIds: readonly number[] = [],
+): DrainAvailability {
+  if (issues.length === 0) return { available: false, reason: 'no issues' };
+
+  const running = new Set(runningIssueIds);
+  const byId = new Map(issues.map((i) => [i.id, i]));
+
+  // Fixed point: the set of open issues the drain can eventually start. A
+  // dependency is satisfiable when it is done, will be landed by a live Run,
+  // or is itself drain-startable. Cycles and missing/parked dependencies never
+  // satisfy, so they stay out of the set.
+  const startable = new Set<number>();
+  const satisfiable = (depId: number): boolean => {
+    const dep = byId.get(depId);
+    if (dep === undefined) return false; // can't be unblocked by an absent issue
+    if (dep.status === 'done') return true;
+    if (dep.status === 'wip' && running.has(dep.id)) return true;
+    return startable.has(dep.id);
+  };
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const issue of issues) {
+      if (issue.status !== 'open' || startable.has(issue.id)) continue;
+      if (issue.dependsOn.every(satisfiable)) {
+        startable.add(issue.id);
+        grew = true;
+      }
+    }
+  }
+  if (startable.size > 0) return { available: true, reason: null };
+
+  const wipAwaiting = issues.filter((i) => i.status === 'wip' && !running.has(i.id)).length;
+  const live = issues.filter((i) => i.status !== 'done' && running.has(i.id)).length;
+  const blocked = issues.filter((i) => i.status === 'open' && !running.has(i.id)).length;
+
+  const parts: string[] = [];
+  if (wipAwaiting > 0) parts.push(`${wipAwaiting} wip awaiting you`);
+  if (live > 0) parts.push(`${live} running`);
+  if (blocked > 0) parts.push(`${blocked} blocked`);
+  const reason =
+    parts.length === 0
+      ? 'nothing eligible — all issues done'
+      : `nothing eligible — ${parts.join(', ')}`;
+  return { available: false, reason };
+}
+
+/**
  * Plan one step of the drain. Deterministic and idempotent: calling it again
  * with the same inputs yields the same plan, so the UI can re-plan freely on
  * every state change.

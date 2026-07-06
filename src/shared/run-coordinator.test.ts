@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { planDrain, normalizeCap, isParkedHitl, type ActiveRun } from './run-coordinator';
+import { planDrain, normalizeCap, isParkedHitl, drainAvailability, type ActiveRun } from './run-coordinator';
 import type { BacklogIssue, IssueStatus } from './backlog-model';
 
 /** Minimal issue factory — only the fields the coordinator/eligibility read. */
@@ -439,5 +439,95 @@ describe('planDrain — determinism', () => {
     const issues = [mk(1, 'open'), mk(2, 'open'), mk(3, 'open')];
     const input = { issues, maxConcurrent: 2, activeRuns: [] as ActiveRun[] };
     expect(planDrain(input)).toEqual(planDrain(input));
+  });
+});
+
+describe('drainAvailability — the Drain control is honest about the backlog (issue 90)', () => {
+  it('is unavailable with "no issues" on an empty backlog', () => {
+    expect(drainAvailability([])).toEqual({ available: false, reason: 'no issues' });
+  });
+
+  it('is available when an issue is startable right now', () => {
+    const gate = drainAvailability([mk(1, 'open')]);
+    expect(gate.available).toBe(true);
+    expect(gate.reason).toBeNull();
+  });
+
+  it('is available when an issue is not startable now but the drain can unblock it', () => {
+    // 2 is blocked behind 1, but the drain itself will run 1 — a chain the
+    // drain can drain is available work.
+    const gate = drainAvailability([mk(1, 'open'), mk(2, 'open', [1])]);
+    expect(gate.available).toBe(true);
+  });
+
+  it('is unavailable with "all issues done" when every issue is done', () => {
+    const gate = drainAvailability([mk(1, 'done'), mk(2, 'done')]);
+    expect(gate).toEqual({
+      available: false,
+      reason: 'nothing eligible — all issues done',
+    });
+  });
+
+  it('is unavailable and counts wip + blocked when everything is parked or stuck', () => {
+    // 1 and 2 are wip (awaiting the human — e.g. parked HITL or claimed
+    // elsewhere); 3 is open but blocked behind 1 and no live Run will land it.
+    const gate = drainAvailability([mk(1, 'wip'), mk(2, 'wip'), mk(3, 'open', [1])]);
+    expect(gate).toEqual({
+      available: false,
+      reason: 'nothing eligible — 2 wip awaiting you, 1 blocked',
+    });
+  });
+
+  it('treats an open issue with a missing dependency as blocked, not startable', () => {
+    const gate = drainAvailability([mk(1, 'open', [99])]);
+    expect(gate).toEqual({
+      available: false,
+      reason: 'nothing eligible — 1 blocked',
+    });
+  });
+
+  it('treats a dependency cycle as blocked, never available', () => {
+    const gate = drainAvailability([mk(1, 'open', [2]), mk(2, 'open', [1])]);
+    expect(gate).toEqual({
+      available: false,
+      reason: 'nothing eligible — 2 blocked',
+    });
+  });
+
+  it('is available when a LIVE Run on a wip dependency will unblock an open issue', () => {
+    // 1 is wip with a live Run (a manual Run in flight): its coming `done`
+    // flip unblocks 2, so a drain started now has real work ahead.
+    const gate = drainAvailability([mk(1, 'wip'), mk(2, 'open', [1])], [1]);
+    expect(gate.available).toBe(true);
+  });
+
+  it('counts a live Run as running (not "awaiting you") when it unblocks nothing', () => {
+    // The live Run on 1 will finish on its own; the drain would start nothing.
+    const gate = drainAvailability([mk(1, 'wip')], [1]);
+    expect(gate).toEqual({
+      available: false,
+      reason: 'nothing eligible — 1 running',
+    });
+  });
+
+  it('mixes the reason parts and omits zero counts', () => {
+    const gate = drainAvailability(
+      [mk(1, 'wip'), mk(2, 'wip'), mk(3, 'open', [2]), mk(4, 'done')],
+      [1],
+    );
+    expect(gate).toEqual({
+      available: false,
+      reason: 'nothing eligible — 1 wip awaiting you, 1 running, 1 blocked',
+    });
+  });
+});
+
+describe('planDrain — the race path when eligibility vanished before the click landed', () => {
+  it('stops immediately with the normal no-eligible fact on an empty backlog', () => {
+    const plan = planDrain({ issues: [], maxConcurrent: 2, activeRuns: [] });
+    expect(plan.drain.stop).toBe(true);
+    expect(plan.drain.reason).toBe('no-eligible');
+    expect(plan.drain.message).toMatch(/no eligible issue remains/i);
+    expect(plan.startable).toEqual([]);
   });
 });

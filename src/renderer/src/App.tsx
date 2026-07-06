@@ -89,7 +89,7 @@ import {
   latestReceiptOutcomeFor,
   mismatchKey,
 } from '../../shared/receipt-audit';
-import { planDrain, type ActiveRun } from '../../shared/run-coordinator';
+import { planDrain, drainAvailability, type ActiveRun } from '../../shared/run-coordinator';
 import { isNotableDrainActivity } from '../../shared/workbench-memory';
 import { hasInFlightRun } from '../../shared/run-eligibility';
 import {
@@ -2154,6 +2154,20 @@ export function App(): JSX.Element {
         );
         return;
       }
+      // Drain honesty (issue 90): the Map disables the control when nothing is
+      // startable/unblockable, but a click can land in the beat before the
+      // watch push re-disables it. Refuse here with the same truthful reason
+      // rather than spinning a Dispatcher session up over nothing. (If
+      // eligibility vanishes AFTER this guard passes, the plan effect below
+      // ends the drain immediately with the normal no-eligible stop fact.)
+      const gate = drainAvailability(
+        backlog?.issues ?? [],
+        runs.filter((r) => runStatusOf(r) === 'running').map((r) => r.target.issueId),
+      );
+      if (!gate.available) {
+        setDrainMessage(`Cannot drain: ${gate.reason}.`);
+        return;
+      }
       setCap(Math.max(1, Math.floor(chosenCap) || 1));
       setDrainMessage('');
       setDraining(true);
@@ -2195,7 +2209,7 @@ export function App(): JSX.Element {
       }
       setView('pane');
     },
-    [midMerge, projectPath, backlog, dispatcher],
+    [midMerge, projectPath, backlog, dispatcher, runs, runStatusOf],
   );
 
   const stopDrain = useCallback((): void => {

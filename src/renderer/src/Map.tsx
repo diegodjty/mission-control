@@ -3,6 +3,7 @@ import type { Backlog, BacklogIssue } from '../../shared/backlog-model';
 import { deleteRefusal } from '../../shared/issue-file-ops';
 import type { RunLogRecord, RunTarget } from '../../shared/ipc-contract';
 import { runnableNow, type InFlightRuns } from '../../shared/run-eligibility';
+import { drainAvailability } from '../../shared/run-coordinator';
 import {
   deriveIssueState,
   dependents,
@@ -274,6 +275,17 @@ export function Map({
 
   const selected = backlog?.issues.find((i) => i.id === selectedId) ?? null;
 
+  // Drain honesty (issue 90): the control is enabled only when the coordinator
+  // would actually have work — an issue startable now, or unblockable by the
+  // drain (a live Run counts toward unblocking; a parked wip does not). The
+  // backlog arrives via the live watch push, so adding an eligible issue
+  // enables the button within a watch beat with no extra plumbing. Live Runs =
+  // in-memory running Panes plus in-worktree Runs from the on-disk scan.
+  const drainGate = drainAvailability(backlog?.issues ?? [], [
+    ...activeRunSet,
+    ...worktreeRunningSet,
+  ]);
+
   // Open the editor on a fresh disk read of the full file (frontmatter +
   // body) — the backlog push only carries the body, and could be stale.
   async function startEdit(): Promise<void> {
@@ -435,18 +447,25 @@ export function Map({
             <button
               className="map__drain"
               onClick={() => onDrain(cap ?? 2)}
-              disabled={midMerge}
+              disabled={midMerge || !drainGate.available}
               title={
                 midMerge
                   ? 'Blocked: main is mid-merge — resolve or abort the merge first'
-                  : 'Drain the backlog, starting eligible Runs up to the cap'
+                  : (drainGate.reason ??
+                    'Drain the backlog, starting eligible Runs up to the cap')
               }
             >
               ▶▶ Drain backlog
             </button>
           )}
           {draining && <span className="map__drain-state">draining… starting eligible Runs up to {cap ?? 2}</span>}
-          {!draining && drainMessage && (
+          {/* The truthful reason the Drain control is disabled (issue 90):
+              empty backlog / nothing the drain could start or unblock. Shown
+              inline so it's never a dead click. */}
+          {!draining && !midMerge && drainGate.reason && (
+            <span className="map__drain-state map__drain-state--stopped">{drainGate.reason}</span>
+          )}
+          {!draining && drainMessage && drainMessage !== drainGate.reason && (
             <span className="map__drain-state map__drain-state--stopped">{drainMessage}</span>
           )}
         </div>
