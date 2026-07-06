@@ -261,3 +261,50 @@ describe('dispatcher pump — cannot stay stuck (issue 60 rule 1)', () => {
     expect(h.pump.pending()).toBe(0);
   });
 });
+
+describe('dispatcher pump — type-only items (issue 91: a prefix the user completes)', () => {
+  it('types the prefix verbatim (trailing space kept) and writes NO submit key', () => {
+    const h = makeHarness();
+    h.pump.attachSession('A');
+    h.pump.enqueue({ key: 'stage:grill:1', text: '/grill-with-docs ', submit: false });
+    h.sched.advance(1000);
+    expect(textsTo(h, 'A')).toEqual(['/grill-with-docs ']);
+    expect(submitsTo(h, 'A')).toBe(0);
+    // The item is consumed once typed — the queue doesn't wait for an Enter.
+    expect(h.pump.pending()).toBe(0);
+  });
+
+  it('honours the defer-while-typing gate exactly like a submitted item', () => {
+    const h = makeHarness();
+    h.pump.attachSession('A');
+    h.setCanFlush(false); // the user is mid-keystroke
+    h.pump.enqueue({ key: 'stage:grill:1', text: '/grill-with-docs ', submit: false });
+    h.sched.advance(1000);
+    expect(h.writes).toEqual([]); // never garble a mid-keystroke line
+    h.setCanFlush(true);
+    h.sched.advance(1000);
+    expect(textsTo(h, 'A')).toEqual(['/grill-with-docs ']);
+    expect(submitsTo(h, 'A')).toBe(0);
+  });
+
+  it('reports queued → typed as its delivery — no phantom "submitted" phase', () => {
+    const h = makeHarness();
+    h.pump.attachSession('A');
+    h.pump.enqueue({ key: 'stage:grill:1', text: '/grill-with-docs ', submit: false });
+    h.sched.advance(1000);
+    expect(h.phases).toEqual([
+      { key: 'stage:grill:1', phase: 'queued' },
+      { key: 'stage:grill:1', phase: 'typed' },
+    ]);
+  });
+
+  it('a following submitted item still types-then-submits normally', () => {
+    const h = makeHarness();
+    h.pump.attachSession('A');
+    h.pump.enqueue({ key: 'stage:grill:1', text: '/grill-with-docs ', submit: false });
+    h.pump.enqueue({ key: 'stage:prd:2', text: '/to-prd' });
+    h.sched.advance(2000);
+    expect(textsTo(h, 'A')).toEqual(['/grill-with-docs ', '/to-prd']);
+    expect(submitsTo(h, 'A')).toBe(1);
+  });
+});

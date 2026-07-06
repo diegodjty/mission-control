@@ -5,6 +5,7 @@ import {
   parseInline,
   parsePlanningDoc,
   PLANNING_STAGES,
+  stageInvocation,
   type PlanningBlock,
 } from '../../shared/planning-model';
 import type { TalkTarget } from '../../shared/ipc-contract';
@@ -108,6 +109,9 @@ export function PlanningView({
   onStage,
 }: PlanningViewProps): JSX.Element {
   const [docs, setDocs] = useState<PlanningDoc[]>([]);
+  // Bumped when a PREFIX stage (Grill) is clicked, so the Pane grabs keyboard
+  // focus and the user can finish the sentence + press Enter (issue 91).
+  const [paneFocusSignal, setPaneFocusSignal] = useState(0);
   // The user's pinned doc (clicked in the list), or null = follow the most
   // recently changed doc — the "watch the document being written" default.
   const [pinnedPath, setPinnedPath] = useState<string | null>(null);
@@ -177,19 +181,31 @@ export function PlanningView({
       <div className="planning__left">
         <div className="planning__stagebar">
           <span className="planning__stagelabel">Plan {label}:</span>
-          {PLANNING_STAGES.map(({ stage, label: stageLabel }) => (
+          {PLANNING_STAGES.map(({ stage, label: stageLabel, hint }) => (
             <button
               key={stage}
               className="planning__stage"
-              onClick={() => onStage(stage)}
-              title={`Type the ${stageLabel} skill invocation into the session (waits for your typing to finish)`}
+              onClick={() => {
+                onStage(stage);
+                // A prefix stage (Grill) leaves the line unsubmitted — hand
+                // the keyboard to the terminal so the user finishes the
+                // sentence and presses Enter themselves (issue 91).
+                if (!stageInvocation(stage).submit) setPaneFocusSignal((n) => n + 1);
+              }}
+              title={hint}
             >
               {stageLabel}
             </button>
           ))}
         </div>
         <div className="planning__pane">
-          <Pane talk={talk} onSession={onSession} onInput={onInput} onExit={onSessionEnd} />
+          <Pane
+            talk={talk}
+            onSession={onSession}
+            onInput={onInput}
+            onExit={onSessionEnd}
+            focusSignal={paneFocusSignal}
+          />
         </div>
       </div>
 

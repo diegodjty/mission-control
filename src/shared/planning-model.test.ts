@@ -124,11 +124,32 @@ describe('isAllowedPlanningDoc', () => {
 });
 
 describe('stage invocations', () => {
-  it('maps the three stage buttons to their skill invocations, in pipeline order', () => {
+  it('keeps the three stage buttons in pipeline order', () => {
     expect(PLANNING_STAGES.map((s) => s.stage)).toEqual(['grill', 'prd', 'issues']);
-    expect(stageInvocation('grill')).toBe('/grill-with-docs');
-    expect(stageInvocation('prd')).toBe('/to-prd');
-    expect(stageInvocation('issues')).toBe('/to-issues');
+  });
+
+  it('Grill types a PREFIX — trailing space, never submitted (issue 91)', () => {
+    // A grill needs its topic: the user finishes the sentence and presses
+    // Enter themselves. The trailing space is part of the contract — the user
+    // types the topic directly after the invocation.
+    expect(stageInvocation('grill')).toEqual({ text: '/grill-with-docs ', submit: false });
+  });
+
+  it('PRD and Issues take no argument — typed AND submitted, as before', () => {
+    expect(stageInvocation('prd')).toEqual({ text: '/to-prd', submit: true });
+    expect(stageInvocation('issues')).toEqual({ text: '/to-issues', submit: true });
+  });
+
+  it('the button hints make the prefix-vs-submit difference visible', () => {
+    const byStage = Object.fromEntries(PLANNING_STAGES.map((s) => [s.stage, s]));
+    // Grill's label/hint says the user finishes the sentence…
+    expect(byStage['grill'].label).toBe('Grill…');
+    expect(byStage['grill'].hint).toContain('you finish the sentence');
+    // …while PRD/Issues read as plain one-click submits.
+    expect(byStage['prd'].label).toBe('PRD');
+    expect(byStage['prd'].hint).toContain('submits');
+    expect(byStage['issues'].label).toBe('Issues');
+    expect(byStage['issues'].hint).toContain('submits');
   });
 });
 

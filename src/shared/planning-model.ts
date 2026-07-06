@@ -203,25 +203,60 @@ export function isAllowedPlanningDoc(roots: PlanningRoots, path: string): boolea
 /** The three planning stages, in pipeline order (grill → PRD → issues). */
 export type PlanningStage = 'grill' | 'prd' | 'issues';
 
-/** Button rendering order + labels for the Planning view's stage bar. */
-export const PLANNING_STAGES: ReadonlyArray<{ stage: PlanningStage; label: string }> = [
-  { stage: 'grill', label: 'Grill' },
-  { stage: 'prd', label: 'PRD' },
-  { stage: 'issues', label: 'Issues' },
+/**
+ * Button rendering order, labels, and hover hints for the Planning view's
+ * stage bar. The label/hint difference is deliberate (issue 91): Grill reads
+ * as an unfinished sentence — clicking it only types the prefix — while PRD
+ * and Issues read as one-click submits.
+ */
+export const PLANNING_STAGES: ReadonlyArray<{
+  stage: PlanningStage;
+  label: string;
+  hint: string;
+}> = [
+  {
+    stage: 'grill',
+    label: 'Grill…',
+    hint: 'Types /grill-with-docs into the session — you finish the sentence with the topic and press Enter (waits for your typing to finish)',
+  },
+  {
+    stage: 'prd',
+    label: 'PRD',
+    hint: 'Types and submits /to-prd — turns the conversation into a PRD (waits for your typing to finish)',
+  },
+  {
+    stage: 'issues',
+    label: 'Issues',
+    hint: 'Types and submits /to-issues — breaks the PRD into issues (waits for your typing to finish)',
+  },
 ];
 
+/** What a stage button types into the Pane, and whether it presses Enter. */
+export interface StageInvocation {
+  /** The exact text typed (a prefix keeps its trailing space). */
+  text: string;
+  /**
+   * `true` = typed then submitted (the invocation takes no argument and acts
+   * on conversation context). `false` = typed as a PREFIX only — the user
+   * completes the sentence and presses Enter themselves (issue 91).
+   */
+  submit: boolean;
+}
+
 /**
- * The exact skill invocation a stage button types into the Pane (through the
- * submit pump — typed then submitted, honoring the typing gate).
+ * The exact invocation each stage button delivers through the submit pump
+ * (honoring the defer-while-typing gate either way). Grill needs its topic
+ * ("what are we grilling?"), so it is a prefix with a trailing space and NO
+ * submit; PRD and Issues take no argument and stay typed+submitted.
  */
-export function stageInvocation(stage: PlanningStage): string {
+export function stageInvocation(stage: PlanningStage): StageInvocation {
   switch (stage) {
     case 'grill':
-      return '/grill-with-docs';
+      return { text: '/grill-with-docs ', submit: false };
     case 'prd':
-      return '/to-prd';
+      return { text: '/to-prd', submit: true };
     case 'issues':
-      return '/to-issues';
+      return { text: '/to-issues', submit: true };
   }
 }
 

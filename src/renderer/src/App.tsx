@@ -1406,13 +1406,18 @@ export function App(): JSX.Element {
   const handlePlanningInput = useCallback((data: string): void => {
     planningTyping.current = reduceTyping(planningTyping.current, data, Date.now());
   }, []);
-  // A stage button click: type + submit the skill invocation through the pump.
+  // A stage button click: deliver the skill invocation through the pump —
+  // typed then submitted for PRD/Issues; typed as an UNsubmitted prefix for
+  // Grill, whose topic the user finishes themselves (issue 91). The pump's
+  // defer-while-typing gate applies to both kinds.
   const submitPlanningStage = useCallback(
     (stage: PlanningStage): void => {
       planningStageSeq.current += 1;
+      const invocation = stageInvocation(stage);
       planningPump.enqueue({
         key: `planning-stage:${stage}:${planningStageSeq.current}`,
-        text: stageInvocation(stage),
+        text: invocation.text,
+        submit: invocation.submit,
       });
     },
     [planningPump],

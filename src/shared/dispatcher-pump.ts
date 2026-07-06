@@ -35,17 +35,29 @@
  * Timers and the clock are injected (`scheduler` / `now`), so the pump is fully
  * unit-testable with manual time — no React, no Electron, no real timers.
  */
-import { buildSubmitSequence } from './dispatcher-feed';
+import { buildSubmitSequence, buildTypeOnlySequence } from './dispatcher-feed';
 
-/** Observable delivery phases per chat item (issue 60 rule 3). */
+/**
+ * Observable delivery phases per chat item (issue 60 rule 3). A type-only item
+ * (issue 91) ends at `typed` — that IS its delivery; it never reports
+ * `submitted`.
+ */
 export type DeliveryPhase = 'queued' | 'typed' | 'submitted' | 'requeued' | 'write-failed';
 
 /** One chat-tier message, keyed by its event key (e.g. `hitl-waiting:<runId>`). */
 export interface ChatDeliveryItem {
   /** Stable event key — used for in-queue dedupe and delivery observability. */
   key: string;
-  /** The message to type + submit into the chat PTY. */
+  /** The message to type (and, unless `submit: false`, submit) into the PTY. */
   text: string;
+  /**
+   * `false` = type only, never press Enter (issue 91): the text is a PREFIX
+   * the user completes and submits themselves (the Planning view's Grill
+   * button). Omitted/`true` = the normal type-then-submit delivery. The
+   * defer-while-typing gate and requeue-on-session-change rules apply to both
+   * kinds identically.
+   */
+  submit?: boolean;
 }
 
 /** Injected timer surface so tests drive time manually. */
@@ -193,8 +205,9 @@ export function createDispatcherPump(effects: DispatcherPumpEffects): Dispatcher
       scheduler.schedule(() => nextItem(token, sess), PUMP_TYPING_RECHECK_MS);
       return;
     }
-    const item = queue[0]; // PEEK — removed only after its submit write lands
-    const steps = buildSubmitSequence(item.text);
+    const item = queue[0]; // PEEK — removed only after its final write lands
+    const steps =
+      item.submit === false ? buildTypeOnlySequence(item.text) : buildSubmitSequence(item.text);
     let i = 0;
     const runStep = (): void => {
       if (token !== chainToken || sess !== session) return; // superseded mid-item
@@ -219,11 +232,13 @@ export function createDispatcherPump(effects: DispatcherPumpEffects): Dispatcher
       lastProgressAt = now();
       if (i === 1) onDelivery(item.key, 'typed');
       if (i === steps.length) {
-        // The submit write landed in a still-current session: the item is
+        // The final write landed in a still-current session: the item is
         // delivered. Consume it NOW — before the settle wait — so a session
         // change during the settle can't requeue (and double-deliver) it.
+        // A type-only item's delivery IS its `typed` phase (already reported);
+        // only a really-submitted item reports `submitted`.
         queue.shift();
-        onDelivery(item.key, 'submitted');
+        if (item.submit !== false) onDelivery(item.key, 'submitted');
       }
       scheduler.schedule(runStep, step.settleMs);
     };

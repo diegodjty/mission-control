@@ -43,6 +43,13 @@ interface PaneProps {
    * Pane stays mounted so its final output remains visible.
    */
   stopSignal?: number;
+  /**
+   * Bump this number to focus the terminal (issue 91): the Planning view's
+   * Grill button types an unsubmitted prefix, then hands the keyboard here so
+   * the user can finish the sentence and press Enter without reaching for the
+   * mouse.
+   */
+  focusSignal?: number;
 }
 
 /**
@@ -51,9 +58,10 @@ interface PaneProps {
  * output comes back via onPtyData. A Run passes `run` so main spawns `claude`
  * scoped to the issue instead of a shell.
  */
-export function Pane({ run, dispatcher, talk, onStatusChange, onInput, onExit, onSession, stopSignal }: PaneProps): JSX.Element {
+export function Pane({ run, dispatcher, talk, onStatusChange, onInput, onExit, onSession, stopSignal, focusSignal }: PaneProps): JSX.Element {
   const hostRef = useRef<HTMLDivElement>(null);
   const sessionIdRef = useRef<string | null>(null);
+  const termRef = useRef<Terminal | null>(null);
   // Keep the latest onSession in a ref so the spawn effect (keyed on the Run
   // target) doesn't need it as a dependency and re-run when the parent re-renders.
   const onSessionRef = useRef(onSession);
@@ -84,6 +92,7 @@ export function Pane({ run, dispatcher, talk, onStatusChange, onInput, onExit, o
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(host);
+    termRef.current = term;
     // Fitting a zero-sized host (e.g. a tile currently hidden behind a
     // maximized sibling) throws; only reflow once the host actually has area.
     const safeFit = (): void => {
@@ -168,6 +177,7 @@ export function Pane({ run, dispatcher, talk, onStatusChange, onInput, onExit, o
       resizeDisposable.dispose();
       if (sessionId) window.mc.killPty({ sessionId });
       sessionIdRef.current = null;
+      termRef.current = null;
       term.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -181,6 +191,13 @@ export function Pane({ run, dispatcher, talk, onStatusChange, onInput, onExit, o
     if (id) window.mc.killPty({ sessionId: id });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stopSignal]);
+
+  // Hand the keyboard to the terminal on demand (issue 91): after Grill types
+  // its unsubmitted prefix, the user's next keystrokes belong in the session.
+  useEffect(() => {
+    if (!focusSignal) return;
+    termRef.current?.focus();
+  }, [focusSignal]);
 
   return <div className="pane" ref={hostRef} />;
 }

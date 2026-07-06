@@ -74,3 +74,15 @@ export function buildSubmitSequence(message: string): PtyWriteStep[] {
 export function buildSubmitBatch(messages: string[]): PtyWriteStep[] {
   return messages.flatMap(buildSubmitSequence);
 }
+
+/**
+ * Build the single PTY write that TYPES a prefix WITHOUT submitting it (issue
+ * 91): the user finishes the line and presses Enter themselves — e.g. the
+ * Planning view's Grill button typing `/grill-with-docs ` so the user can add
+ * the topic. Unlike `flattenMessage` this does NOT trim (the trailing space is
+ * part of the prefix contract), but any CR/LF is stripped so a prefix can
+ * never self-submit.
+ */
+export function buildTypeOnlySequence(prefix: string): PtyWriteStep[] {
+  return [{ data: prefix.replace(/[\r\n]+/g, ''), settleMs: TYPE_SETTLE_MS }];
+}
