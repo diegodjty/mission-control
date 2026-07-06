@@ -3159,6 +3159,13 @@ export function App(): JSX.Element {
               onJustTalkProject={talkToProject}
               onJustTalkFolder={() => void talkToFolder()}
               onQuickFixRunNow={(p, issue) => void runQuickFixNow(p, issue)}
+              onProjectRemoved={(p) =>
+                // The registry entries are already gone (issue 92) — drop the
+                // row; the next Launcher mount re-reads from disk anyway.
+                setLauncherProjects((prev) =>
+                  prev.filter((x) => x.workbenchDir !== p.workbenchDir),
+                )
+              }
             />
           </div>
         )}

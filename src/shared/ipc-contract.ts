@@ -267,6 +267,18 @@ export const IpcChannel = {
    * warn but are allowed. Resolves to an OnboardingCreateResult.
    */
   OnboardingCreate: 'onboarding:create',
+  /**
+   * renderer → main (invoke): the Launcher's Remove project (issue 92) — drop
+   * every `registry.md` entry mapping to the chosen workbench project, so the
+   * Launcher, the attention watch, and session resolution stop seeing it. The
+   * inverse of onboarding's registry append, and deliberately NON-destructive:
+   * the workbench project directory (issues, Receipts, memory) and the code
+   * repos stay on disk untouched; the registry rewrite is auto-committed, so
+   * workbench git history can restore the entries. Refused while the project
+   * is open in a Window (close or switch away first). Resolves to a
+   * ProjectRemoveResult.
+   */
+  ProjectRemove: 'project:remove',
 } as const;
 
 export type IpcChannel = (typeof IpcChannel)[keyof typeof IpcChannel];
@@ -911,6 +923,23 @@ export interface QuickFixCreateResult {
   title: string | null;
 }
 
+export interface ProjectRemoveRequest {
+  /** The workbench directory name of the project to remove (`dirName`). */
+  dirName: string;
+}
+
+export interface ProjectRemoveResult {
+  /** True when the project's registry entries were removed. */
+  ok: boolean;
+  /** A user-facing reason when `ok` is false; null on success. */
+  error: string | null;
+  /**
+   * Set when the removal itself succeeded but the workbench auto-commit did
+   * not — the registry on disk is already correct; commit it by hand.
+   */
+  warning: string | null;
+}
+
 export interface IssueFileReadRequest {
   /** The Project key whose resolved issues root holds the file. */
   projectPath: string;
@@ -1126,6 +1155,12 @@ export interface MissionControlApi {
    * the ADR-0015 project setup + registry entries + one workbench commit.
    */
   createProject(req: OnboardingCreateRequest): Promise<OnboardingCreateResult>;
+  /**
+   * The Launcher's Remove project (issue 92): drop the project's registry
+   * entries (workbench dir and repos stay on disk), auto-committed. Refused
+   * while the project is open in a Window.
+   */
+  removeProject(req: ProjectRemoveRequest): Promise<ProjectRemoveResult>;
   /**
    * Read one issue file's raw text for the Map's editor (issue 89) — fresh
    * off disk, restricted to the Project's issues root.

@@ -169,6 +169,97 @@ export function parseRegistry(content: unknown): RegistryParse {
   return { entries, notes };
 }
 
+/** The outcome of removing a project's entries from `registry.md` content. */
+export interface RegistryRemoval {
+  /** The registry content with the project's entries gone. */
+  content: string;
+  /** How many entries were removed (0 = the project had none). */
+  removed: number;
+}
+
+/**
+ * Remove every entry mapping to `project` from `registry.md` content — the
+ * Launcher's Remove project (issue 92). The complement of `parseRegistry`:
+ * exactly the blocks it would read as entries for the project (a `- repo:`
+ * line plus its indented `project`/`status` continuation lines) are dropped,
+ * active or inactive; everything else — prose, fenced schema examples, HTML
+ * comments, other projects' entries — survives byte-for-byte. A blank line
+ * that would double up where a block was cut is swallowed with it. Never
+ * throws; unknown project or unusable input degrades to a no-op removal.
+ */
+export function removeRegistryProject(content: unknown, project: string): RegistryRemoval {
+  if (typeof content !== 'string') return { content: '', removed: 0 };
+  if (typeof project !== 'string' || project.length === 0) return { content, removed: 0 };
+
+  const lines = content.split('\n');
+  const kept: string[] = [];
+  let removed = 0;
+  let inFence = false;
+  let inComment = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // Fence/comment tracking mirrors `stripNonEntries`: entries inside either
+    // are documentation, never live mappings — removal must not touch them.
+    if (inComment) {
+      kept.push(line);
+      if (line.includes('-->')) inComment = false;
+      continue;
+    }
+    if (inFence) {
+      kept.push(line);
+      if (line.trim().startsWith('```')) inFence = false;
+      continue;
+    }
+    if (line.trim().startsWith('```')) {
+      inFence = true;
+      kept.push(line);
+      continue;
+    }
+    if (line.includes('<!--') && !line.slice(line.indexOf('<!--')).includes('-->')) {
+      inComment = true;
+      kept.push(line);
+      continue;
+    }
+
+    const start = ENTRY_START.exec(line);
+    if (!start) {
+      kept.push(line);
+      continue;
+    }
+
+    // Collect the entry exactly as parseRegistry would.
+    const block = [line];
+    let entryProject: string | null = null;
+    while (i + 1 < lines.length) {
+      const field = ENTRY_FIELD.exec(lines[i + 1]);
+      if (!field) break;
+      i++;
+      block.push(lines[i]);
+      if (field[1] === 'project') {
+        const value = unquote(field[2].trim());
+        entryProject = value.length > 0 ? value : null;
+      }
+    }
+
+    if (entryProject !== project) {
+      kept.push(...block);
+      continue;
+    }
+
+    removed++;
+    // Swallow one following blank line when the cut would leave two in a row.
+    const next = lines[i + 1];
+    const prev = kept[kept.length - 1];
+    if (next !== undefined && next.trim() === '' && (prev === undefined || prev.trim() === '')) {
+      i++;
+    }
+  }
+
+  return removed === 0 ? { content, removed: 0 } : { content: kept.join('\n'), removed };
+}
+
 // ---------------------------------------------------------------------------
 // Project CONFIG.md — repos: map, default_repo, test commands
 // ---------------------------------------------------------------------------

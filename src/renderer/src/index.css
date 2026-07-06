@@ -1868,6 +1868,49 @@ body.is-col-resizing {
   color: #9ccc9c;
 }
 
+/* --- Remove project (issue 92) --- */
+
+/* A Continue row with its remove affordance beside the main button. */
+.launcher__removable-row {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.launcher__removable-row .launcher__project {
+  flex: 1;
+  min-width: 0;
+}
+
+.launcher__remove {
+  padding: 8px 10px;
+  color: #8296aa;
+  flex: none;
+}
+
+.launcher__remove:hover {
+  border-color: #b05555;
+  color: #f0a0a0;
+}
+
+/* The explicit remove confirmation strip above the Continue list. */
+.launcher__confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  background: #1a1216;
+  border: 1px solid #4a2b30;
+  border-radius: 6px;
+}
+
+.launcher__confirm-text {
+  margin: 0;
+  font-size: 12px;
+  color: #c7d2dd;
+}
+
 /* --- New project form (issue 82) --- */
 
 .launcher__repo-row {

@@ -23,6 +23,8 @@ import {
   type LauncherListResult,
   type OnboardingCreateRequest,
   type OnboardingCreateResult,
+  type ProjectRemoveRequest,
+  type ProjectRemoveResult,
   type PlanningChangedMessage,
   type PlanningDocReadRequest,
   type PlanningDocReadResult,
@@ -170,6 +172,9 @@ const api: MissionControlApi = {
 
   createProject: (req: OnboardingCreateRequest): Promise<OnboardingCreateResult> =>
     ipcRenderer.invoke(IpcChannel.OnboardingCreate, req),
+
+  removeProject: (req: ProjectRemoveRequest): Promise<ProjectRemoveResult> =>
+    ipcRenderer.invoke(IpcChannel.ProjectRemove, req),
 
   readIssueFile: (req: IssueFileReadRequest): Promise<IssueFileReadResult> =>
     ipcRenderer.invoke(IpcChannel.IssueFileRead, req),

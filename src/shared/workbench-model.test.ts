@@ -15,6 +15,7 @@ import {
   parseRegistry,
   parseProjectConfig,
   parseIssueRepo,
+  removeRegistryProject,
   repoPathForIssue,
   resolveProject,
 } from './workbench-model';
@@ -501,5 +502,133 @@ describe('resolveProject — legacy fallback and unresolved (last in the order)'
       kind: 'workbench',
       issuesRoot: '/Users/dev/Workbench/answering/issues',
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// removeRegistryProject — the Launcher's Remove project (issue 92): drop every
+// entry mapping to one project, touch nothing else. What parseRegistry sees as
+// an entry for the project is exactly what goes; docs (fenced examples, HTML
+// comments) and other projects' entries survive byte-for-byte.
+// ---------------------------------------------------------------------------
+
+describe('removeRegistryProject', () => {
+  it('removes every entry of a multi-repo project and reports the count', () => {
+    const { content, removed } = removeRegistryProject(REGISTRY, 'answering');
+    expect(removed).toBe(2);
+    const after = parseRegistry(content);
+    expect(after.entries).toEqual([
+      { repo: '~/Developer/mission-control', project: 'mission-control', active: false },
+    ]);
+    expect(content).not.toContain('answering-api');
+    expect(content).not.toContain('answering-web');
+  });
+
+  it('leaves the registry prose, fenced schema example, and comments intact', () => {
+    const { content } = removeRegistryProject(REGISTRY, 'answering');
+    expect(content).toContain('## Schema (documented by example)');
+    expect(content).toContain('status: <active | inactive>'); // the fenced example
+    expect(content).toContain('<!-- INACTIVE until migration issue 76 moves the backlog here. -->');
+    expect(content).toContain('# Registry');
+  });
+
+  it('removes inactive entries of the named project too — removal is total', () => {
+    const { content, removed } = removeRegistryProject(REGISTRY, 'mission-control');
+    expect(removed).toBe(1);
+    expect(parseRegistry(content).entries.map((e) => e.project)).toEqual([
+      'answering',
+      'answering',
+    ]);
+  });
+
+  it('returns the content unchanged (and removed: 0) for an unknown project', () => {
+    const { content, removed } = removeRegistryProject(REGISTRY, 'no-such-project');
+    expect(removed).toBe(0);
+    expect(content).toBe(REGISTRY);
+  });
+
+  it('never removes an entry-shaped block inside a code fence', () => {
+    const doc = [
+      '## Entries',
+      '',
+      '```markdown',
+      '- repo: ~/code/example',
+      '  project: victim',
+      '  status: active',
+      '```',
+      '',
+      '- repo: ~/code/real',
+      '  project: victim',
+      '  status: active',
+      '',
+    ].join('\n');
+    const { content, removed } = removeRegistryProject(doc, 'victim');
+    expect(removed).toBe(1);
+    expect(content).toContain('~/code/example'); // the fenced example survives
+    expect(content).not.toContain('~/code/real');
+  });
+
+  it('never removes an entry-shaped block inside an HTML comment', () => {
+    const doc = [
+      '<!--',
+      '- repo: ~/code/parked',
+      '  project: victim',
+      '  status: active',
+      '-->',
+      '- repo: ~/code/live',
+      '  project: victim',
+      '  status: active',
+      '',
+    ].join('\n');
+    const { content, removed } = removeRegistryProject(doc, 'victim');
+    expect(removed).toBe(1);
+    expect(content).toContain('~/code/parked');
+    expect(content).not.toContain('~/code/live');
+  });
+
+  it('does not pile up blank lines where a blank-separated entry was removed', () => {
+    const doc = [
+      '## Entries',
+      '',
+      '- repo: ~/code/a',
+      '  project: gone',
+      '  status: active',
+      '',
+      '- repo: ~/code/b',
+      '  project: stays',
+      '  status: active',
+      '',
+    ].join('\n');
+    const { content, removed } = removeRegistryProject(doc, 'gone');
+    expect(removed).toBe(1);
+    expect(content).not.toContain('\n\n\n');
+    expect(parseRegistry(content).entries).toEqual([
+      { repo: '~/code/b', project: 'stays', active: true },
+    ]);
+  });
+
+  it('keeps packed neighbours parseable when a middle entry goes', () => {
+    // buildRegistryAppend packs entries with no blank line between them.
+    const doc = [
+      '- repo: ~/code/a',
+      '  project: first',
+      '  status: active',
+      '- repo: ~/code/b',
+      '  project: middle',
+      '  status: active',
+      '- repo: ~/code/c',
+      '  project: last',
+      '  status: active',
+      '',
+    ].join('\n');
+    const { content, removed } = removeRegistryProject(doc, 'middle');
+    expect(removed).toBe(1);
+    expect(parseRegistry(content).entries.map((e) => e.project)).toEqual(['first', 'last']);
+  });
+
+  it('degrades non-string content and an empty project name to a no-op', () => {
+    expect(removeRegistryProject(undefined, 'x')).toEqual({ content: '', removed: 0 });
+    expect(removeRegistryProject(42, 'x')).toEqual({ content: '', removed: 0 });
+    expect(removeRegistryProject(REGISTRY, '')).toEqual({ content: REGISTRY, removed: 0 });
   });
 });

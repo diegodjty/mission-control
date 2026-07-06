@@ -30,7 +30,7 @@ import { mergeRuns, abortMerge } from './run-merge';
 import { RunLogStore } from './run-log-store';
 import { ReceiptWatcher } from './receipt-watcher';
 import { PlanningWatcher } from './planning-watcher';
-import { commitWorkbenchProject } from './workbench-git';
+import { commitWorkbenchPaths, commitWorkbenchProject } from './workbench-git';
 import { createWorkbenchProject } from './onboarding';
 import { deleteIssueFile, readIssueText, writeIssueText } from './issue-file-store';
 import { readCoreMemory, writeDrainJournal } from './memory-files';
@@ -42,7 +42,7 @@ import {
   quickFixFileName,
   sortLauncherProjects,
 } from '../shared/launcher-model';
-import { parseRegistry } from '../shared/workbench-model';
+import { parseRegistry, removeRegistryProject } from '../shared/workbench-model';
 import { isAllowedPlanningDoc } from '../shared/planning-model';
 import {
   claimEventsBetween,
@@ -79,6 +79,8 @@ import {
   type LauncherProject,
   type OnboardingCreateRequest,
   type OnboardingCreateResult,
+  type ProjectRemoveRequest,
+  type ProjectRemoveResult,
   type PlanningDocReadRequest,
   type PlanningDocReadResult,
   type PlanningWatchRequest,
@@ -123,6 +125,7 @@ import {
   closeWindow,
   normalizeProjectKey,
   checkProjectOwnership,
+  findProject,
   type ProjectRegistry,
   type RegistryResult,
 } from '../shared/project-registry';
@@ -1217,6 +1220,69 @@ function registerIpc(): void {
         dirName: outcome.dirName,
         workbenchDir: outcome.workbenchDir,
       };
+    },
+  );
+
+  // Remove project (issue 92): the inverse of onboarding's registry append —
+  // drop every registry.md entry mapping to the chosen workbench project, so
+  // the Launcher, the attention watch, and session resolution stop seeing it.
+  // Deliberately NON-destructive: the workbench project dir (issues, Receipts,
+  // memory) and the code repos stay on disk untouched, and the auto-committed
+  // rewrite means workbench git history can restore the entries. Refused while
+  // any Window has the project open — close or switch away first, so a live
+  // Map/watcher set never has its project pulled out from under it.
+  ipcMain.handle(
+    IpcChannel.ProjectRemove,
+    async (_event, req: ProjectRemoveRequest): Promise<ProjectRemoveResult> => {
+      const fail = (error: string): ProjectRemoveResult => ({ ok: false, error, warning: null });
+      const dirName = (req?.dirName ?? '').trim();
+      if (dirName.length === 0) return fail('No project named.');
+      // The registry's `project:` field is a plain directory name — refuse
+      // anything path-shaped rather than resolve it.
+      if (dirName.includes('/') || dirName === '.' || dirName === '..') {
+        return fail(`Not a workbench project name: ${dirName}`);
+      }
+      try {
+        // The same alias collapse the open flow uses (issue 71): if THIS
+        // project — under any of its handles — is open in a Window, refuse.
+        const identity = await resolveProjectIdentity(join(WORKBENCH_ROOT, dirName));
+        const live = findProject(registry, identity.key);
+        if (live !== undefined && live.ownerWindowId !== null) {
+          return fail(
+            `${identity.label} is open in a Window — close it (or switch that Window to another project) before removing it.`,
+          );
+        }
+
+        const registryPath = join(WORKBENCH_ROOT, 'registry.md');
+        const content = await readOrNull(registryPath);
+        if (content === null) {
+          return fail(`No registry at ${registryPath} — nothing to remove.`);
+        }
+        const removal = removeRegistryProject(content, dirName);
+        if (removal.removed === 0) {
+          return fail(`No registry entries map to "${dirName}" — nothing to remove.`);
+        }
+        await writeFile(registryPath, removal.content, 'utf8');
+
+        // ONE boring commit scoped to registry.md — sibling projects' dirt
+        // never rides along. A commit failure is surfaced, never undone: the
+        // registry on disk is already correct (same posture as onboarding).
+        const commit = await commitWorkbenchPaths(
+          WORKBENCH_ROOT,
+          ['registry.md'],
+          `${dirName}: project removed from registry`,
+        );
+        return {
+          ok: true,
+          error: null,
+          warning:
+            commit.error === null
+              ? null
+              : `Workbench commit failed (${commit.error}) — the registry is updated; commit ~/Workbench manually.`,
+        };
+      } catch (err) {
+        return fail(err instanceof Error ? err.message : String(err));
+      }
     },
   );
 

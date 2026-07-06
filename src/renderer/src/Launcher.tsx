@@ -3,6 +3,7 @@ import type {
   AttentionSnapshot,
   LauncherProject,
   OnboardingCreateResult,
+  ProjectRemoveResult,
   QuickFixCreateResult,
 } from '../../shared/ipc-contract';
 import { projectStateLine, quickFixDefaultDir } from '../../shared/launcher-model';
@@ -49,6 +50,12 @@ interface LauncherProps {
   onJustTalkFolder: () => void;
   /** Run the freshly created quick-fix issue now (single bare Run). */
   onQuickFixRunNow: (project: LauncherProject, issue: QuickFixIssueRef) => void;
+  /**
+   * Remove project (issue 92): the registry entries are already gone (and the
+   * rewrite committed) — drop the project from this Window's list. The
+   * workbench folder and code repos stay on disk untouched.
+   */
+  onProjectRemoved: (project: LauncherProject) => void;
 }
 
 type LauncherMode = 'menu' | 'newproject' | 'bigfeature' | 'quickfix' | 'talk';
@@ -86,6 +93,7 @@ export function Launcher({
   onJustTalkProject,
   onJustTalkFolder,
   onQuickFixRunNow,
+  onProjectRemoved,
 }: LauncherProps): JSX.Element {
   const [mode, setMode] = useState<LauncherMode>('menu');
 
@@ -181,8 +189,39 @@ export function Launcher({
     project: LauncherProject;
     issue: QuickFixIssueRef;
   } | null>(null);
-  // A quiet confirmation after "leave it queued".
+  // A quiet menu-mode confirmation ("leave it queued", project removed).
   const [queuedNote, setQueuedNote] = useState<string | null>(null);
+
+  // --- Remove project state (issue 92) ---------------------------------------
+  // The row whose ✕ was clicked, awaiting the explicit confirm.
+  const [removing, setRemoving] = useState<LauncherProject | null>(null);
+  const [removeBusy, setRemoveBusy] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+
+  const confirmRemove = (): void => {
+    if (removeBusy || removing === null) return;
+    const target = removing;
+    setRemoveBusy(true);
+    setRemoveError(null);
+    void window.mc
+      .removeProject({ dirName: target.dirName })
+      .then((res: ProjectRemoveResult) => {
+        if (!res.ok) {
+          setRemoveError(res.error ?? 'Could not remove the project.');
+          return;
+        }
+        setRemoving(null);
+        setQueuedNote(
+          `${target.label} removed from Mission Control — its workbench folder (issues, memory) and code repos stay on disk.` +
+            (res.warning !== null ? ` ${res.warning}` : ''),
+        );
+        onProjectRemoved(target);
+      })
+      .catch((err: unknown) => {
+        setRemoveError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => setRemoveBusy(false));
+  };
 
   /** Parked HITL items awaiting the human, per workbench project dir name. */
   const parkedByProject = useMemo(() => {
@@ -241,9 +280,23 @@ export function Launcher({
     setCreated(null);
     setOnboardErrors([]);
     setOnboardWarnings([]);
+    setRemoving(null);
+    setRemoveError(null);
   };
 
-  const projectRows = (onPick: (p: LauncherProject) => void, verb: string): JSX.Element =>
+  /** Enter a non-menu mode: any pending remove-confirm is abandoned. */
+  const enterMode = (next: LauncherMode): void => {
+    setMode(next);
+    setQueuedNote(null);
+    setRemoving(null);
+    setRemoveError(null);
+  };
+
+  const projectRows = (
+    onPick: (p: LauncherProject) => void,
+    verb: string,
+    removable = false,
+  ): JSX.Element =>
     projects.length === 0 ? (
       <p className="launcher__empty">
         No active workbench projects in ~/Workbench/registry.md yet — use New project, or open a
@@ -252,7 +305,7 @@ export function Launcher({
     ) : (
       <ul className="launcher__list">
         {projects.map((p) => (
-          <li key={p.workbenchDir}>
+          <li key={p.workbenchDir} className={removable ? 'launcher__removable-row' : undefined}>
             <button
               className="launcher__project"
               onClick={() => onPick(p)}
@@ -263,6 +316,19 @@ export function Launcher({
                 {projectStateLine(p.counts, parkedByProject[p.dirName] ?? 0)}
               </span>
             </button>
+            {removable && (
+              <button
+                className="launcher__secondary launcher__remove"
+                title={`Remove ${p.label} from Mission Control (the workbench folder and repos stay on disk)`}
+                onClick={() => {
+                  setRemoving(p);
+                  setRemoveError(null);
+                  setQueuedNote(null);
+                }}
+              >
+                ✕
+              </button>
+            )}
           </li>
         ))}
       </ul>
@@ -284,10 +350,7 @@ export function Launcher({
             <div className="launcher__actions">
               <button
                 className="launcher__action"
-                onClick={() => {
-                  setMode('newproject');
-                  setQueuedNote(null);
-                }}
+                onClick={() => enterMode('newproject')}
                 title="Set up a new workbench project (or register an existing repo): name + repo paths → CONFIG, registry entries, one commit"
               >
                 <span className="launcher__action-name">New project</span>
@@ -295,10 +358,7 @@ export function Launcher({
               </button>
               <button
                 className="launcher__action"
-                onClick={() => {
-                  setMode('bigfeature');
-                  setQueuedNote(null);
-                }}
+                onClick={() => enterMode('bigfeature')}
                 title="Plan a big feature: a Planning session beside a live preview of the docs as they're written"
               >
                 <span className="launcher__action-name">Big feature</span>
@@ -307,8 +367,7 @@ export function Launcher({
               <button
                 className="launcher__action"
                 onClick={() => {
-                  setMode('quickfix');
-                  setQueuedNote(null);
+                  enterMode('quickfix');
                   // Default to the project the user is visibly on — or nothing,
                   // which requires an explicit pick before submit (issue 88).
                   setQuickFixDir(quickFixDefaultDir(projects, activeProjectKey));
@@ -320,10 +379,7 @@ export function Launcher({
               </button>
               <button
                 className="launcher__action"
-                onClick={() => {
-                  setMode('talk');
-                  setQueuedNote(null);
-                }}
+                onClick={() => enterMode('talk')}
                 title="One warm claude session — no issue, no tracking"
               >
                 <span className="launcher__action-name">Just talk</span>
@@ -332,7 +388,36 @@ export function Launcher({
             </div>
 
             <h2 className="launcher__subtitle">Continue</h2>
-            {projectRows(onContinue, 'Open')}
+            {removing !== null && (
+              <div className="launcher__confirm">
+                <p className="launcher__confirm-text">
+                  Remove <strong>{removing.label}</strong> from Mission Control? Only the
+                  registry entries go — the workbench folder (issues, Receipts, memory) and the
+                  code repos stay on disk, and the change is committed to the workbench so it
+                  can be restored.
+                </p>
+                {removeError !== null && <p className="launcher__error">{removeError}</p>}
+                <div className="launcher__row">
+                  <button
+                    className="launcher__primary"
+                    onClick={confirmRemove}
+                    disabled={removeBusy}
+                  >
+                    {removeBusy ? 'Removing…' : 'Remove project'}
+                  </button>
+                  <button
+                    className="launcher__secondary"
+                    onClick={() => {
+                      setRemoving(null);
+                      setRemoveError(null);
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+            {projectRows(onContinue, 'Open', true)}
           </>
         )}
 
