@@ -13,7 +13,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, symlink, lstat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -506,5 +506,99 @@ describe('adopt stray Receipts before the merge preflight (issue 62, ADR-0013)',
     expect(result.message).toContain('docs/PRD.md');
     expect(result.message).not.toContain(STRAY);
     expect(await git(repo, 'ls-files')).not.toContain('docs/PRD.md');
+  });
+});
+
+describe('ignored-artifact merge preflight (issue 98) — refuses a branch carrying node_modules', () => {
+  /**
+   * A finished Run whose branch CARRIES the old self-referential `node_modules`
+   * symlink — the exact object that corrupted `main` during the 94/95/96 drain
+   * (mode 120000, target the main repo's real install). Committed with raw git
+   * (not Mission Control's guarded commit path) so it reproduces a branch created
+   * BEFORE this fix.
+   */
+  async function runCarryingNodeModules(slug: string, file = 'work.txt'): Promise<string> {
+    const wt = await createWorktree(repo, slug, branchFor(slug));
+    await writeFile(join(wt, file), `work for ${slug}\n`);
+    // The self-referential symlink: worktree/node_modules -> repo/node_modules.
+    await symlink(join(repo, 'node_modules'), join(wt, 'node_modules'));
+    await git(wt, 'add', '-A');
+    await git(wt, 'commit', '-m', `work for ${slug} (+ stray node_modules symlink)`);
+    return wt;
+  }
+
+  it('refuses a single branch that would introduce a tracked node_modules path, truthfully', async () => {
+    const wt = await runCarryingNodeModules('94-x');
+
+    const result = await mergeRuns(repo, ['94-x'], { scriptPath: SCRIPT });
+
+    // A preflight refusal — NOT a conflict, nothing merged.
+    expect(result.ok).toBe(false);
+    expect(result.conflicted).toBe(false);
+    expect(result.merged).toEqual([]);
+    // The message names the branch, the offending path, and the real cause.
+    expect(result.message).toMatch(/Merge preflight failed/);
+    expect(result.message).toContain('afk/94-x');
+    expect(result.message).toContain('node_modules');
+    expect(result.message).toContain('issue 98');
+    expect(result.message).not.toMatch(/conflict/i);
+
+    // The branch/worktree are untouched, and node_modules never reached main.
+    expect(await branchExists('94-x')).toBe(true);
+    expect(existsSync(wt)).toBe(true);
+    await git(repo, 'checkout', 'main');
+    expect(await git(repo, 'ls-files')).not.toContain('node_modules');
+  });
+
+  it('a clean branch still merges when a sibling branch carries the artifact — both named, nothing merged', async () => {
+    // 03-a is clean; 96-y carries the symlink. The whole merge is refused (the
+    // preflight is all-or-nothing so no partial corruption slips through), and
+    // the message names only the offending branch.
+    await finishedRun('03-a', 'a.txt', 'from run 3\n');
+    await runCarryingNodeModules('96-y');
+
+    const result = await mergeRuns(repo, ['03-a', '96-y'], { scriptPath: SCRIPT });
+
+    expect(result.ok).toBe(false);
+    expect(result.merged).toEqual([]);
+    expect(result.message).toContain('afk/96-y');
+    expect(result.message).not.toContain('afk/03-a');
+    // Nothing was integrated — the clean branch is untouched too.
+    await git(repo, 'checkout', 'main');
+    expect(await git(repo, 'ls-files')).not.toContain('a.txt');
+    expect(await branchExists('03-a')).toBe(true);
+  });
+
+  it('a full mergeRuns over branches carrying the old symlink does NOT corrupt the real install (regression)', async () => {
+    // Set up the target repo's REAL node_modules install with a marker whose
+    // readability is the proof the install survived — the exact thing the
+    // 94/95/96 merge destroyed with a `too many levels of symbolic links` loop.
+    await mkdir(join(repo, 'node_modules', '.bin'), { recursive: true });
+    await writeFile(join(repo, 'node_modules', 'installed.marker'), 'real install\n');
+
+    // Two branches each carrying the self-referential symlink (the 94/95/96 shape).
+    await runCarryingNodeModules('94-x');
+    await runCarryingNodeModules('96-y', 'other.txt');
+
+    const result = await mergeRuns(repo, ['94-x', '96-y'], { scriptPath: SCRIPT });
+
+    // The merge is refused before afk-merge.sh ever runs, so main stays clean.
+    expect(result.ok).toBe(false);
+    expect(result.conflicted).toBe(false);
+    expect(await isMidMerge(repo)).toBe(false);
+
+    // The real install is intact: node_modules is still a real directory (not a
+    // clobbered self-referential symlink) and its marker is still readable.
+    const nm = await lstat(join(repo, 'node_modules'));
+    expect(nm.isDirectory()).toBe(true);
+    expect(nm.isSymbolicLink()).toBe(false);
+    const marker = await readFile(join(repo, 'node_modules', 'installed.marker'), 'utf8');
+    expect(marker).toBe('real install\n');
+
+    // main never tracked node_modules, and both branches survive for the human.
+    await git(repo, 'checkout', 'main');
+    expect(await git(repo, 'ls-files')).not.toContain('node_modules');
+    expect(await branchExists('94-x')).toBe(true);
+    expect(await branchExists('96-y')).toBe(true);
   });
 });

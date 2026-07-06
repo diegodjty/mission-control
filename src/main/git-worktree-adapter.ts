@@ -33,6 +33,7 @@ import {
 } from '../shared/worktree-scan';
 import { ensureLocallyIgnored } from './local-ignore';
 import { dirtyPathsFromPorcelain } from '../shared/merge-output';
+import { ignoredArtifactPaths } from '../shared/artifact-hygiene';
 import {
   splitAdoptablePaths,
   adoptionCommitMessage,
@@ -67,6 +68,30 @@ async function git(projectPath: string, args: string[]): Promise<string> {
     maxBuffer: 16 * 1024 * 1024,
   });
   return stdout;
+}
+
+/**
+ * Strip any local install-artifact path (a committed `node_modules` symlink and
+ * friends) from the index before a commit is made (issue 98). A structural guard
+ * so a worktree can NEVER commit the self-referential `node_modules` symlink that
+ * corrupted `main` on merge — it holds even if `.gitignore` is missing or the path
+ * was force-added (`git add -f`), the two ways staging could bypass the ignore.
+ * Reads the staged paths, filters them through the pure hygiene rule, and unstages
+ * exactly those; returns the paths it removed. A no-op (returns []) in the normal
+ * case where `.gitignore` already kept the artifact untracked.
+ */
+async function unstageIgnoredArtifacts(cwd: string): Promise<string[]> {
+  const staged = (await git(cwd, ['diff', '--cached', '--name-only']))
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  const artifacts = ignoredArtifactPaths(staged);
+  if (artifacts.length > 0) {
+    // `reset HEAD -- <paths>` unstages without touching the working tree, so the
+    // real install stays on disk — it just never enters the commit.
+    await git(cwd, ['reset', '-q', 'HEAD', '--', ...artifacts]);
+  }
+  return artifacts;
 }
 
 /** Is parallel mode on (the flag file present)? */
@@ -647,6 +672,16 @@ export async function commitFinishedWorktree(
     const porcelain = await git(worktreePath, ['status', '--porcelain']);
     if (porcelain.trim().length === 0) return { committed: false, error: null };
     await git(worktreePath, ['add', '-A']);
+    // Structural hygiene guard (issue 98): never let a local install artifact
+    // (a `node_modules` symlink, a `dist/`/`out/` build output) enter the commit,
+    // even if `.gitignore` was bypassed — it is the committed symlink that
+    // corrupts `main` on merge. Idempotent: a no-op when nothing artifact-shaped
+    // is staged.
+    await unstageIgnoredArtifacts(worktreePath);
+    // The guard may have emptied the index (e.g. the ONLY dirty path was the
+    // artifact): with nothing left to commit, there is no mergeable change.
+    const staged = await git(worktreePath, ['diff', '--cached', '--name-only']);
+    if (staged.trim().length === 0) return { committed: false, error: null };
     await git(worktreePath, ['commit', '-m', commitMessageForRun(slug)]);
     return { committed: true, error: null };
   } catch (err) {
