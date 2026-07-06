@@ -813,6 +813,28 @@ export function App(): JSX.Element {
     [attention.workbenchRoot, resetForProjectSwitch],
   );
 
+  // A `new-repo-candidate` item's one-click confirm (issue 95, ADR-0017):
+  // register the appeared repo through the ADR-0015 path (CONFIG repos entry +
+  // registry line + one boring workbench commit). Unlike the other kinds this
+  // does NOT open the project — it acts in place; success clears the item on
+  // the next re-derive (the CONFIG edit is a watched change), and a refusal
+  // surfaces as the Inbox's quiet notice.
+  const registerRepoFromInbox = useCallback(async (item: AttentionItem): Promise<void> => {
+    if (item.kind !== 'new-repo-candidate' || !item.candidate) return;
+    const res = await window.mc.registerRepo({
+      project: item.project,
+      repoPath: item.candidate.path,
+      key: item.candidate.suggestedKey,
+    });
+    if (!res.ok) {
+      setInboxNotice(res.errors[0] ?? `Could not register ${item.candidate.name}.`);
+      return;
+    }
+    setInboxNotice(
+      `Registered "${item.candidate.name}"${res.key ? ` as ${res.key}` : ''} in ${item.project}.`,
+    );
+  }, []);
+
   const openInNewWindow = useCallback((): void => {
     const path = newRepoPath.trim();
     if (!path) return;
@@ -3229,6 +3251,7 @@ export function App(): JSX.Element {
             <Inbox
               snapshot={attention}
               onOpenItem={(item) => void openAttentionItem(item)}
+              onRegisterRepo={(item) => void registerRepoFromInbox(item)}
               notice={inboxNotice}
             />
           </div>

@@ -69,6 +69,9 @@ describe('readAttentionInput', () => {
       humanSetup: null,
       journal: [],
       lastSeen: null,
+      // No CONFIG.md → no workspace_root → the self-heal input is null (issue
+      // 95): a project with nothing on disk has no appeared-repo candidates.
+      selfHeal: null,
     });
   });
 

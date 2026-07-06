@@ -19,6 +19,12 @@
  *     issue that is open/wip in this backlog: a prerequisite the human owes
  *     the batch. Only explicit references count (`Unblocks: 07, 08`,
  *     `issue 12`) — a bare number in prose ("Node 22") is not a reference.
+ *   - `new-repo-candidate` — a git repo has APPEARED under the project's
+ *     workspace root but is not yet registered (issue 95, ADR-0017): MC
+ *     proposes registering it (the human confirms with one click — a new repo
+ *     is new state, never auto-registered). The pure `self-heal` detector
+ *     decides candidacy; this module turns each into an item that carries the
+ *     repo path + a suggested key for the one-click register action.
  *   - `briefing` — journal entries newer than the caller-supplied last-seen
  *     stamp, rendered as quiet one-liners (never notifications, ADR-0012).
  *
@@ -36,12 +42,14 @@
  */
 import type { Backlog, BacklogIssue } from './backlog-model';
 import type { ReceiptRecord } from './receipt-parser';
+import { detectAppearedRepos, type RepoCandidate, type SelfHealInput } from './self-heal';
 
 export type AttentionKind =
   | 'hitl-park'
   | 'curator-proposal'
   | 'blocked-run'
   | 'setup-gate'
+  | 'new-repo-candidate'
   | 'briefing';
 
 /** One thing that needs the human, ready for the cross-project Inbox. */
@@ -57,6 +65,12 @@ export interface AttentionItem {
   text: string;
   /** Stable across re-derivation: `<project>:<kind>[:<discriminator>]`. */
   id: string;
+  /**
+   * For a `new-repo-candidate` only (null otherwise): the appeared repo to
+   * register — its absolute path and a suggested short key. The Inbox's
+   * one-click register action needs both; every other kind leaves it null.
+   */
+  candidate?: RepoCandidate | null;
 }
 
 /** A raw journal file: base name (`YYYY-MM-DD[-n].md`) and full content. */
@@ -84,6 +98,14 @@ export interface AttentionInput {
    * this app has never looked — every journal entry is then unseen.
    */
   lastSeen: string | null;
+  /**
+   * The self-heal detector's input (issue 95, ADR-0017): the workspace root's
+   * top-level entries, this project's `repos:` map, and the registry — from
+   * which appeared-but-unregistered repos become `new-repo-candidate` items.
+   * Null/absent for a legacy or pre-0017 project (no workspace root to watch),
+   * which then derives no candidates. The adapter gathers the facts.
+   */
+  selfHeal?: SelfHealInput | null;
 }
 
 export interface AttentionResult {
@@ -319,6 +341,27 @@ function briefingItem(project: string, file: JournalFile): AttentionItem {
 }
 
 // ---------------------------------------------------------------------------
+// (f) new-repo-candidate — a git repo appeared under the workspace root but is
+// not yet registered (issue 95, ADR-0017). Candidacy is the pure self-heal
+// detector's call; this only shapes the items.
+// ---------------------------------------------------------------------------
+
+function deriveRepoCandidates(project: string, selfHeal: SelfHealInput | null): AttentionItem[] {
+  if (!selfHeal || typeof selfHeal !== 'object') return [];
+  return detectAppearedRepos(selfHeal).map((candidate) => ({
+    project,
+    kind: 'new-repo-candidate' as const,
+    issueId: null,
+    // Not a project-root-relative file — a candidate is registered, not opened;
+    // the repo path rides in `candidate` for the one-click register action.
+    fileRef: null,
+    text: `a new repo "${candidate.name}" appeared under ${selfHeal.workspaceRoot} — register it?`,
+    id: `${project}:new-repo-candidate:${candidate.name}`,
+    candidate,
+  }));
+}
+
+// ---------------------------------------------------------------------------
 // The derivation
 // ---------------------------------------------------------------------------
 
@@ -327,6 +370,7 @@ const KIND_ORDER: readonly AttentionKind[] = [
   'curator-proposal',
   'blocked-run',
   'setup-gate',
+  'new-repo-candidate',
   'briefing',
 ];
 
@@ -359,15 +403,18 @@ export function deriveAttention(input: AttentionInput): AttentionResult {
     : [];
 
   const gates = deriveSetupGates(project, backlog, input?.humanSetup ?? null);
+  const candidates = deriveRepoCandidates(project, input?.selfHeal ?? null);
   const briefing = deriveBriefing(project, asArray(input?.journal), input?.lastSeen ?? null, notes);
 
-  const items = [...receiptItems, ...proposal, ...gates, ...briefing].sort((a, b) => {
-    const kind = KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind);
-    if (kind !== 0) return kind;
-    if (a.kind === 'briefing') return 0; // already newest-first
-    const byIssue = (a.issueId ?? Infinity) - (b.issueId ?? Infinity);
-    return byIssue !== 0 ? byIssue : a.id.localeCompare(b.id);
-  });
+  const items = [...receiptItems, ...proposal, ...gates, ...candidates, ...briefing].sort(
+    (a, b) => {
+      const kind = KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind);
+      if (kind !== 0) return kind;
+      if (a.kind === 'briefing') return 0; // already newest-first
+      const byIssue = (a.issueId ?? Infinity) - (b.issueId ?? Infinity);
+      return byIssue !== 0 ? byIssue : a.id.localeCompare(b.id);
+    },
+  );
 
   return { items, notes };
 }

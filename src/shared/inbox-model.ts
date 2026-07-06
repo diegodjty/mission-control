@@ -90,6 +90,8 @@ export function kindLabel(kind: AttentionKind): string {
       return 'blocked';
     case 'setup-gate':
       return 'setup';
+    case 'new-repo-candidate':
+      return 'new repo';
     case 'briefing':
       return 'journal';
     default:

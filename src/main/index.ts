@@ -32,6 +32,7 @@ import { ReceiptWatcher } from './receipt-watcher';
 import { PlanningWatcher } from './planning-watcher';
 import { commitWorkbenchPaths, commitWorkbenchProject } from './workbench-git';
 import { createWorkbenchProject } from './onboarding';
+import { registerAppearedRepo } from './register-repo';
 import { deleteIssueFile, readIssueText, writeIssueText } from './issue-file-store';
 import { readCoreMemory, writeDrainJournal } from './memory-files';
 import {
@@ -81,6 +82,8 @@ import {
   type OnboardingCreateResult,
   type ProjectRemoveRequest,
   type ProjectRemoveResult,
+  type RepoRegisterRequest,
+  type RepoRegisterResult,
   type PlanningDocReadRequest,
   type PlanningDocReadResult,
   type PlanningWatchRequest,
@@ -1314,6 +1317,32 @@ function registerIpc(): void {
     },
   );
 
+  // Self-heal confirm (issue 95, ADR-0017): register a repo that appeared under
+  // a project's workspace root, acting on its Inbox `new-repo-candidate` item.
+  // All validation lives in the pure planner; the edge (main/register-repo.ts)
+  // reads CONFIG + registry, writes the repos entry + registry line, and lands
+  // ONE boring workbench commit — reusing the ADR-0015 registration path. Like
+  // onboarding, NOT ownership-gated: registering claims nothing; the appeared
+  // repo just becomes resolvable for the project's future Runs.
+  ipcMain.handle(
+    IpcChannel.RepoRegister,
+    async (_event, req: RepoRegisterRequest): Promise<RepoRegisterResult> => {
+      const outcome = await registerAppearedRepo({
+        workbenchRoot: WORKBENCH_ROOT,
+        homeDir: homedir(),
+        project: req?.project ?? '',
+        repoPath: req?.repoPath ?? '',
+        key: req?.key ?? '',
+      });
+      return {
+        ok: outcome.ok,
+        errors: outcome.errors,
+        warning: outcome.warnings[0] ?? null,
+        key: outcome.key,
+      };
+    },
+  );
+
   // The Planning view's live doc watch (issue 83, ADR-0016): keyed per
   // renderer like the Backlog watch; the workbench PRDs + issues and the
   // repo's CONTEXT.md + docs/adr are watched, and the ordered doc list is
@@ -1374,6 +1403,8 @@ app.whenReady().then(async () => {
     workbenchRoot: WORKBENCH_ROOT,
     onChange: (snapshot) => broadcast(IpcChannel.AttentionChanged, snapshot),
     lastSeenFor: (project) => attentionLastSeen.get(project),
+    // For the self-heal detector's `~/`-path expansion (issue 95, ADR-0017).
+    homeDir: homedir(),
   });
   attentionWatcher.start();
   registerIpc();

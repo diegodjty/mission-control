@@ -401,3 +401,73 @@ describe('stability and degradation', () => {
     ).not.toThrow();
   });
 });
+
+// ---------------------------------------------------------------------------
+// (f) new-repo-candidate — a git repo appeared under the workspace root but is
+// not yet registered (issue 95, ADR-0017). The pure self-heal detector decides
+// candidacy; the model shapes it into an item and writes NOTHING to disk.
+// ---------------------------------------------------------------------------
+
+describe('new-repo-candidate', () => {
+  const selfHeal = (partial: Record<string, unknown> = {}) => ({
+    workspaceRoot: '/home/dev/Developer/demo',
+    entries: [{ name: 'api', isGit: true }],
+    repos: {},
+    registryContent: null,
+    homeDir: '/home/dev',
+    ...partial,
+  });
+
+  it('derives exactly one item for one appeared, unregistered repo — for the right project', () => {
+    const { items, notes } = deriveAttention(input({ selfHeal: selfHeal() }));
+    const candidates = itemsOfKind(items, 'new-repo-candidate');
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({
+      project: 'demo',
+      kind: 'new-repo-candidate',
+      issueId: null,
+      fileRef: null,
+      id: 'demo:new-repo-candidate:api',
+      candidate: { path: '/home/dev/Developer/demo/api', name: 'api', suggestedKey: 'api' },
+    });
+    expect(candidates[0].text).toMatch(/new repo "api" appeared under \/home\/dev\/Developer\/demo/);
+    expect(notes).toEqual([]);
+  });
+
+  it('produces NO item for an already-registered repo', () => {
+    const registered = deriveAttention(
+      input({ selfHeal: selfHeal({ repos: { api: '/home/dev/Developer/demo/api' } }) }),
+    );
+    expect(itemsOfKind(registered.items, 'new-repo-candidate')).toEqual([]);
+
+    const inRegistry = deriveAttention(
+      input({
+        selfHeal: selfHeal({
+          registryContent:
+            '- repo: /home/dev/Developer/demo/api\n  project: demo\n  status: active\n',
+        }),
+      }),
+    );
+    expect(itemsOfKind(inRegistry.items, 'new-repo-candidate')).toEqual([]);
+  });
+
+  it('a non-git subdir under the workspace root produces no item', () => {
+    const { items } = deriveAttention(
+      input({ selfHeal: selfHeal({ entries: [{ name: 'notes', isGit: false }] }) }),
+    );
+    expect(itemsOfKind(items, 'new-repo-candidate')).toEqual([]);
+  });
+
+  it('no selfHeal input (legacy / pre-0017 project) derives no candidates', () => {
+    const { items } = deriveAttention(input());
+    expect(itemsOfKind(items, 'new-repo-candidate')).toEqual([]);
+    const nulled = deriveAttention(input({ selfHeal: null }));
+    expect(itemsOfKind(nulled.items, 'new-repo-candidate')).toEqual([]);
+  });
+
+  it('derivation is pure — the same input yields the same items and stable ids', () => {
+    const once = deriveAttention(input({ selfHeal: selfHeal() }));
+    const twice = deriveAttention(input({ selfHeal: selfHeal() }));
+    expect(twice.items).toEqual(once.items);
+  });
+});

@@ -1829,6 +1829,12 @@ body.is-col-resizing {
   background: var(--bg1);
 }
 
+.inbox__badge--new-repo-candidate {
+  color: var(--green-soft);
+  border-color: var(--green-border);
+  background: var(--green-bg);
+}
+
 /* An Inbox click-through's file reference, above the Map (issue 80). */
 .app__inbox-focus {
   display: flex;
