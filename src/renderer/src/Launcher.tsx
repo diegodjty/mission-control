@@ -5,7 +5,7 @@ import type {
   OnboardingCreateResult,
   QuickFixCreateResult,
 } from '../../shared/ipc-contract';
-import { projectStateLine } from '../../shared/launcher-model';
+import { projectStateLine, quickFixDefaultDir } from '../../shared/launcher-model';
 import { repoKeyFor } from '../../shared/onboarding-model';
 
 /** What a successful Quick fix hands back for the Run-now offer. */
@@ -22,6 +22,12 @@ interface LauncherProps {
   attention: AttentionSnapshot;
   /** Set when this Window has a project open (the home affordance's origin). */
   activeProjectLabel: string | null;
+  /**
+   * The open project's key (its workbench dir, for a workbench project) —
+   * Quick fix's dropdown defaults to it and ONLY it (issue 88): the project
+   * the user is visibly on, or an explicit pick. Never a silent projects[0].
+   */
+  activeProjectKey: string | null;
   /** Return to the open project's Map (null when no project is open). */
   onBackToProject: (() => void) | null;
   /** Continue: open this project in this Window through the normal flow. */
@@ -72,6 +78,7 @@ export function Launcher({
   projects,
   attention,
   activeProjectLabel,
+  activeProjectKey,
   onBackToProject,
   onContinue,
   onProjectCreated,
@@ -187,13 +194,21 @@ export function Launcher({
     return map;
   }, [attention.items]);
 
+  // The chosen project, or null while nothing is chosen (issue 88): NO silent
+  // projects[0] fallback — that is how a quick fix landed in whichever project
+  // sorted first. Null keeps submit disabled until an explicit/visible pick.
   const quickFixProject = useMemo(
-    () => projects.find((p) => p.workbenchDir === quickFixDir) ?? projects[0] ?? null,
+    () => projects.find((p) => p.workbenchDir === quickFixDir) ?? null,
     [projects, quickFixDir],
   );
 
   const createQuickFix = (): void => {
-    if (quickFixProject === null || creating) return;
+    if (creating) return;
+    if (quickFixProject === null) {
+      // Reachable via Enter in the sentence field — the button is disabled.
+      setQuickFixError('Pick the project this fix belongs to.');
+      return;
+    }
     const text = sentence.trim();
     if (text.length === 0) {
       setQuickFixError('Type one sentence describing the fix.');
@@ -294,7 +309,9 @@ export function Launcher({
                 onClick={() => {
                   setMode('quickfix');
                   setQueuedNote(null);
-                  setQuickFixDir(quickFixProject?.workbenchDir ?? '');
+                  // Default to the project the user is visibly on — or nothing,
+                  // which requires an explicit pick before submit (issue 88).
+                  setQuickFixDir(quickFixDefaultDir(projects, activeProjectKey));
                 }}
                 title="One sentence becomes a standalone issue in a project's backlog"
               >
@@ -463,9 +480,17 @@ export function Launcher({
                   Project
                   <select
                     className="launcher__select"
-                    value={quickFixProject?.workbenchDir ?? ''}
+                    value={quickFixDir}
                     onChange={(e) => setQuickFixDir(e.target.value)}
                   >
+                    {/* No silent default (issue 88): with no project visibly
+                        open, the placeholder holds until an explicit pick —
+                        and it blocks submit. */}
+                    {quickFixProject === null && (
+                      <option value="" disabled>
+                        Pick a project…
+                      </option>
+                    )}
                     {projects.map((p) => (
                       <option key={p.workbenchDir} value={p.workbenchDir}>
                         {p.label}

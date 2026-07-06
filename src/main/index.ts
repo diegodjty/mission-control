@@ -35,6 +35,7 @@ import { createWorkbenchProject } from './onboarding';
 import { readCoreMemory, writeDrainJournal } from './memory-files';
 import {
   buildQuickFixIssue,
+  localDateStamp,
   nextIssueNumber,
   padIssueNumber,
   quickFixFileName,
@@ -1099,7 +1100,9 @@ function registerIpc(): void {
           const content = buildQuickFixIssue({
             id,
             sentence,
-            date: new Date().toISOString().slice(0, 10),
+            // The user's LOCAL calendar day (issue 88) — a UTC slice stamped
+            // an evening quick fix with tomorrow's date.
+            date: localDateStamp(new Date()),
           });
           try {
             await writeFile(join(identity.issuesRoot, fileName), content, {

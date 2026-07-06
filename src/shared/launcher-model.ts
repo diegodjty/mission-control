@@ -18,6 +18,8 @@
  * process; the UI in `renderer/src/Launcher.tsx`.
  */
 
+import type { RunTarget } from './ipc-contract';
+
 /** Matches issue files (`NN-slug.md`); everything else is not an issue. */
 const ISSUE_FILE = /^(\d+)-.+\.md$/;
 
@@ -106,6 +108,77 @@ export function buildQuickFixIssue(input: QuickFixIssueInput): string {
     '- [ ] The one-sentence request above is implemented and verified per the afk-issue-runner verify gate.',
     '',
   ].join('\n');
+}
+
+/**
+ * The `YYYY-MM-DD` stamp for a quick-fix `## Source` line: the user's LOCAL
+ * calendar day (issue 88 — a UTC slice made an evening quick fix land
+ * "tomorrow" for anyone west of UTC).
+ */
+export function localDateStamp(now: Date): string {
+  const y = String(now.getFullYear()).padStart(4, '0');
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+/** The project identity a quick-fix Run is built from (a LauncherProject subset). */
+export interface QuickFixRunProject {
+  /** The repo the Run's session starts in (the project's default repo). */
+  defaultRepoPath: string;
+  /** Where the created issue file lives. */
+  issuesRoot: string;
+  /** Where the Run's Receipt lands. */
+  completionsRoot: string;
+}
+
+/** The created issue, as QuickFixCreate handed it back. */
+export interface QuickFixCreatedIssue {
+  issueId: number;
+  fileName: string;
+  title: string;
+}
+
+/**
+ * The Run target for a quick fix's Run-now (issue 88, walkthrough-86 finding):
+ * built ENTIRELY from the created issue's project — the project the issue was
+ * just written to. The Window's active project is deliberately not an input:
+ * Run-now used to re-derive paths from window-active state, so an issue
+ * created in project A could spawn a Run with project B's repo + workbench
+ * paths (the Worker then rightly refused). The created issue's identity is
+ * carried end-to-end instead; the mismatch is unrepresentable here.
+ */
+export function quickFixRunTarget(
+  project: QuickFixRunProject,
+  issue: QuickFixCreatedIssue,
+): RunTarget {
+  return {
+    issueId: issue.issueId,
+    issueFileName: issue.fileName,
+    issueTitle: issue.title,
+    projectPath: project.defaultRepoPath,
+    workbench: {
+      issuesRoot: project.issuesRoot,
+      completionsRoot: project.completionsRoot,
+    },
+  };
+}
+
+/**
+ * The Quick fix dropdown's initial selection (issue 88): the project the user
+ * is visibly on — the Window's active project, when it is one of the listed
+ * workbench projects — or `''`, which the UI renders as an unchosen
+ * "Pick a project…" placeholder that blocks submit. NEVER a silent
+ * `projects[0]` default: that is exactly how a quick fix landed in whichever
+ * project happened to sort first.
+ */
+export function quickFixDefaultDir(
+  projects: readonly { workbenchDir: string }[],
+  activeProjectKey: string | null,
+): string {
+  if (activeProjectKey === null) return '';
+  const match = projects.find((p) => p.workbenchDir === activeProjectKey);
+  return match?.workbenchDir ?? '';
 }
 
 // ---------------------------------------------------------------------------

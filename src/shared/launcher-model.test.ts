@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildQuickFixIssue,
+  localDateStamp,
   nextIssueNumber,
   padIssueNumber,
   projectStateLine,
+  quickFixDefaultDir,
   quickFixFileName,
+  quickFixRunTarget,
   quickFixSlug,
   sortLauncherProjects,
 } from './launcher-model';
@@ -88,6 +91,92 @@ describe('buildQuickFixIssue', () => {
   it('collapses newlines in the sentence — the heading stays one line', () => {
     const multi = buildQuickFixIssue({ id: 3, sentence: 'fix\nthe\nthing', date: '2026-07-05' });
     expect(multi).toContain('# 03 — fix the thing');
+  });
+});
+
+// Issue 88 (walkthrough-86 finding): the issue was created in project A, but
+// Run-now rebuilt its paths from the WINDOW's active project (B) — the Run
+// spawned with B's repo + workbench and the Worker rightly refused. The Run
+// target must carry the CREATED issue's project identity end-to-end.
+describe('quickFixRunTarget', () => {
+  const projectA = {
+    defaultRepoPath: '/Users/dev/Developer/repo-a',
+    issuesRoot: '/Users/dev/Workbench/project-a/issues',
+    completionsRoot: '/Users/dev/Workbench/project-a/completions',
+  };
+
+  it("builds the Run entirely from the created issue's project — create-in-A always spawns with A's repo and workbench paths", () => {
+    const target = quickFixRunTarget(projectA, {
+      issueId: 7,
+      fileName: '07-this-is-the-quick-fix-test.md',
+      title: '07 — this is the quick fix test',
+    });
+    expect(target).toEqual({
+      issueId: 7,
+      issueFileName: '07-this-is-the-quick-fix-test.md',
+      issueTitle: '07 — this is the quick fix test',
+      projectPath: '/Users/dev/Developer/repo-a',
+      workbench: {
+        issuesRoot: '/Users/dev/Workbench/project-a/issues',
+        completionsRoot: '/Users/dev/Workbench/project-a/completions',
+      },
+    });
+  });
+
+  it('has no window-active input at all — the identity mismatch is unrepresentable', () => {
+    // The signature is the regression guard: nothing about the Window's
+    // active project can reach the target. Assert the paths verbatim.
+    const target = quickFixRunTarget(projectA, { issueId: 1, fileName: '01-x.md', title: '01 — x' });
+    expect(target.projectPath).toBe(projectA.defaultRepoPath);
+    expect(target.workbench).toEqual({
+      issuesRoot: projectA.issuesRoot,
+      completionsRoot: projectA.completionsRoot,
+    });
+  });
+});
+
+// Issue 88: the Quick fix dropdown silently defaulted to `projects[0]` — the
+// issue landed in whatever sorted first. The default must be the project the
+// user is visibly on, or nothing (forcing an explicit pick before submit).
+describe('quickFixDefaultDir', () => {
+  const projects = [
+    { workbenchDir: '/Users/dev/Workbench/qa-sandbox' },
+    { workbenchDir: '/Users/dev/Workbench/mission-control' },
+  ];
+
+  it("defaults to the Window's open project — never projects[0]", () => {
+    expect(quickFixDefaultDir(projects, '/Users/dev/Workbench/mission-control')).toBe(
+      '/Users/dev/Workbench/mission-control',
+    );
+  });
+
+  it('is empty when the Window has no project open — an explicit pick is required', () => {
+    expect(quickFixDefaultDir(projects, null)).toBe('');
+  });
+
+  it("is empty when the Window's project is not a listed workbench project (legacy repo)", () => {
+    expect(quickFixDefaultDir(projects, '/Users/dev/Developer/legacy-repo')).toBe('');
+  });
+
+  it('is empty for an empty project list', () => {
+    expect(quickFixDefaultDir([], '/Users/dev/Workbench/mission-control')).toBe('');
+  });
+});
+
+// Issue 88 (cosmetic): the `## Source` line stamped the UTC date — an evening
+// quick fix landed "tomorrow". The stamp must be the user's local calendar day.
+describe('localDateStamp', () => {
+  it('formats the LOCAL calendar day, zero-padded', () => {
+    // Constructed via local-time parts, so these hold in every timezone.
+    expect(localDateStamp(new Date(2026, 6, 4, 12, 0, 0))).toBe('2026-07-04');
+    expect(localDateStamp(new Date(2026, 0, 9, 3, 4, 5))).toBe('2026-01-09');
+  });
+
+  it('stays on the local day at both edges of midnight (where a UTC stamp drifts)', () => {
+    // 00:05 local (a UTC-slice stamp is YESTERDAY in zones ahead of UTC) and
+    // 23:55 local (a UTC-slice stamp is TOMORROW in zones behind UTC).
+    expect(localDateStamp(new Date(2026, 6, 4, 0, 5, 0))).toBe('2026-07-04');
+    expect(localDateStamp(new Date(2026, 6, 4, 23, 55, 0))).toBe('2026-07-04');
   });
 });
 

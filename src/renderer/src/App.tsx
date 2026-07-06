@@ -7,6 +7,7 @@ import { Inbox } from './Inbox';
 import { Launcher, type QuickFixIssueRef } from './Launcher';
 import { PlanningView } from './PlanningView';
 import { stageInvocation, type PlanningStage } from '../../shared/planning-model';
+import { quickFixRunTarget } from '../../shared/launcher-model';
 import type { AttentionItem } from '../../shared/attention-model';
 import { workbenchProjectPath } from '../../shared/inbox-model';
 import type { Backlog, IssueStatus } from '../../shared/backlog-model';
@@ -1458,8 +1459,11 @@ export function App(): JSX.Element {
   // Quick fix's Run now (issue 81): open the chosen project through the
   // NORMAL open/claim flow, then launch exactly ONE bare Run on the freshly
   // written issue (no Dispatcher — ADR-0010: a single manual Run stays a bare
-  // Pane). The target carries its own resolved repo + workbench paths because
-  // this fires before the Map has loaded the new project's backlog.
+  // Pane). The target is built ENTIRELY from the created issue's project
+  // (issue 88, walkthrough-86 finding): re-deriving paths from the open
+  // result's window-active state let an issue created in project A spawn a
+  // Run with project B's repo + workbench paths — the created issue's
+  // identity is carried end-to-end instead.
   const runQuickFixNow = useCallback(
     async (p: LauncherProject, issue: QuickFixIssueRef): Promise<void> => {
       const res = await window.mc.openProject({ path: p.workbenchDir });
@@ -1473,17 +1477,7 @@ export function App(): JSX.Element {
       const switched = isProjectSwitch(activeProjectKeyRef.current, res.activeProjectKey);
       if (switched) resetForProjectSwitch();
       setActiveProjectKey(res.activeProjectKey);
-      const projectView = res.projects.find((v) => v.key === res.activeProjectKey) ?? null;
-      const target: RunTarget = {
-        issueId: issue.issueId,
-        issueFileName: issue.fileName,
-        issueTitle: issue.title,
-        projectPath: projectView?.defaultRepoPath ?? p.defaultRepoPath,
-        workbench: {
-          issuesRoot: projectView?.issuesRoot ?? p.issuesRoot,
-          completionsRoot: projectView?.completionsRoot ?? p.completionsRoot,
-        },
-      };
+      const target: RunTarget = quickFixRunTarget(p, issue);
       if (switched) {
         // The Window just landed on this project: the per-Project state
         // (backlog, scan, runs) in this closure is the PREVIOUS project's —
@@ -3138,6 +3132,7 @@ export function App(): JSX.Element {
               activeProjectLabel={
                 projects.find((p) => p.key === activeProjectKey)?.label ?? null
               }
+              activeProjectKey={activeProjectKey}
               onBackToProject={activeProjectKey !== null ? () => setView('map') : null}
               onContinue={(p) => void openProjectHere(p.workbenchDir)}
               onProjectCreated={(created) => void landOnNewProject(created)}
