@@ -291,6 +291,12 @@ export function Map({
 
   const selected = backlog?.issues.find((i) => i.id === selectedId) ?? null;
 
+  // Map list order (issue 102): show the latest issues at the top. The shared
+  // Backlog Model sorts ascending by id (and eligibility / the lowest-numbered
+  // pick logic depend on that order), so we reverse ONLY here at the display
+  // layer — a descending-by-id copy — without touching the model.
+  const displayIssues = backlog ? [...backlog.issues].sort((a, b) => b.id - a.id) : [];
+
   // Drain honesty (issue 90): the control is enabled only when the coordinator
   // would actually have work — an issue startable now, or unblockable by the
   // drain (a live Run counts toward unblocking; a parked wip does not). The
@@ -620,7 +626,7 @@ export function Map({
 
       <div className="map__split">
         <ul className="map__list">
-          {backlog?.issues.map((issue) => (
+          {displayIssues.map((issue) => (
             <IssueRow
               key={issue.id}
               issue={issue}
