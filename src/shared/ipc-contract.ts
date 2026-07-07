@@ -361,6 +361,13 @@ export interface TalkTarget {
    * folder or a legacy project: nothing is injected.
    */
   workbenchProjectRoot: string | null;
+  /**
+   * True for a Planning session (issue 101): the spawn carries an explicit
+   * Workbench artifact destination in its prompt so `/to-prd` / `/to-issues`
+   * write into the Workbench, not the session's cwd. Absent/false for a plain
+   * "Just talk" session, which stays bare and untracked.
+   */
+  planning?: boolean;
   /** Compact display label for the Pane header. */
   label: string;
 }

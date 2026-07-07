@@ -204,4 +204,52 @@ describe('buildTalkPrompt / resolveTalkCommand (issue 81)', () => {
     expect(warm.args.slice(0, 2)).toEqual(['fake.js', '--talk']);
     expect(warm.args[2]).toContain(CORE_MEMORY_LABEL);
   });
+
+  it('a plain talk prompt is byte-identical whether dest is omitted or explicitly null', () => {
+    expect(buildTalkPrompt('- Stack: Electron', null)).toBe(buildTalkPrompt('- Stack: Electron'));
+    expect(buildTalkPrompt(null, null)).toBeNull();
+  });
+});
+
+describe('planning talk sessions carry the Workbench destination (issue 101)', () => {
+  const DEST = {
+    issuesRoot: '/Users/me/Workbench/repoless-qa/issues',
+    projectRoot: '/Users/me/Workbench/repoless-qa',
+  };
+
+  it('names the Workbench issues root, PRD/HUMAN-SETUP location, and forbids the cwd fallback', () => {
+    const prompt = buildTalkPrompt(null, DEST);
+    expect(prompt).not.toBeNull();
+    expect(prompt).toContain('/Users/me/Workbench/repoless-qa/issues');
+    expect(prompt).toContain('/to-prd');
+    expect(prompt).toContain('/to-issues');
+    expect(prompt).toContain('/Users/me/Workbench/repoless-qa/HUMAN-SETUP.md');
+    expect(prompt).toContain('Do NOT create an issues/ directory');
+    // A planning session is not framed as untracked free-form talk.
+    expect(prompt).toContain('planning session');
+    expect(prompt).not.toContain('nothing is tracked');
+  });
+
+  it('carries the destination even when the project has NO memory (repo-less, empty CORE.md)', () => {
+    // The exact issue-101 case: without a dest this returns null (bare session);
+    // with a dest it must still carry the destination block.
+    expect(buildTalkPrompt(null)).toBeNull();
+    const prompt = buildTalkPrompt('', DEST);
+    expect(prompt).not.toBeNull();
+    expect(prompt).toContain(DEST.issuesRoot);
+  });
+
+  it('combines the destination block with CORE.md when both are present', () => {
+    const prompt = buildTalkPrompt('- Stack: Electron + React', DEST);
+    expect(prompt).toContain(DEST.issuesRoot);
+    expect(prompt).toContain(CORE_MEMORY_LABEL);
+    expect(prompt).toContain('- Stack: Electron + React');
+  });
+
+  it('resolveTalkCommand passes the destination-bearing prompt as the claude arg', () => {
+    const cmd = resolveTalkCommand({ CLAUDE_BIN: '/opt/claude' }, null, DEST);
+    expect(cmd.file).toBe('/opt/claude');
+    expect(cmd.args).toHaveLength(1);
+    expect(cmd.args[0]).toContain(DEST.issuesRoot);
+  });
 });

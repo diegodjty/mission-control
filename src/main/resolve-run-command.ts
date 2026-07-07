@@ -153,32 +153,80 @@ export function resolveRunCommand(
 }
 
 /**
- * The initial prompt for a "Just talk" Pane (issue 81, ADR-0016): a warm bare
- * `claude` session — no issue is claimed, nothing is tracked — carrying the
- * workbench project's CORE.md as labeled background context (issue 73's cap
- * and label). No memory ⇒ null: the session spawns with NO initial prompt at
- * all, a genuinely bare warm start.
+ * The Workbench artifact destination a PLANNING talk session carries (issue
+ * 101, ADR-0015): where `/to-prd`, `/to-issues`, and `/grill-with-docs` must
+ * write, so they don't fall back to a file backlog in the session's cwd (a
+ * code/workspace directory that holds no pipeline artifacts). Absent for a
+ * plain "Just talk" session, which stays untracked.
  */
-export function buildTalkPrompt(memoryCore: string | null | undefined): string | null {
-  const section = coreMemorySection(memoryCore ?? null);
-  if (section === '') return null;
+export interface TalkWorkbenchDest {
+  /** Where issue files go: `~/Workbench/<project>/issues`. */
+  issuesRoot: string;
+  /** Where the PRD + HUMAN-SETUP go: `~/Workbench/<project>`. */
+  projectRoot: string;
+}
+
+/**
+ * The destination block a planning session's prompt carries: it names the
+ * Workbench as the issue tracker so the planning skills write there, and
+ * explicitly forbids the cwd fallback. Empty string when there is no
+ * destination (a plain talk session) — the prompt is then byte-identical to
+ * what it was before issue 101.
+ */
+function planningDestinationSection(dest: TalkWorkbenchDest | null): string {
+  if (dest === null) return '';
   return (
-    `This is a free-form working session — no issue is claimed and nothing is ` +
-    `tracked. The user will drive the conversation; wait for their first ` +
-    `message.` + section
+    ` This project's pipeline artifacts live in its Workbench, not in this ` +
+    `working directory (ADR-0015). When you run /to-prd, /to-issues, or ` +
+    `/grill-with-docs, treat this project's issue tracker as a file backlog at ` +
+    `${dest.issuesRoot}: write issue files (NN-slug.md) there, the PRD to ` +
+    `${dest.projectRoot}/, and any HUMAN-SETUP.md to ` +
+    `${dest.projectRoot}/HUMAN-SETUP.md. Do NOT create an issues/ directory or ` +
+    `a PRD in the current working directory.`
   );
 }
 
 /**
- * Resolve the executable + args for a "Just talk" Pane: same precedence as a
- * Run (`MC_RUN_CMD` override → `CLAUDE_BIN`/`claude`), but the prompt is only
- * the labeled memory context — and absent entirely when the project has none.
+ * The initial prompt for a talk Pane (issue 81, ADR-0016): a warm `claude`
+ * session carrying the workbench project's CORE.md as labeled background
+ * context (issue 73's cap and label).
+ *
+ * A PLANNING session (issue 101) additionally carries an explicit Workbench
+ * artifact destination, so `/to-prd` / `/to-issues` write to the Workbench
+ * rather than defaulting to a file backlog in the cwd. A plain "Just talk"
+ * session passes no destination — no issue is claimed, nothing is tracked —
+ * and with no memory either it returns null: the session spawns with NO initial
+ * prompt at all, a genuinely bare warm start.
+ */
+export function buildTalkPrompt(
+  memoryCore: string | null | undefined,
+  dest?: TalkWorkbenchDest | null,
+): string | null {
+  const section = coreMemorySection(memoryCore ?? null);
+  const destination = planningDestinationSection(dest ?? null);
+  if (section === '' && destination === '') return null;
+  const intro =
+    destination !== ''
+      ? `This is a planning session for a Workbench project. The user will ` +
+        `drive the conversation; wait for their first message.`
+      : `This is a free-form working session — no issue is claimed and nothing ` +
+        `is tracked. The user will drive the conversation; wait for their first ` +
+        `message.`;
+  return intro + destination + section;
+}
+
+/**
+ * Resolve the executable + args for a talk Pane: same precedence as a Run
+ * (`MC_RUN_CMD` override → `CLAUDE_BIN`/`claude`). The prompt is the labeled
+ * memory context plus, for a planning session, the Workbench destination — and
+ * absent entirely when a plain talk session has no memory.
  */
 export function resolveTalkCommand(
   env: Record<string, string | undefined>,
   memoryCore: string | null | undefined,
+  dest?: TalkWorkbenchDest | null,
 ): ShellCommand {
-  const prompt = buildTalkPrompt(memoryCore);
+  const prompt = buildTalkPrompt(memoryCore, dest ?? null);
 
   const override = env.MC_RUN_CMD?.trim();
   if (override) {

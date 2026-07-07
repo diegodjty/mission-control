@@ -8,7 +8,11 @@
 import { randomUUID } from 'node:crypto';
 import * as pty from 'node-pty';
 import { resolveShell } from './resolve-shell';
-import { resolveRunCommand, resolveTalkCommand } from './resolve-run-command';
+import {
+  resolveRunCommand,
+  resolveTalkCommand,
+  type TalkWorkbenchDest,
+} from './resolve-run-command';
 import { resolveDispatcherCommand } from './dispatcher-session';
 import type {
   PtyDataMessage,
@@ -34,6 +38,13 @@ export interface PtySessionManagerCallbacks {
  */
 export interface SpawnContext {
   memoryCore?: string | null;
+  /**
+   * A Planning talk session's explicit Workbench artifact destination (issue
+   * 101), derived at the IPC edge from the talk target. Null/absent for a plain
+   * "Just talk" session and every non-talk spawn — the talk prompt then stays
+   * byte-identical to before.
+   */
+  talkDest?: TalkWorkbenchDest | null;
 }
 
 // Keep at most this many trailing chars of a Run's output. Tail-truncating
@@ -83,10 +94,10 @@ export class PtySessionManager {
             memoryCore: context.memoryCore ?? null,
           })
         : req.talk
-          ? // A "Just talk" Pane (issue 81): a warm bare `claude` session —
-            // the labeled CORE.md context is its whole initial prompt, or no
-            // prompt at all when the project has no memory.
-            resolveTalkCommand(process.env, context.memoryCore ?? null)
+          ? // A talk Pane: a warm `claude` session. Just-talk (issue 81) is
+            // bare + CORE.md; a Planning session (issue 101) also carries the
+            // Workbench artifact destination so /to-prd, /to-issues write there.
+            resolveTalkCommand(process.env, context.memoryCore ?? null, context.talkDest ?? null)
           : resolveShell(process.env, process.platform);
     const cwd =
       req.run?.projectPath ||

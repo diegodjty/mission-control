@@ -831,6 +831,10 @@ function registerIpc(): void {
     // before. The memory root is the workbench project dir's `memory/`,
     // beside the issues root the Run already carries.
     let memoryCore: string | null = null;
+    // A Planning session's explicit Workbench artifact destination (issue 101):
+    // set only for a planning talk on a workbench project, so /to-prd and
+    // /to-issues write into the Workbench instead of the session's cwd.
+    let talkDest: { issuesRoot: string; projectRoot: string } | null = null;
     if (req.run?.workbench) {
       memoryCore = await readCoreMemory(join(dirname(req.run.workbench.issuesRoot), 'memory'));
     } else if (req.dispatcher) {
@@ -839,12 +843,15 @@ function registerIpc(): void {
         memoryCore = await readCoreMemory(join(identity.key, 'memory'));
       }
     } else if (req.talk?.workbenchProjectRoot) {
-      // A "Just talk" Pane on a workbench project (issue 81): same CORE.md
-      // injection as a Run/Dispatcher; a bare folder passes null and spawns
-      // with no prompt at all.
-      memoryCore = await readCoreMemory(join(req.talk.workbenchProjectRoot, 'memory'));
+      // A talk Pane on a workbench project (issue 81): same CORE.md injection as
+      // a Run/Dispatcher; a bare folder passes null and spawns with no prompt.
+      const projectRoot = req.talk.workbenchProjectRoot;
+      memoryCore = await readCoreMemory(join(projectRoot, 'memory'));
+      if (req.talk.planning === true) {
+        talkDest = { issuesRoot: join(projectRoot, 'issues'), projectRoot };
+      }
     }
-    return ptyManager.spawn(req, { memoryCore });
+    return ptyManager.spawn(req, { memoryCore, talkDest });
   });
 
   ipcMain.on(IpcChannel.PtyWrite, (_event, msg: PtyWriteMessage) => {

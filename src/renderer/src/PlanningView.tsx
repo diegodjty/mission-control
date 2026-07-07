@@ -170,9 +170,11 @@ export function PlanningView({
   );
 
   // The warm Pane target: the project's default repo, CORE.md injected (main
-  // reads it at the spawn edge) — exactly a Just-talk session.
+  // reads it at the spawn edge). Unlike Just-talk, this is a PLANNING session
+  // (issue 101): `planning: true` makes the spawn carry the Workbench artifact
+  // destination, so /to-prd and /to-issues write into the Workbench, not cwd.
   const talk = useMemo<TalkTarget>(
-    () => ({ cwd: repoPath, workbenchProjectRoot: workbenchDir, label }),
+    () => ({ cwd: repoPath, workbenchProjectRoot: workbenchDir, planning: true, label }),
     [repoPath, workbenchDir, label],
   );
 
