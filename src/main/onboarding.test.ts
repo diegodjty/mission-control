@@ -146,6 +146,51 @@ describe('createWorkbenchProject (issue 82)', () => {
     expect(id.workspaceRoot).toBe(join(home, 'Developer', 'greenfield-app'));
     expect(id.defaultRepoPath).toBe(join(home, 'Developer', 'greenfield-app'));
     expect(id.repoPaths).toEqual([]);
+
+    // issue 100: the workspace root is created (empty) so Planning / Just-talk /
+    // no-repo Runs spawn a live PTY there instead of "[process exited: 1]".
+    const wsRoot = join(home, 'Developer', 'greenfield-app');
+    expect((await stat(wsRoot)).isDirectory()).toBe(true);
+    // Empty ⇒ no `.git`, so self-heal never mistakes it for an appeared repo.
+    await expect(stat(join(wsRoot, '.git'))).rejects.toThrow();
+  });
+
+  it('creating the workspace root is a harmless no-op when it already exists and non-empty (issue 100)', async () => {
+    // Point the workspace root at an existing, non-empty folder (home/Developer,
+    // which already holds the seed repos). Creation is allowed (with a warning),
+    // and the existing contents are never clobbered.
+    const existingRoot = join(home, 'Developer');
+    const res = await createWorkbenchProject({
+      workbenchRoot: workbench,
+      homeDir: home,
+      name: 'Sits Alongside',
+      repos: [],
+      workspaceRoot: existingRoot,
+    });
+    expect(res.ok).toBe(true);
+    // Warned about the non-empty root, but NOT a mkdir failure.
+    expect(res.warnings.join(' ')).toMatch(/already exists and is not empty/i);
+    expect(res.warnings.join(' ')).not.toMatch(/could not create the workspace root/i);
+    // The pre-existing content is untouched.
+    expect((await stat(join(existingRoot, 'acme-api'))).isDirectory()).toBe(true);
+  });
+
+  it('degrades a workspace-root mkdir failure to a warning without failing the project (issue 100)', async () => {
+    // A file where a parent directory would need to be ⇒ recursive mkdir fails.
+    await writeFile(join(home, 'Developer', 'blocker'), 'i am a file, not a dir');
+    const res = await createWorkbenchProject({
+      workbenchRoot: workbench,
+      homeDir: home,
+      name: 'Blocked Root',
+      repos: [],
+      workspaceRoot: join(home, 'Developer', 'blocker', 'child'),
+    });
+
+    // The project is still created — the mkdir failure is only a warning.
+    expect(res.ok).toBe(true);
+    expect(res.dirName).toBe('blocked-root');
+    expect((await stat(join(workbench, 'blocked-root', 'CONFIG.md'))).isFile()).toBe(true);
+    expect(res.warnings.join(' ')).toMatch(/could not create the workspace root/i);
   });
 
   it('resolves the new project by workbench dir AND by any member-repo path', async () => {

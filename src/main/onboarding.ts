@@ -210,6 +210,28 @@ export async function createWorkbenchProject(
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
     }
 
+    // --- Create the workspace root (ADR-0017) ---------------------------------
+    // Make the project's promised code location real. Planning, Just-talk, and
+    // the no-repo scaffold Run all spawn their `claude` PTY with the workspace
+    // root as cwd, and node-pty cannot chdir into a directory that does not
+    // exist — the session dies immediately as "[process exited: 1]". Recursive,
+    // so an existing root (a repo-full project's, or one pointed at an existing
+    // folder like ~/Developer) is a harmless no-op; an EMPTY directory has no
+    // `.git`, so self-heal never mistakes it for an appeared repo. A failure
+    // here degrades to a warning — the Workbench project is already valid, and
+    // is NOT undone. This directory lives outside ~/Workbench, so it is not part
+    // of the workbench commit below.
+    if (plan.workspaceRoot.length > 0) {
+      try {
+        await mkdir(expandTilde(plan.workspaceRoot, homeDir), { recursive: true });
+      } catch (err) {
+        outcome.warnings = [
+          ...outcome.warnings,
+          `Could not create the workspace root ${plan.workspaceRoot} (${err instanceof Error ? err.message : String(err)}) — create it by hand before planning in this project.`,
+        ];
+      }
+    }
+
     // --- Append the registry entries ------------------------------------------
     // A repo-less project (ADR-0017) has NO entries: leave registry.md
     // untouched — registration is deferred until a repo actually appears
