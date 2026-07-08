@@ -566,8 +566,10 @@ export interface AfkScanResult {
    * `recalculating`); the sequence stops at the first predicted conflict, so
    * branches after it read `blocked behind NN`, and a branch that would introduce
    * ignored install artifacts badges the artifact verdict per offender (issue 106,
-   * superseding its textual verdict). Empty when previews are unavailable (git <
-   * 2.38) or the repo is mid-merge.
+   * superseding its textual verdict). A mid-merge repo instead badges every branch
+   * `suspended` ("merge in progress", issue 107) — no verdict is computed while a
+   * partial merge is unresolved. Empty only when previews are unavailable (git <
+   * 2.38).
    */
   previews: BranchPreview[];
   /**

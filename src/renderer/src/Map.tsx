@@ -1213,12 +1213,13 @@ function StatusBadge({ status }: { status: BacklogIssue['status'] }): JSX.Elemen
 }
 
 /**
- * The advisory merge-preview badge (issues 104, 105 & 106, ADR-0018): `merges
+ * The advisory merge-preview badge (issues 104, 105, 106 & 107, ADR-0018): `merges
  * clean`, `conflicts (files…)`, `blocked behind NN`, `won't merge — adds install
- * artifacts (paths…)`, or `recalculating…`, driven by the pure `previewBadge`
- * display selector. The conflict file list, the blocking branch, and the
- * offending artifact paths are in both the label and the tooltip so the blast
- * radius is visible without pressing Merge.
+ * artifacts (paths…)`, `recalculating…`, or (while the repo is mid-merge, issue
+ * 107) `merge in progress` — driven by the pure `previewBadge` display selector.
+ * The conflict file list, the blocking branch, and the offending artifact paths
+ * are in both the label and the tooltip so the blast radius is visible without
+ * pressing Merge.
  */
 function MergePreviewBadge({ verdict }: { verdict: MergePreviewVerdict }): JSX.Element {
   const badge = previewBadge(verdict);

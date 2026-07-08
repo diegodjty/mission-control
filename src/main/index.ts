@@ -723,11 +723,13 @@ function registerIpc(): void {
           // the coordinator return each branch's fresh-or-recalculating verdict
           // (the full sequential batch — clean / conflicts / blocked behind NN)
           // and (on a stamp/batch mismatch) queue one coalesced recompute.
-          // Suspended when the repo is mid-merge (a verdict would predict a press
-          // that can't happen, ADR-0018) or git is below the floor (`read`
-          // returns []).
+          // A mid-merge repo (issue 107, ADR-0018) is passed straight through:
+          // `read` suspends every branch ("merge in progress") and queues no
+          // recompute — a verdict would predict a press that can't happen — until
+          // the mid-merge clears and the stamp mismatch resumes it. Empty only
+          // when git is below the floor (`read` returns []).
           let previews: BranchPreview[] = [];
-          if (previewProbe.supported && !midMerge) {
+          if (previewProbe.supported) {
             const candidates = mergeReadinessOnDisk(branches).mergeable;
             if (candidates.length > 0) {
               const defaultBranch = await detectDefaultBranch(repo);
@@ -737,6 +739,7 @@ function registerIpc(): void {
                 repoPath: repo,
                 candidates,
                 currentStamp,
+                midMerge,
               });
             }
           }
