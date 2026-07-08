@@ -242,6 +242,92 @@ describe('preview coordinator — artifact supersession through the cache (issue
   });
 });
 
+describe('preview coordinator — per-repo independence (issue 108)', () => {
+  const KEY_A = '/repo/a';
+  const KEY_B = '/repo/b';
+
+  it('invalidating both repos queues ONE recompute EACH, running in parallel on distinct keys', async () => {
+    const gateA = deferred<SequenceSimOutcome>();
+    const gateB = deferred<SequenceSimOutcome>();
+    const started: string[] = [];
+    const simulate = vi.fn((repoPath: string) => {
+      started.push(repoPath);
+      return repoPath === KEY_A ? gateA.promise : gateB.promise;
+    });
+    const serializer = createRepoSerializer();
+    const coord = createPreviewCoordinator({ serializer, isSupported: () => true, simulate });
+
+    // Invalidate BOTH repos (cold cache) in the same tick — as a scan spanning
+    // two member repos does when both have a stale batch.
+    coord.read({ serializerKey: KEY_A, repoPath: KEY_A, candidates: [a, b], currentStamp: stampAB });
+    coord.read({ serializerKey: KEY_B, repoPath: KEY_B, candidates: [a, b], currentStamp: stampAB });
+
+    // One pending recompute EACH — not one shared, not two queued on one key.
+    expect(coord.pending(KEY_A)).toBe(true);
+    expect(coord.pending(KEY_B)).toBe(true);
+
+    await tick();
+    // BOTH simulations are in flight AT ONCE — distinct serializer keys don't
+    // serialize against each other, so the two repos recompute in parallel.
+    expect(started.sort()).toEqual([KEY_A, KEY_B]);
+    expect(serializer.activeKeys()).toBe(2);
+    expect(simulate).toHaveBeenCalledTimes(2);
+
+    // Resolve A with a conflict, B clean — each repo caches its OWN outcome.
+    gateA.resolve({ steps: [{ kind: 'clean' }, { kind: 'conflict', files: ['a.txt'] }] });
+    gateB.resolve(cleanChain2);
+    await tick();
+
+    const outA = coord.read({ serializerKey: KEY_A, repoPath: KEY_A, candidates: [a, b], currentStamp: stampAB });
+    const outB = coord.read({ serializerKey: KEY_B, repoPath: KEY_B, candidates: [a, b], currentStamp: stampAB });
+    // Repo A's conflict verdict never touched repo B's clean verdicts.
+    expect(outA.map((p) => p.verdict)).toEqual([
+      { kind: 'clean' },
+      { kind: 'conflicts', files: ['a.txt'] },
+    ]);
+    expect(outB.map((p) => p.verdict)).toEqual([{ kind: 'clean' }, { kind: 'clean' }]);
+    // Still exactly one simulation per repo (coalesced) — the fresh reads recompute nothing.
+    expect(simulate).toHaveBeenCalledTimes(2);
+  });
+
+  it('a stale repo A recomputes without disturbing repo B’s fresh cache', async () => {
+    const simulate = vi.fn(async (repoPath: string): Promise<SequenceSimOutcome> =>
+      repoPath === KEY_A
+        ? { steps: [{ kind: 'clean' }, { kind: 'clean' }] }
+        : { steps: [{ kind: 'clean' }, { kind: 'clean' }] },
+    );
+    const coord = createPreviewCoordinator({
+      serializer: createRepoSerializer(),
+      isSupported: () => true,
+      simulate,
+    });
+
+    // Warm both repos.
+    coord.read({ serializerKey: KEY_A, repoPath: KEY_A, candidates: [a, b], currentStamp: stampAB });
+    coord.read({ serializerKey: KEY_B, repoPath: KEY_B, candidates: [a, b], currentStamp: stampAB });
+    await tick();
+    expect(simulate).toHaveBeenCalledTimes(2);
+
+    // Only repo A's main moves → only repo A re-queues; repo B stays fresh.
+    const staleA = coord.read({
+      serializerKey: KEY_A,
+      repoPath: KEY_A,
+      candidates: [a, b],
+      currentStamp: stampAB_movedMain,
+    });
+    expect(staleA.every((p) => p.verdict?.kind === 'recalculating')).toBe(true);
+    const freshB = coord.read({ serializerKey: KEY_B, repoPath: KEY_B, candidates: [a, b], currentStamp: stampAB });
+    expect(freshB.every((p) => p.verdict?.kind === 'clean')).toBe(true);
+    expect(coord.pending(KEY_A)).toBe(true);
+    expect(coord.pending(KEY_B)).toBe(false); // repo B untouched by A's staleness
+
+    await tick();
+    // One extra simulation — repo A's — never repo B's.
+    expect(simulate).toHaveBeenCalledTimes(3);
+    expect(simulate.mock.calls.filter((c) => c[0] === KEY_B)).toHaveLength(1);
+  });
+});
+
 describe('preview coordinator — serializer discipline', () => {
   it('a real action queued during a burst waits behind AT MOST the one in-flight preview task', async () => {
     const serializer = createRepoSerializer();

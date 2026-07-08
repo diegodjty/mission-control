@@ -35,9 +35,8 @@ import {
   simulateSequence,
 } from './merge-preview-adapter';
 import { createPreviewCoordinator } from './merge-preview-coordinator';
-import { mergeReadinessOnDisk } from '../shared/worktree-scan';
+import { scanReposWithPreviews } from './merge-preview-scan';
 import { GIT_FLOOR_NOTE } from '../shared/git-version';
-import type { BranchPreview } from '../shared/merge-preview';
 import { RunLogStore } from './run-log-store';
 import { ReceiptWatcher } from './receipt-watcher';
 import { PlanningWatcher } from './planning-watcher';
@@ -705,50 +704,31 @@ function registerIpc(): void {
       // A workbench Project's scan spans EVERY member repo (issue 72) —
       // isolation is per repo, so in-flight/finished-unmerged Runs may live in
       // any of them — with the issue-status facts read from the workbench
-      // claim surface. Legacy: the one repo, in-repo reads, unchanged.
-      const repos = scanReposFor(req.projectPath);
+      // claim surface. Legacy: the one repo, in-repo reads, unchanged. The
+      // per-repo preview orchestration — independent caches, per-repo mid-merge
+      // suspension, and legacy⇔workbench badge parity — lives in
+      // `scanReposWithPreviews` (issue 108, ADR-0018) so it is unit-testable;
+      // every git/coordinator touch below is injected as a dep. Previews are a
+      // CACHE READ against the coordinator (the scan never computes) that queues
+      // at most one coalesced recompute per repo through the shared serializer.
       const scanOpts =
         identity?.kind === 'workbench' ? { workbenchIssuesRoot: identity.issuesRoot } : {};
-      const perRepo = await Promise.all(
-        repos.map(async (repo) => {
-          const branches = (await scanAfkBranches(repo, scanOpts)).map(
+      const scan = await scanReposWithPreviews(scanReposFor(req.projectPath), {
+        scanBranches: async (repo) =>
+          (await scanAfkBranches(repo, scanOpts)).map(
             (b): AfkBranchFacts => ({ ...b, repoPath: repo }),
-          );
-          // Report whether a repo is left mid-merge by a partial merge conflict
-          // (issue 24) so the renderer can block a new drain/Run and offer Abort.
-          const midMerge = await isMidMerge(repo);
-          // Merge previews (issues 104 & 105): a CACHE READ against the
-          // coordinator — the scan itself never computes. Read the cheap
-          // freshness stamp (default + ordered finished-branch tips), then let
-          // the coordinator return each branch's fresh-or-recalculating verdict
-          // (the full sequential batch — clean / conflicts / blocked behind NN)
-          // and (on a stamp/batch mismatch) queue one coalesced recompute.
-          // Suspended when the repo is mid-merge (a verdict would predict a press
-          // that can't happen, ADR-0018) or git is below the floor (`read`
-          // returns []).
-          let previews: BranchPreview[] = [];
-          if (previewProbe.supported && !midMerge) {
-            const candidates = mergeReadinessOnDisk(branches).mergeable;
-            if (candidates.length > 0) {
-              const defaultBranch = await detectDefaultBranch(repo);
-              const currentStamp = await readPreviewStamp(repo, defaultBranch, candidates);
-              previews = previewCoordinator.read({
-                serializerKey: normalizeProjectKey(repo),
-                repoPath: repo,
-                candidates,
-                currentStamp,
-              });
-            }
-          }
-          return { branches, midMerge, previews };
-        }),
-      );
+          ),
+        isMidMerge,
+        previewSupported: previewProbe.supported,
+        detectDefaultBranch,
+        readStamp: readPreviewStamp,
+        readPreviews: (input) => previewCoordinator.read(input),
+        serializerKeyFor: normalizeProjectKey,
+      });
       return {
-        branches: perRepo
-          .flatMap((r) => r.branches)
-          .sort((a, b) => a.issueId - b.issueId),
-        midMerge: perRepo.some((r) => r.midMerge),
-        previews: perRepo.flatMap((r) => r.previews),
+        branches: scan.branches,
+        midMerge: scan.midMerge,
+        previews: scan.previews,
         // One passive note (ADR-0018), only once the probe has run AND git is
         // below the floor — never a flash before the probe resolves.
         previewNote: previewProbe.done && !previewProbe.supported ? GIT_FLOOR_NOTE : null,
