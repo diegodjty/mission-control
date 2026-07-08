@@ -558,13 +558,16 @@ export interface AfkScanResult {
    */
   midMerge: boolean;
   /**
-   * Per-branch merge-preview verdicts (issues 104 & 105, ADR-0018), computed in
-   * the background and read from the coordinator's cache on this scan (the scan
+   * Per-branch merge-preview verdicts (issues 104, 105 & 106, ADR-0018), computed
+   * in the background and read from the coordinator's cache on this scan (the scan
    * never computes). Every finished-unmerged branch per repo carries a verdict
    * from the FULL sequential merge in merge order (`clean` / `conflicts (files…)`
-   * / `blocked behind NN` / `recalculating`); the sequence stops at the first
-   * predicted conflict, so branches after it read `blocked behind NN`. Empty when
-   * previews are unavailable (git < 2.38) or the repo is mid-merge.
+   * / `blocked behind NN` / `won't merge — adds install artifacts` /
+   * `recalculating`); the sequence stops at the first predicted conflict, so
+   * branches after it read `blocked behind NN`, and a branch that would introduce
+   * ignored install artifacts badges the artifact verdict per offender (issue 106,
+   * superseding its textual verdict). Empty when previews are unavailable (git <
+   * 2.38) or the repo is mid-merge.
    */
   previews: BranchPreview[];
   /**

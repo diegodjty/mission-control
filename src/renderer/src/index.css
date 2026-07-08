@@ -767,6 +767,18 @@ body.is-col-resizing {
   background: var(--red-bg);
 }
 
+/* Artifact hygiene (issue 106): the branch would add a committed node_modules /
+   build-output path, so Merge refuses it at the press-time preflight — "won't
+   merge" regardless of its textual verdict. Solid red (a hard refusal, unlike
+   conflicts' "this branch collides" or blocked's dashed downstream), so the worst
+   badge lie (clean under merge-tree alone) reads as the outright block it is. */
+.run-badge--preview-artifact {
+  color: var(--red);
+  border-color: var(--red-border);
+  background: var(--red-bg);
+  font-weight: 600;
+}
+
 .run-badge--preview-recalculating {
   color: var(--fg-mute);
   border-color: var(--amber-border);

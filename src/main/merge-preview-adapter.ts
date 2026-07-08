@@ -1,5 +1,5 @@
 /**
- * Preview simulation adapter (main process) — issues 104 & 105, ADR-0018.
+ * Preview simulation adapter (main process) — issues 104, 105 & 106, ADR-0018.
  *
  * The thin git edge for merge previews: probe the git version once, resolve
  * branch tips (the cheap scan-tick READ), and run the read-only
@@ -30,6 +30,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { branchFor } from '../shared/isolation-policy';
 import { parseGitVersion, supportsMergeTree } from '../shared/git-version';
+import { ignoredArtifactPaths } from '../shared/artifact-hygiene';
 import type {
   MergeCandidate,
   PreviewStamp,
@@ -161,15 +162,23 @@ async function commitMergedTree(
 }
 
 /**
- * Simulate the FULL merge sequence for a stamp (issue 105): fold the ordered
- * branch tips into the default tip one at a time, chaining each clean step
- * through a synthesized commit, and STOP at the first conflict. Returns one
- * `steps` entry per branch simulated (up to and including the first conflict) —
- * the pure decision module turns that into per-branch verdicts.
+ * Recompute a stamp's whole preview (issues 105 & 106): the merge-tree SEQUENCE
+ * plus the per-branch install-artifact hygiene facts, packaged together so the
+ * coordinator caches and stamps them as one unit.
  *
- * `stamp.branchTips` are the ordered (ascending issue id) finished-branch tips
- * and `stamp.defaultTip` the base — the exact tips the scan observed, so the
- * verdict the coordinator caches is stamped with what it was computed against.
+ * The sequence (105): fold the ordered branch tips into the default tip one at a
+ * time, chaining each clean step through a synthesized commit, and STOP at the
+ * first conflict — one `steps` entry per branch simulated (up to and including
+ * the first conflict). `stamp.branchTips` are the ordered (ascending issue id)
+ * finished-branch tips and `stamp.defaultTip` the base — the exact tips the scan
+ * observed, so the verdict the coordinator caches is stamped with what it was
+ * computed against.
+ *
+ * The artifact facts (106): the ignored install-artifact paths EACH branch would
+ * introduce, computed for every candidate independent of the sequence stop (a
+ * per-branch stable diff, see `readArtifactPaths`). The pure decision module
+ * turns both into per-branch verdicts, the artifact fact superseding the textual
+ * one per offender.
  */
 export async function simulateSequence(
   repoPath: string,
@@ -184,7 +193,49 @@ export async function simulateSequence(
     // Clean: advance the base to "everything merged so far" for the next branch.
     base = await commitMergedTree(repoPath, step.mergedTree as string, base, branchTip);
   }
-  return { steps };
+  const artifactPaths = await readArtifactPaths(repoPath, stamp);
+  return { steps, artifactPaths };
+}
+
+/**
+ * The ignored install-artifact paths each candidate branch would INTRODUCE
+ * relative to the default tip (issue 98/106), one entry per branch in merge
+ * order (parallel to `stamp.branchTips`) — `git diff --name-only
+ * <defaultTip>...<branchTip>` (the changes on the branch since it diverged),
+ * filtered through the shared pure hygiene rule. This mirrors the press-time
+ * merge preflight's own check (`run-merge.ts`) so the badge predicts exactly what
+ * pressing Merge would refuse.
+ *
+ * A per-branch STABLE fact, so — unlike the merge-tree sequence — it is computed
+ * for EVERY candidate, including any past the sequence's first-conflict stop: the
+ * hygiene refusal fires for any requested offender regardless of merge order. A
+ * branch/diff that can't be read yields [] (never a false offender); the real
+ * Merge preflight is the authority.
+ */
+async function readArtifactPaths(repoPath: string, stamp: PreviewStamp): Promise<string[][]> {
+  return Promise.all(
+    stamp.branchTips.map((branchTip) => branchArtifacts(repoPath, stamp.defaultTip, branchTip)),
+  );
+}
+
+/** The ignored-artifact paths one branch tip would add over the default tip. */
+async function branchArtifacts(
+  repoPath: string,
+  defaultTip: string,
+  branchTip: string,
+): Promise<string[]> {
+  try {
+    const { stdout } = await exec(
+      'git',
+      ['diff', '--name-only', `${defaultTip}...${branchTip}`],
+      { cwd: repoPath, maxBuffer: 16 * 1024 * 1024 },
+    );
+    return ignoredArtifactPaths(
+      stdout.split('\n').map((line) => line.trim()).filter((line) => line.length > 0),
+    );
+  } catch {
+    return [];
+  }
 }
 
 /**

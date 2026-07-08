@@ -4,6 +4,7 @@ import {
   decidePreviews,
   previewNeedsRecompute,
   sequenceVerdicts,
+  applyArtifactVerdicts,
   stampsEqual,
   slugsEqual,
   previewBadge,
@@ -12,6 +13,7 @@ import {
   type CachedPreview,
   type PreviewStamp,
   type SequenceSimOutcome,
+  type SettledVerdict,
 } from './merge-preview';
 
 const a: MergeCandidate = { issueId: 4, slug: '04-a' };
@@ -104,6 +106,42 @@ describe('sequenceVerdicts — the sequential badge mapping (issue 105)', () => 
 
   it('a single clean branch badges clean', () => {
     expect(sequenceVerdicts([a], { steps: [{ kind: 'clean' }] })).toEqual([{ kind: 'clean' }]);
+  });
+});
+
+describe('applyArtifactVerdicts — per-offender supersession (issue 106)', () => {
+  it('is a no-op when artifact paths are absent (a pre-106 cache)', () => {
+    const textual: SettledVerdict[] = [{ kind: 'clean' }, { kind: 'clean' }];
+    expect(applyArtifactVerdicts(textual, undefined)).toEqual(textual);
+  });
+
+  it('supersedes only the offending branch — clean siblings are untouched', () => {
+    const textual: SettledVerdict[] = [{ kind: 'clean' }, { kind: 'clean' }, { kind: 'clean' }];
+    expect(applyArtifactVerdicts(textual, [[], ['node_modules'], []])).toEqual([
+      { kind: 'clean' },
+      { kind: 'artifact', paths: ['node_modules'] },
+      { kind: 'clean' },
+    ]);
+  });
+
+  it('an empty path list is NOT an offender (no supersession)', () => {
+    expect(applyArtifactVerdicts([{ kind: 'clean' }], [[]])).toEqual([{ kind: 'clean' }]);
+  });
+
+  it('supersedes the offender’s own textual CONFLICT but leaves downstream blocked-behind alone', () => {
+    // b conflicts textually (so c is blocked behind it) AND b is an offender:
+    // b badges artifact, c keeps its sequence verdict — the supersession moves
+    // only the offender's own badge.
+    const textual: SettledVerdict[] = [
+      { kind: 'clean' },
+      { kind: 'conflicts', files: ['shared.txt'] },
+      { kind: 'blocked', behindIssueId: 7 },
+    ];
+    expect(applyArtifactVerdicts(textual, [[], ['dist/bundle.js'], []])).toEqual([
+      { kind: 'clean' },
+      { kind: 'artifact', paths: ['dist/bundle.js'] },
+      { kind: 'blocked', behindIssueId: 7 },
+    ]);
   });
 });
 
@@ -206,6 +244,90 @@ describe('decidePreviews — full-batch sequential verdicts (issue 105)', () => 
   });
 });
 
+describe('decidePreviews — artifact-hygiene supersession matrix (issue 106)', () => {
+  const cleanChain3: SequenceSimOutcome = {
+    steps: [{ kind: 'clean' }, { kind: 'clean' }, { kind: 'clean' }],
+  };
+
+  it('offender among clean siblings: the offender badges artifact, siblings keep clean', () => {
+    const outcome: SequenceSimOutcome = { ...cleanChain3, artifactPaths: [[], ['node_modules'], []] };
+    const out = decidePreviews({
+      candidates: [a, b, c],
+      currentStamp: stampABC,
+      cached: cache(stampABC, ['04-a', '07-b', '09-c'], outcome),
+    });
+    expect(out).toEqual([
+      { issueId: 4, slug: '04-a', verdict: { kind: 'clean' } },
+      { issueId: 7, slug: '07-b', verdict: { kind: 'artifact', paths: ['node_modules'] } },
+      { issueId: 9, slug: '09-c', verdict: { kind: 'clean' } },
+    ]);
+  });
+
+  it('offender FIRST supersedes its clean verdict; later branches unaffected', () => {
+    const outcome: SequenceSimOutcome = {
+      ...cleanChain3,
+      artifactPaths: [['node_modules/foo', 'dist/x.js'], [], []],
+    };
+    const out = decidePreviews({
+      candidates: [a, b, c],
+      currentStamp: stampABC,
+      cached: cache(stampABC, ['04-a', '07-b', '09-c'], outcome),
+    });
+    expect(out.map((p) => p.verdict)).toEqual([
+      { kind: 'artifact', paths: ['node_modules/foo', 'dist/x.js'] },
+      { kind: 'clean' },
+      { kind: 'clean' },
+    ]);
+  });
+
+  it('offender that ALSO textually conflicts still badges artifact; later branch stays blocked behind it', () => {
+    const outcome: SequenceSimOutcome = {
+      steps: [{ kind: 'clean' }, { kind: 'conflict', files: ['shared.txt'] }],
+      artifactPaths: [[], ['out/app.js'], []],
+    };
+    const out = decidePreviews({
+      candidates: [a, b, c],
+      currentStamp: stampABC,
+      cached: cache(stampABC, ['04-a', '07-b', '09-c'], outcome),
+    });
+    expect(out).toEqual([
+      { issueId: 4, slug: '04-a', verdict: { kind: 'clean' } },
+      { issueId: 7, slug: '07-b', verdict: { kind: 'artifact', paths: ['out/app.js'] } },
+      { issueId: 9, slug: '09-c', verdict: { kind: 'blocked', behindIssueId: 7 } },
+    ]);
+  });
+
+  it('the artifact fact participates in staleness: recalculating on a moved tip, then the real verdict once removed', () => {
+    const offender: SequenceSimOutcome = { ...cleanChain3, artifactPaths: [[], ['node_modules'], []] };
+
+    // Fresh cache → the offender badges the artifact verdict.
+    const fresh = decidePreviews({
+      candidates: [a, b, c],
+      currentStamp: stampABC,
+      cached: cache(stampABC, ['04-a', '07-b', '09-c'], offender),
+    });
+    expect(fresh[1].verdict).toEqual({ kind: 'artifact', paths: ['node_modules'] });
+
+    // The offender's branch is amended (its tip moves) → cache stale → every
+    // branch recalculating, NEVER the stale artifact verdict.
+    const amended: PreviewStamp = { defaultTip: 'main-aaa', branchTips: ['t4', 'AMENDED', 't9'] };
+    const recomputing = decidePreviews({
+      candidates: [a, b, c],
+      currentStamp: amended,
+      cached: cache(stampABC, ['04-a', '07-b', '09-c'], offender),
+    });
+    expect(recomputing.every((p) => p.verdict?.kind === 'recalculating')).toBe(true);
+
+    // The recompute lands with the artifact removed → a real merge verdict.
+    const cleaned = decidePreviews({
+      candidates: [a, b, c],
+      currentStamp: amended,
+      cached: cache(amended, ['04-a', '07-b', '09-c'], { ...cleanChain3, artifactPaths: [[], [], []] }),
+    });
+    expect(cleaned[1].verdict).toEqual({ kind: 'clean' });
+  });
+});
+
 describe('branchPreviewsEqual — the scan no-change guard', () => {
   const cleanA: BranchPreview = { issueId: 4, slug: '04-a', verdict: { kind: 'clean' } };
 
@@ -229,6 +351,16 @@ describe('branchPreviewsEqual — the scan no-change guard', () => {
     const b7: BranchPreview = { ...cleanA, verdict: { kind: 'blocked', behindIssueId: 7 } };
     expect(branchPreviewsEqual([b4], [b7])).toBe(false);
     expect(branchPreviewsEqual([b4], [{ ...b4 }])).toBe(true);
+  });
+
+  it('is false when an artifact path list changes (a path added/removed must refresh)', () => {
+    const p1: BranchPreview = { ...cleanA, verdict: { kind: 'artifact', paths: ['node_modules'] } };
+    const p2: BranchPreview = {
+      ...cleanA,
+      verdict: { kind: 'artifact', paths: ['node_modules', 'dist/x'] },
+    };
+    expect(branchPreviewsEqual([p1], [p2])).toBe(false);
+    expect(branchPreviewsEqual([p1], [{ ...p1 }])).toBe(true);
   });
 
   it('is false when the branch set changes length', () => {
@@ -263,6 +395,14 @@ describe('previewBadge — the pure display mapping', () => {
     expect(badge.label).toBe('blocked behind 07');
     expect(badge.title).toContain('07');
     expect(badge.tone).toBe('blocked');
+  });
+
+  it('names the offending paths in an artifact verdict (issue 106)', () => {
+    const badge = previewBadge({ kind: 'artifact', paths: ['node_modules', 'dist/bundle.js'] });
+    expect(badge.label).toBe("won't merge — adds install artifacts (node_modules, dist/bundle.js)");
+    expect(badge.title).toContain('node_modules');
+    expect(badge.title).toContain('dist/bundle.js');
+    expect(badge.tone).toBe('artifact');
   });
 
   it('labels a recalculating verdict', () => {
