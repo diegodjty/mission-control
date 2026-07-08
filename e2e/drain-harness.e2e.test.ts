@@ -46,6 +46,19 @@
  *                            real file read; a fixture drain's end writes ONE
  *                            dated journal artifact into the workbench memory
  *                            (a second drain the same day gets its own file).
+ *   9. Merge previews      — issue 109 (ADR-0018): the assembled preview
+ *                            pipeline (real serializer + coordinator + the
+ *                            merge-tree simulation adapter) wired exactly as
+ *                            index.ts wires it. 9a: after parallel scripted Runs
+ *                            finish, each finished-unmerged branch carries a
+ *                            badge before Merge is pressed (a clean batch), and a
+ *                            clean Merge takes the badges away WITH the branches.
+ *                            9b: an engineered second-branch conflict fixture —
+ *                            first branch `clean`, second `conflicts` naming the
+ *                            file, third `blocked behind` the second. (The full
+ *                            verdict matrix lives in unit/integration tests; the
+ *                            e2e proves only the feature is wired end-to-end —
+ *                            the machine gate before any human QA.)
  *
  * Checklist items that genuinely need the live Electron shell are declared
  * `manual-only` at the bottom (as named, skipped specs) — zero silent gaps.
@@ -66,8 +79,23 @@ import {
   worktreePathFor,
   scanAfkBranches,
   isMidMerge,
+  detectDefaultBranch,
 } from '../src/main/git-worktree-adapter';
 import { mergeRuns, defaultMergeScriptPath } from '../src/main/run-merge';
+import {
+  probeMergeTreeSupport,
+  readPreviewStamp,
+  simulateSequence,
+} from '../src/main/merge-preview-adapter';
+import { createPreviewCoordinator } from '../src/main/merge-preview-coordinator';
+import {
+  scanReposWithPreviews,
+  type RepoPreviewScanDeps,
+  type ReposScanResult,
+} from '../src/main/merge-preview-scan';
+import { createRepoSerializer } from '../src/shared/repo-serializer';
+import { normalizeProjectKey } from '../src/shared/project-registry';
+import { previewBadge, type MergePreviewVerdict } from '../src/shared/merge-preview';
 import { readCoreMemory, writeDrainJournal } from '../src/main/memory-files';
 import { buildRunPrompt } from '../src/main/resolve-run-command';
 import { buildDispatcherPrompt } from '../src/main/dispatcher-session';
@@ -111,6 +139,8 @@ import type { RunLogRecord } from '../src/shared/ipc-contract';
 import {
   seedSandbox,
   sandboxIssue,
+  issueFileContent,
+  SANDBOX_ISSUES,
   git,
   waitFor,
   sleep,
@@ -176,6 +206,85 @@ async function waitForReceipt(issueId: number): Promise<RunLogRecord> {
 /** Current committed-history commit count on main. */
 async function commitCount(): Promise<number> {
   return Number((await git(repo, 'rev-list', '--count', 'HEAD')).trim());
+}
+
+// --- Merge-preview pipeline (issue 109, ADR-0018) ----------------------------
+// The assembled scan drives the REAL preview machinery — no fakes on the preview
+// path — so the e2e proves the feature is wired end-to-end, not just that the
+// pure modules agree (that matrix is unit-/integration-tested).
+
+/** A settled (displayable) verdict — not the transient recalculating/suspended. */
+function isSettledVerdict(v: MergePreviewVerdict | null): boolean {
+  return v !== null && v.kind !== 'recalculating' && v.kind !== 'suspended';
+}
+
+/**
+ * Assemble the merge-preview scan deps EXACTLY as `index.ts` wires them: a
+ * per-repo serializer, the coordinator (verdict cache + one coalesced recompute
+ * per repo), and the real `merge-tree`/`commit-tree` simulation adapter. So a
+ * scan through this is the same orchestration production runs — the coordinator
+ * read queues its recompute through the serializer, then later reads return the
+ * cached sequence verdicts.
+ */
+function realPreviewDeps(supported: boolean): RepoPreviewScanDeps {
+  const serializer = createRepoSerializer();
+  const coordinator = createPreviewCoordinator({
+    serializer,
+    isSupported: () => supported,
+    simulate: (repoPath, stamp) => simulateSequence(repoPath, stamp),
+  });
+  return {
+    scanBranches: async (r) =>
+      (await scanAfkBranches(r)).map((b) => ({ ...b, repoPath: r })),
+    isMidMerge,
+    previewSupported: supported,
+    detectDefaultBranch,
+    readStamp: readPreviewStamp,
+    readPreviews: (input) => coordinator.read(input),
+    serializerKeyFor: (r) => normalizeProjectKey(r),
+  };
+}
+
+/**
+ * Drive the ~1.5 s scan poll the way the app does: re-read the assembled scan
+ * until `done(scan)` holds. The first read finds a cold cache — every badge
+ * `recalculating` — and queues ONE coalesced recompute through the serializer; a
+ * later read returns the settled sequence verdicts. Throws with `label` on
+ * timeout so a hang fails loudly.
+ */
+async function pollScan(
+  deps: RepoPreviewScanDeps,
+  done: (scan: ReposScanResult) => boolean,
+  label: string,
+  timeoutMs = 5000,
+): Promise<ReposScanResult> {
+  const deadline = Date.now() + timeoutMs;
+  let scan = await scanReposWithPreviews([repo], deps);
+  while (Date.now() < deadline) {
+    if (done(scan)) return scan;
+    await sleep(30);
+    scan = await scanReposWithPreviews([repo], deps);
+  }
+  throw new Error(`pollScan timed out after ${timeoutMs}ms: ${label}`);
+}
+
+/**
+ * Hand-build a finished-unmerged `afk/<slug>` branch off main: apply `edit` (the
+ * branch's work), flip its issue file to `done`, and commit — the exact on-disk
+ * shape a finished isolated Run leaves (committed `done`, unmerged), which the
+ * scan reads as a Merge candidate. Used to engineer the conflict fixture (9b)
+ * with precise per-branch edits the scripted Worker (unique files only) can't
+ * produce.
+ */
+async function makeFinishedBranch(slug: string, edit: () => Promise<void>): Promise<void> {
+  const issue = SANDBOX_ISSUES.find((i) => i.slug === slug);
+  if (!issue) throw new Error(`no sandbox issue for slug ${slug}`);
+  await git(repo, 'checkout', '-b', branchFor(slug), 'main');
+  await edit();
+  await writeFile(join(repo, 'issues', `${slug}.md`), issueFileContent(issue, 'done'));
+  await git(repo, 'add', '.');
+  await git(repo, 'commit', '-m', `afk: complete ${slug}`);
+  await git(repo, 'checkout', 'main');
 }
 
 beforeEach(async () => {
@@ -1096,6 +1205,144 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
     const secondEntry = await readFile(second.path!, 'utf8');
     expect(secondEntry).toContain('no Run reported a Receipt this drain');
     expect(secondEntry).toContain('Adopted stray Receipt(s) on main');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Scenario 9 — Merge previews (issue 109, ADR-0018). The minimal badge
+  // assertions that prove the feature is wired end-to-end in the ASSEMBLED drain
+  // flow (machine-before-human rule): after parallel scripted Runs finish, every
+  // finished-unmerged branch carries a preview badge BEFORE Merge is pressed, and
+  // a clean Merge removes the badges WITH the branches. The preview machinery is
+  // the real one — the per-repo serializer, the coordinator (cache + coalesced
+  // recompute), and the `merge-tree` simulation adapter — assembled exactly as
+  // index.ts assembles it; only the ~1.5 s poll is driven by the harness. The
+  // full verdict matrix stays in the unit/integration suites (PRD Testing
+  // Decisions); the e2e proves only that finished Runs produce badges here.
+  // ---------------------------------------------------------------------------
+  it('Scenario 9: parallel Runs finish → each finished-unmerged branch carries a badge; a clean Merge takes the badges with the branches', async () => {
+    const supported = await probeMergeTreeSupport();
+    expect(supported, 'git ≥ 2.38 required for merge previews').toBe(true);
+
+    // Two parallel scripted Runs, exactly as Scenario 4: real isolation, real
+    // worktrees, well-behaved Workers that commit their own work + Receipt.
+    const six = sandboxIssue(6);
+    const seven = sandboxIssue(7);
+    const iso = await applyIsolation(repo, [
+      { issueId: 6, slug: six.slug },
+      { issueId: 7, slug: seven.slug },
+    ]);
+    expect(iso.parallel).toBe(true);
+    const wt6 = worktreePathFor(repo, six.slug);
+    const wt7 = worktreePathFor(repo, seven.slug);
+    ingestFrom(sandbox.issuesDir, join(wt6, 'issues'), join(wt7, 'issues'));
+    await runFakeWorker({ repo, worktree: wt6, issue: six });
+    await runFakeWorker({ repo, worktree: wt7, issue: seven });
+    await waitForReceipt(6);
+    await waitForReceipt(7);
+
+    // Ground truth before Merge: both branches are finished-unmerged (the
+    // candidates a badge must cover).
+    const facts = await scanAfkBranches(repo);
+    const finishedUnmerged = facts
+      .filter((f) => f.committedStatus === 'done' && !f.mergedIntoMain)
+      .map((f) => f.issueId)
+      .sort((a, b) => a - b);
+    expect(finishedUnmerged).toEqual([6, 7]);
+
+    // Drive the assembled scan until the cold-cache `recalculating` badges settle.
+    const deps = realPreviewDeps(supported);
+    const before = await pollScan(
+      deps,
+      (s) => s.previews.length === 2 && s.previews.every((p) => isSettledVerdict(p.verdict)),
+      'clean-batch previews settle before Merge',
+    );
+
+    // AC1: every finished-unmerged branch carries a badge — a real verdict, one
+    // per candidate, no orphan row. This disjoint batch is `clean`.
+    expect(before.previews.map((p) => p.issueId).sort((a, b) => a - b)).toEqual(finishedUnmerged);
+    for (const p of before.previews) {
+      expect(p.verdict).toEqual({ kind: 'clean' });
+      expect(previewBadge(p.verdict!).tone).toBe('clean');
+    }
+    expect(before.midMerge).toBe(false);
+
+    // Clean Merge via the REAL afk-merge.sh: both branches land AND are removed.
+    const result = await mergeRuns(repo, [six.slug, seven.slug], { scriptPath: SCRIPT });
+    expect(result.ok).toBe(true);
+    expect(result.conflicted).toBe(false);
+    expect(result.merged.sort()).toEqual([six.slug, seven.slug]);
+
+    // AC3: with the branches gone, so are their badges — the scan finds no
+    // finished-unmerged candidate, so it reads (and caches) no preview for them.
+    const after = await pollScan(
+      deps,
+      (s) => s.branches.every((b) => b.slug !== six.slug && b.slug !== seven.slug),
+      'merged branches gone from the scan',
+    );
+    expect(after.branches.some((b) => b.slug === six.slug || b.slug === seven.slug)).toBe(false);
+    expect(after.previews).toEqual([]);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Scenario 9b — the engineered second-branch conflict (issue 109, AC2). Three
+  // finished Runs whose SEQUENTIAL merge (ascending issue id, what pressing Merge
+  // does) yields the tell-tale shape: the first branch `clean`, the second
+  // `conflicts` naming the file, the third `blocked behind` the second — the
+  // pairwise-wrong case (each merges clean against main, but the second collides
+  // with the first once it lands) that motivated sequential simulation. The
+  // conflict is engineered per-branch, so it's a hand-built fixture rather than
+  // scripted Workers (which only ever write unique per-slug files).
+  // ---------------------------------------------------------------------------
+  it('Scenario 9b: an engineered second-branch conflict — first clean, second conflicts (named file), third blocked behind it', async () => {
+    const supported = await probeMergeTreeSupport();
+    expect(supported, 'git ≥ 2.38 required for merge previews').toBe(true);
+
+    // A shared file on main that the two early branches edit differently.
+    await writeFile(join(repo, 'conflict-target.txt'), 'top\nMIDDLE\nbottom\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-m', 'seed conflict-target on main');
+
+    // Three finished Runs in the fixed merge order (ascending id: 4, 6, 7): 04
+    // edits the middle line, 06 edits the SAME line differently, 07 touches a
+    // disjoint file. Sequentially 04 lands clean, 06 then conflicts on
+    // conflict-target, and 07 never merges (blocked behind 06).
+    await makeFinishedBranch('04-independent', async () => {
+      await writeFile(join(repo, 'conflict-target.txt'), 'top\nFROM-04\nbottom\n');
+    });
+    await makeFinishedBranch('06-parallel-a', async () => {
+      await writeFile(join(repo, 'conflict-target.txt'), 'top\nFROM-06\nbottom\n');
+    });
+    await makeFinishedBranch('07-parallel-b', async () => {
+      await writeFile(join(repo, 'disjoint.txt'), 'only 07 touches this\n');
+    });
+
+    const deps = realPreviewDeps(supported);
+    const scan = await pollScan(
+      deps,
+      (s) => s.previews.length === 3 && s.previews.every((p) => isSettledVerdict(p.verdict)),
+      'conflict-fixture previews settle',
+    );
+
+    const byId = new Map(scan.previews.map((p) => [p.issueId, p.verdict!]));
+    // First branch: clean (nothing conflicts with the sequence head).
+    expect(byId.get(4)).toEqual({ kind: 'clean' });
+    // Second branch: conflicts, naming at least the shared file.
+    const second = byId.get(6)!;
+    expect(second.kind).toBe('conflicts');
+    if (second.kind === 'conflicts') {
+      expect(second.files).toContain('conflict-target.txt');
+    }
+    // Third branch: blocked behind the second — no speculative verdict past the stop.
+    expect(byId.get(7)).toEqual({ kind: 'blocked', behindIssueId: 6 });
+
+    // The human-facing badge each verdict renders (the renderer's input).
+    expect(previewBadge(byId.get(4)!).tone).toBe('clean');
+    expect(previewBadge(second).label).toContain('conflict-target.txt');
+    expect(previewBadge(byId.get(7)!).label).toBe('blocked behind 06');
+
+    // Not mid-merge; the engineered conflict didn't smear an artifact verdict.
+    expect(scan.midMerge).toBe(false);
+    expect(scan.previews.some((p) => p.verdict?.kind === 'artifact')).toBe(false);
   });
 });
 
