@@ -99,6 +99,14 @@ A **clean, conflict-free Merge auto-proceeds** (refines ADR-0002's "human-trigge
 A Map-level button that appears when parallel **Runs** complete; it integrates their `afk/NN-slug` branches (via `afk-merge.sh`) and reports any conflicts. Human-triggered, never automatic.
 _Avoid_: sync, integrate.
 
+**Merge preview**:
+The background-computed prediction of what pressing **Merge** now would do, per finished-unmerged `afk/` branch. Simulated over the **full merge sequence in current merge order** (ascending issue id — the order `mergeReadiness` already fixes), never pairwise-against-main: pairwise can badge branch 2-of-N "clean" and still conflict at press time, which defeats the feature. The simulation **stops at the first predicted conflict** — later branches read "blocked behind NN", because that is what `afk-merge.sh` actually does. Purely advisory: the Merge and Abort affordances are unchanged.
+Read-only means: a preview never touches **refs, worktrees, or the index**; unreachable object-database writes (`merge-tree --write-tree` / `commit-tree` chaining, later gc-pruned) are acceptable by design. Requires git ≥ 2.38 (`merge-tree --write-tree`); on older git there are **no badges plus one passive note**, no fallback merge machinery.
+The badge predicts **the outcome of pressing Merge, restricted to per-branch, stable facts**. Verdicts: `clean` / `conflicts (files…)` / `blocked behind NN` / `won't merge — adds install artifacts` / `recalculating`. The issue-98 artifact-hygiene refusal IS folded in (per-offender only — innocent siblings keep their real merge verdicts; the batch-level refusal stays a press-time message). NOT modeled: CHOKEPOINT union auto-resolution (badge is conservative on legacy hand-written confs) and transient repo states (dirty main, wrong branch — point-in-time facts, not branch properties).
+**Staleness:** every preview is stamped with the (default-branch tip, ordered finished-branch tips) it was computed against; the existing ~1.5 s scan tick compares stamps — a mismatch flips affected badges to `recalculating` (never a stale verdict) and queues **one coalesced recompute per repo** through the per-repo serializer. A repo that is **mid-merge suspends its previews** ("merge in progress", not `recalculating`) until main is clean again.
+**Scope (v1, ADR-0018):** finished-unmerged branches only (no wip early warnings); verdicts live in **main-process memory** and travel with the scan result — no disk artifact, no Workbench writes, and the Dispatcher/Inbox are not consumers; previews never gate or reorder the Merge.
+_Avoid_: dry-run (`afk-merge.sh --dry-run` does not detect conflicts), merge check.
+
 ## Example dialogue
 
 > **Dev:** "When I hit *drain* with 5 eligible issues, do I get 5 **Runs** at once?"
@@ -113,6 +121,7 @@ _Avoid_: sync, integrate.
 
 ## Open (not yet resolved)
 
+- **Merge preview** follow-ups, deliberately deferred by ADR-0018: wip early-warning previews, auto-rebase of finished branches after each merge (needs its own grill — history rewrite on branches Receipts reference), and conflict-aware merge ordering (the sequence simulation already produces the data).
 - Detailed design of the **Planning view** (split-screen interview + live docs) — direction set, specifics deferred.
 - Portfolio overview **Window** (all Projects + stages on one page) — a later additive view, not v1.
 - How the **Map** gets live updates — file-watch on `issues/` vs. polling. Implementation-level; defer to build-time.
