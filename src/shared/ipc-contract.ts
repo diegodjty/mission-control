@@ -13,6 +13,7 @@ import type { CompletionRecord, RunOutcome } from './completion-parser';
 import type { IsolationRun } from './isolation-policy';
 import type { PipelineStage } from './project-registry';
 import type { AfkBranchFacts } from './worktree-scan';
+import type { BranchPreview } from './merge-preview';
 
 /** Channel names. Grouped by direction for clarity. */
 export const IpcChannel = {
@@ -556,6 +557,21 @@ export interface AfkScanResult {
    * drain/Run and offer an Abort until it is resolved.
    */
   midMerge: boolean;
+  /**
+   * Per-branch merge-preview verdicts (issue 104, ADR-0018), computed in the
+   * background and read from the coordinator's cache on this scan (the scan never
+   * computes). In this tracer slice only the FIRST mergeable branch per repo
+   * carries a verdict (`clean` / `conflicts` / `recalculating`); later branches
+   * appear with `verdict: null` — full-batch verdicts are issue 105. Empty when
+   * previews are unavailable (git < 2.38) or the repo is mid-merge.
+   */
+  previews: BranchPreview[];
+  /**
+   * The single passive note shown when merge previews are unavailable because
+   * git is below the 2.38 floor (ADR-0018 degradation), else null. Never
+   * accompanied by badges.
+   */
+  previewNote: string | null;
 }
 
 export interface AfkDiscardRequest {

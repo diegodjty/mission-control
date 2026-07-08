@@ -116,6 +116,7 @@ import {
   scanForProject,
   type ScopedScan,
 } from '../../shared/project-switch';
+import { branchPreviewsEqual } from '../../shared/merge-preview';
 import { gridShape } from '../../shared/pane-grid';
 import { decideWindowBootstrap } from '../../shared/window-bootstrap';
 import {
@@ -1177,9 +1178,20 @@ export function App(): JSX.Element {
             prev &&
             prev.projectPath === projectPath &&
             prev.midMerge === res.midMerge &&
-            afkScanUnchanged(prev.branches, res.branches)
+            afkScanUnchanged(prev.branches, res.branches) &&
+            // Merge previews (issue 104) are part of the no-change check: a
+            // verdict flipping recalculating→clean on an otherwise-unchanged
+            // tick must still refresh the badge, so it can't be kept as `prev`.
+            branchPreviewsEqual(prev.previews ?? [], res.previews) &&
+            (prev.previewNote ?? null) === res.previewNote
               ? prev
-              : { projectPath, branches: res.branches, midMerge: res.midMerge },
+              : {
+                  projectPath,
+                  branches: res.branches,
+                  midMerge: res.midMerge,
+                  previews: res.previews,
+                  previewNote: res.previewNote,
+                },
           );
         })
         .catch(() => {
@@ -1652,7 +1664,7 @@ export function App(): JSX.Element {
           // Refresh the scan immediately so the discarded Run's row/Merge clears.
           void window.mc
             .scanAfkRuns({ projectPath })
-            .then((r) => setAfkScan({ projectPath, branches: r.branches, midMerge: r.midMerge }))
+            .then((r) => setAfkScan({ projectPath, branches: r.branches, midMerge: r.midMerge, previews: r.previews, previewNote: r.previewNote }))
             .catch(() => {
               // The 1.5s poll will pick it up regardless.
             });
@@ -2819,7 +2831,7 @@ export function App(): JSX.Element {
         setMergeDisplay(null);
         void window.mc
           .scanAfkRuns({ projectPath })
-          .then((r) => setAfkScan({ projectPath, branches: r.branches, midMerge: r.midMerge }))
+          .then((r) => setAfkScan({ projectPath, branches: r.branches, midMerge: r.midMerge, previews: r.previews, previewNote: r.previewNote }))
           .catch(() => {
             // The 1.5s poll will pick up the cleared mid-merge state regardless.
           });
@@ -3017,6 +3029,8 @@ export function App(): JSX.Element {
             midMerge={midMerge}
             onAbortMerge={runAbortMerge}
             aborting={aborting}
+            previews={activeScan.previews}
+            previewNote={activeScan.previewNote}
             focusIssueId={inboxFocus?.issueId ?? null}
             focusSeq={inboxFocusSeq}
             plannedIssueIds={plannedIssueIds}

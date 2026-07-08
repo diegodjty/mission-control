@@ -26,6 +26,7 @@
  *      shows nothing rather than A's branches).
  */
 import type { AfkBranchFacts } from './worktree-scan';
+import type { BranchPreview } from './merge-preview';
 
 /**
  * A scan of a Project's on-disk `afk/` state, tagged with the `projectPath` it
@@ -39,16 +40,26 @@ export interface ScopedScan {
   branches: AfkBranchFacts[];
   /** Whether that Project's `main` is mid-merge (a partial afk-merge conflict). */
   midMerge: boolean;
+  /**
+   * Per-branch merge-preview verdicts (issue 104), scoped like everything else:
+   * a scan from another Project must not badge this one's rows. Optional so
+   * callers built before previews existed (and older scans) still type-check.
+   */
+  previews?: BranchPreview[];
+  /** The passive git-floor note (issue 104), or null/absent when previews are on. */
+  previewNote?: string | null;
 }
 
 /** The safe, Project-scoped view of a scan: empty unless it matches the active Project. */
 export interface ActiveScanView {
   branches: AfkBranchFacts[];
   midMerge: boolean;
+  previews: BranchPreview[];
+  previewNote: string | null;
 }
 
-/** An empty view — no indicators, not mid-merge. */
-const EMPTY_VIEW: ActiveScanView = { branches: [], midMerge: false };
+/** An empty view — no indicators, not mid-merge, no previews. */
+const EMPTY_VIEW: ActiveScanView = { branches: [], midMerge: false, previews: [], previewNote: null };
 
 /**
  * Whether the active Project genuinely changed — i.e. a switch that should
@@ -81,5 +92,10 @@ export function scanForProject(
 ): ActiveScanView {
   if (scan === null || activeProjectPath === null) return EMPTY_VIEW;
   if (scan.projectPath !== activeProjectPath) return EMPTY_VIEW;
-  return { branches: scan.branches, midMerge: scan.midMerge };
+  return {
+    branches: scan.branches,
+    midMerge: scan.midMerge,
+    previews: scan.previews ?? [],
+    previewNote: scan.previewNote ?? null,
+  };
 }

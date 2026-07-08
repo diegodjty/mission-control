@@ -166,6 +166,12 @@ body {
   display: flex;
   flex-direction: column;
   height: 100%;
+  /* The desktop shell never scrolls as a whole — panels scroll internally.
+     Clipping here stops a terminal reflow that overshoots by a rounding amount
+     from spawning a window scrollbar, whose appearance/disappearance would
+     otherwise feed back into the Pane's ResizeObserver and shake the whole
+     view (issue 103). */
+  overflow: hidden;
   position: relative;
   isolation: isolate;
   /* The ambient stage: a soft teal aurora top and bottom over deep navy.
@@ -733,6 +739,39 @@ body.is-col-resizing {
   color: var(--red-soft);
   border-color: var(--red-border);
   background: var(--red-bg);
+}
+
+/* Merge-preview badges (issue 104, ADR-0018): advisory, beside finished
+   (unmerged). Clean = green "it'll land", conflicts = red "it won't", and
+   recalculating = muted amber "main moved, recomputing" — never a stale verdict. */
+.run-badge--preview-clean {
+  color: var(--green);
+  border-color: var(--green-border);
+  background: var(--green-bg);
+}
+
+.run-badge--preview-conflicts {
+  color: var(--red-soft);
+  border-color: var(--red-border);
+  background: var(--red-bg);
+}
+
+.run-badge--preview-recalculating {
+  color: var(--fg-mute);
+  border-color: var(--amber-border);
+  background: var(--amber-bg);
+  font-style: italic;
+}
+
+/* The single passive note when merge previews are unavailable (git < 2.38). */
+.map__preview-note {
+  font-size: 11px;
+  color: var(--fg-mute);
+  padding: 4px 10px;
+  margin: 2px 0;
+  border: 1px dashed var(--border-teal);
+  border-radius: 6px;
+  background: var(--teal-bg);
 }
 
 .run-discard {

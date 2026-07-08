@@ -20,6 +20,7 @@ import {
   applyIsolation,
   commitFinishedMain,
   commitFinishedWorktree,
+  detectDefaultBranch,
   discardWorktree,
   isMidMerge,
   readIsolatedIssueStatus,
@@ -28,6 +29,15 @@ import {
   worktreePathFor,
 } from './git-worktree-adapter';
 import { mergeRuns, abortMerge } from './run-merge';
+import {
+  probeMergeTreeSupport,
+  readPreviewStamp,
+  simulateForStamp,
+} from './merge-preview-adapter';
+import { createPreviewCoordinator } from './merge-preview-coordinator';
+import { mergeReadinessOnDisk } from '../shared/worktree-scan';
+import { GIT_FLOOR_NOTE } from '../shared/git-version';
+import type { BranchPreview } from '../shared/merge-preview';
 import { RunLogStore } from './run-log-store';
 import { ReceiptWatcher } from './receipt-watcher';
 import { PlanningWatcher } from './planning-watcher';
@@ -285,6 +295,28 @@ function commitWorkbenchEvents(projectKey: string, events: WorkbenchRunEvent[]):
 // mutating handler runs its git work through this — same-repo work serializes,
 // different repos still run in parallel.
 const repoSerializer = createRepoSerializer();
+
+// Merge previews (issue 104, ADR-0018). The git-version floor is probed ONCE at
+// backend start; until it resolves, previews stay off (no badges, no note) so we
+// never flash a misleading "git too old" note on a machine that in fact supports
+// it. `done` gates the note; `supported` gates the badges.
+let previewProbe: { done: boolean; supported: boolean } = { done: false, supported: false };
+void probeMergeTreeSupport()
+  .then((supported) => {
+    previewProbe = { done: true, supported };
+  })
+  .catch(() => {
+    previewProbe = { done: true, supported: false };
+  });
+
+// The per-repo verdict cache + coalesced recompute scheduler. It queues its
+// recomputes through the SHARED `repoSerializer`, so a background simulation
+// never races a real Merge / worktree-commit on the same repo (ADR-0018).
+const previewCoordinator = createPreviewCoordinator({
+  serializer: repoSerializer,
+  isSupported: () => previewProbe.supported,
+  simulate: (repoPath, stamp) => simulateForStamp(repoPath, stamp),
+});
 
 /**
  * Action-time ownership guard (issue 31): the worktree/merge/observe handlers
@@ -666,7 +698,9 @@ function registerIpc(): void {
     async (event, req: AfkScanRequest): Promise<AfkScanResult> => {
       // A Window that doesn't own this repo gets an empty scan — it must not
       // derive a Merge affordance or block drains off a repo it doesn't drive.
-      if (ownershipError(event, req.projectPath)) return { branches: [], midMerge: false };
+      if (ownershipError(event, req.projectPath)) {
+        return { branches: [], midMerge: false, previews: [], previewNote: null };
+      }
       const identity = identityFor(req.projectPath);
       // A workbench Project's scan spans EVERY member repo (issue 72) —
       // isolation is per repo, so in-flight/finished-unmerged Runs may live in
@@ -676,21 +710,46 @@ function registerIpc(): void {
       const scanOpts =
         identity?.kind === 'workbench' ? { workbenchIssuesRoot: identity.issuesRoot } : {};
       const perRepo = await Promise.all(
-        repos.map(async (repo) => ({
-          branches: (await scanAfkBranches(repo, scanOpts)).map(
+        repos.map(async (repo) => {
+          const branches = (await scanAfkBranches(repo, scanOpts)).map(
             (b): AfkBranchFacts => ({ ...b, repoPath: repo }),
-          ),
-          // Also report whether a repo is left mid-merge by a partial merge
-          // conflict (issue 24) so the renderer can block a new drain/Run and
-          // offer an Abort.
-          midMerge: await isMidMerge(repo),
-        })),
+          );
+          // Report whether a repo is left mid-merge by a partial merge conflict
+          // (issue 24) so the renderer can block a new drain/Run and offer Abort.
+          const midMerge = await isMidMerge(repo);
+          // Merge previews (issue 104): a CACHE READ against the coordinator —
+          // the scan itself never computes. Read the cheap freshness stamp
+          // (default + finished-branch tips), then let the coordinator return the
+          // fresh-or-recalculating verdict and (on a stamp mismatch) queue one
+          // coalesced recompute. Suspended when the repo is mid-merge (a verdict
+          // would predict a press that can't happen, ADR-0018) or git is below
+          // the floor (`read` returns []).
+          let previews: BranchPreview[] = [];
+          if (previewProbe.supported && !midMerge) {
+            const candidates = mergeReadinessOnDisk(branches).mergeable;
+            if (candidates.length > 0) {
+              const defaultBranch = await detectDefaultBranch(repo);
+              const currentStamp = await readPreviewStamp(repo, defaultBranch, candidates);
+              previews = previewCoordinator.read({
+                serializerKey: normalizeProjectKey(repo),
+                repoPath: repo,
+                candidates,
+                currentStamp,
+              });
+            }
+          }
+          return { branches, midMerge, previews };
+        }),
       );
       return {
         branches: perRepo
           .flatMap((r) => r.branches)
           .sort((a, b) => a.issueId - b.issueId),
         midMerge: perRepo.some((r) => r.midMerge),
+        previews: perRepo.flatMap((r) => r.previews),
+        // One passive note (ADR-0018), only once the probe has run AND git is
+        // below the floor — never a flash before the probe resolves.
+        previewNote: previewProbe.done && !previewProbe.supported ? GIT_FLOOR_NOTE : null,
       };
     },
   );

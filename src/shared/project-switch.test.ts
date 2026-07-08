@@ -66,11 +66,47 @@ describe('scanForProject', () => {
   });
 
   it('shows nothing while there is no scan yet (null)', () => {
-    expect(scanForProject(null, '/repo/a')).toEqual({ branches: [], midMerge: false });
+    expect(scanForProject(null, '/repo/a')).toEqual({
+      branches: [],
+      midMerge: false,
+      previews: [],
+      previewNote: null,
+    });
   });
 
   it('shows nothing when no Project is active (null active path)', () => {
-    expect(scanForProject(scanA, null)).toEqual({ branches: [], midMerge: false });
+    expect(scanForProject(scanA, null)).toEqual({
+      branches: [],
+      midMerge: false,
+      previews: [],
+      previewNote: null,
+    });
+  });
+
+  it('carries merge previews + floor note through when the Project matches (issue 104)', () => {
+    const withPreviews: ScopedScan = {
+      ...scanA,
+      previews: [{ issueId: 5, slug: '05-thing', verdict: { kind: 'clean' } }],
+      previewNote: null,
+    };
+    const view = scanForProject(withPreviews, '/repo/a');
+    expect(view.previews).toEqual([{ issueId: 5, slug: '05-thing', verdict: { kind: 'clean' } }]);
+    expect(view.previewNote).toBeNull();
+  });
+
+  it('hides another Project scan\'s previews (no cross-Project badge, issue 104)', () => {
+    const withPreviews: ScopedScan = {
+      ...scanA,
+      previews: [{ issueId: 5, slug: '05-thing', verdict: { kind: 'clean' } }],
+      previewNote: null,
+    };
+    expect(scanForProject(withPreviews, '/repo/b').previews).toEqual([]);
+  });
+
+  it('defaults previews to [] and note to null for a scan taken before previews existed', () => {
+    const view = scanForProject(scanA, '/repo/a');
+    expect(view.previews).toEqual([]);
+    expect(view.previewNote).toBeNull();
   });
 
   it('does not leak a stale scan kept after a transient error post-switch', () => {

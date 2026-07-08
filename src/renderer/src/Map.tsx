@@ -16,6 +16,11 @@ import {
   type RunGuidance,
 } from '../../shared/run-guidance';
 import type { MergeDisplay } from '../../shared/merge-display';
+import {
+  previewBadge,
+  type BranchPreview,
+  type MergePreviewVerdict,
+} from '../../shared/merge-preview';
 
 interface MapProps {
   /**
@@ -100,6 +105,20 @@ interface MapProps {
   /** True while an Abort is running. */
   aborting?: boolean;
   /**
+   * Per-branch merge-preview verdicts (issue 104, ADR-0018): computed in the
+   * background and kept fresh as `main` moves. In this tracer slice only the
+   * first mergeable branch carries a verdict (`clean`/`conflicts`/
+   * `recalculating`); later branches have `verdict: null` (no badge — issue 105).
+   * Purely advisory — the Merge/Abort affordances are untouched.
+   */
+  previews?: BranchPreview[];
+  /**
+   * The single passive note shown when merge previews are unavailable because
+   * git is below the 2.38 floor (ADR-0018 degradation), else null. Never shown
+   * alongside badges.
+   */
+  previewNote?: string | null;
+  /**
    * The active Project's captured Completion blocks, newest first (issue 34).
    * Rendered as the Run-log feed — one card per Run — which survives closing the
    * Run's Pane (it is App state loaded from disk, not tied to any live Pane).
@@ -163,6 +182,8 @@ export function Map({
   midMerge,
   onAbortMerge,
   aborting,
+  previews,
+  previewNote,
   runLog,
   focusIssueId,
   focusSeq,
@@ -170,6 +191,14 @@ export function Map({
   plannedRepos,
 }: MapProps = {}): JSX.Element {
   const activeRunSet = new Set(activeRunIssueIds ?? []);
+  // Merge-preview verdicts keyed by issue id (issue 104): the finished-unmerged
+  // row shows this branch's badge. Only branches with a non-null verdict appear —
+  // later branches in the tracer slice (issue 105) carry none. A plain record,
+  // not a Map, since this component IS named `Map` and shadows the constructor.
+  const previewByIssueId: Record<number, MergePreviewVerdict> = {};
+  for (const p of previews ?? []) {
+    if (p.verdict) previewByIssueId[p.issueId] = p.verdict;
+  }
   const plannedIssueSet = new Set(plannedIssueIds ?? []);
   const worktreeRunningSet = new Set(worktreeRunningIds ?? []);
   const finishedUnmergedSet = new Set(finishedUnmergedIds ?? []);
@@ -422,6 +451,15 @@ export function Map({
         </div>
       )}
 
+      {/* Merge-preview degradation note (issue 104, ADR-0018): when git is below
+          the 2.38 floor there are no badges anywhere, just this one passive
+          line naming the version floor. No fallback merge machinery. */}
+      {previewNote && resolvedPath !== null && (
+        <div className="map__preview-note" title={previewNote}>
+          {previewNote}
+        </div>
+      )}
+
       {/* Mid-merge banner (issue 24): a partial afk-merge.sh conflict left `main`
           with earlier slugs merged and a later one conflicted, so `main` is
           mid-merge. New Runs/Drain are blocked until this clears; Abort runs
@@ -633,6 +671,7 @@ export function Map({
               selected={issue.id === selectedId}
               planned={plannedIssueSet.has(issue.id)}
               running={activeRunSet.has(issue.id)}
+              previewVerdict={previewByIssueId[issue.id] ?? null}
               worktreeRun={
                 finishedUnmergedSet.has(issue.id)
                   ? 'finished-unmerged'
@@ -975,6 +1014,7 @@ function IssueRow({
   selected,
   planned,
   running,
+  previewVerdict,
   worktreeRun,
   state,
   onSelect,
@@ -989,6 +1029,12 @@ function IssueRow({
    */
   planned: boolean;
   running: boolean;
+  /**
+   * This branch's merge-preview verdict (issue 104): shown as an advisory badge
+   * beside `finished (unmerged)`. Null when there is no verdict (not a
+   * finished-unmerged row, a later branch in the tracer slice, or git < 2.38).
+   */
+  previewVerdict: MergePreviewVerdict | null;
   /**
    * The issue's isolated-Run state derived from the on-disk `afk/` scan: `running`
    * (live in its worktree), `stranded` (Run ended without a done commit, issue
@@ -1040,12 +1086,17 @@ function IssueRow({
           <span className="badge badge--eligible">eligible</span>
         )}
         {worktreeRun === 'finished-unmerged' ? (
-          <span
-            className="run-badge run-badge--finished-unmerged"
-            title="This Run's work is committed on its afk/ branch but not yet merged into main"
-          >
-            finished (unmerged)
-          </span>
+          <>
+            <span
+              className="run-badge run-badge--finished-unmerged"
+              title="This Run's work is committed on its afk/ branch but not yet merged into main"
+            >
+              finished (unmerged)
+            </span>
+            {/* Merge preview (issue 104): advisory — whether pressing Merge would
+                land clean or conflict, without pressing it. */}
+            {previewVerdict && <MergePreviewBadge verdict={previewVerdict} />}
+          </>
         ) : worktreeRun === 'commit-failed' ? (
           <span
             className="run-badge run-badge--commit-failed"
@@ -1157,6 +1208,21 @@ function depLabel(dep: UnmetDependency): string {
 
 function StatusBadge({ status }: { status: BacklogIssue['status'] }): JSX.Element {
   return <span className={`status status--${status}`}>{status}</span>;
+}
+
+/**
+ * The advisory merge-preview badge (issue 104, ADR-0018): `merges clean`,
+ * `conflicts (files…)`, or `recalculating…`, driven by the pure `previewBadge`
+ * display selector. The conflict file list is in both the label and the tooltip
+ * so the blast radius is visible without pressing Merge.
+ */
+function MergePreviewBadge({ verdict }: { verdict: MergePreviewVerdict }): JSX.Element {
+  const badge = previewBadge(verdict);
+  return (
+    <span className={`run-badge run-badge--preview-${badge.tone}`} title={badge.title}>
+      {badge.label}
+    </span>
+  );
 }
 
 /** in-batch | standalone | out-of-batch — for the tag class + label. */

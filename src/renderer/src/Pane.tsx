@@ -98,15 +98,32 @@ export function Pane({ run, dispatcher, talk, onStatusChange, onInput, onExit, o
     term.loadAddon(fit);
     term.open(host);
     termRef.current = term;
+    let sessionId: string | null = null;
+    let disposed = false;
+
     // Fitting a zero-sized host (e.g. a tile currently hidden behind a
     // maximized sibling) throws; only reflow once the host actually has area.
     const safeFit = (): void => {
       if (host.clientWidth > 0 && host.clientHeight > 0) fit.fit();
     };
-    safeFit();
 
-    let sessionId: string | null = null;
-    let disposed = false;
+    // Coalesce reflows into the next animation frame (issue 103). Calling
+    // fit.fit() synchronously inside the ResizeObserver callback lets a
+    // rounding-level resize feed straight back as another observation on the
+    // same frame — a ResizeObserver loop that toggled a window scrollbar on and
+    // off and made the whole view shake the moment the Pane was shown. Deferring
+    // to rAF, and collapsing a burst of notifications into a single fit, breaks
+    // that loop.
+    let fitFrame: number | null = null;
+    const scheduleFit = (): void => {
+      if (disposed || fitFrame !== null) return;
+      fitFrame = window.requestAnimationFrame(() => {
+        fitFrame = null;
+        if (!disposed) safeFit();
+      });
+    };
+
+    safeFit();
 
     const offData = window.mc.onPtyData((msg) => {
       if (msg.sessionId === sessionId) term.write(msg.data);
@@ -163,17 +180,18 @@ export function Pane({ run, dispatcher, talk, onStatusChange, onInput, onExit, o
         onStatusChange?.('failed');
       });
 
-    const onWindowResize = (): void => safeFit();
+    const onWindowResize = (): void => scheduleFit();
     window.addEventListener('resize', onWindowResize);
 
     // Reflow when this Pane's own box changes size — the terminal now lives in
     // an adaptive tiled grid (issue 12), so its tile grows/shrinks as Runs come
     // and go and when it's maximized/restored, with no window-level resize.
-    const resizeObserver = new ResizeObserver(() => safeFit());
+    const resizeObserver = new ResizeObserver(() => scheduleFit());
     resizeObserver.observe(host);
 
     return () => {
       disposed = true;
+      if (fitFrame !== null) window.cancelAnimationFrame(fitFrame);
       window.removeEventListener('resize', onWindowResize);
       resizeObserver.disconnect();
       offData();
