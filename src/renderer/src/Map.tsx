@@ -105,11 +105,11 @@ interface MapProps {
   /** True while an Abort is running. */
   aborting?: boolean;
   /**
-   * Per-branch merge-preview verdicts (issue 104, ADR-0018): computed in the
-   * background and kept fresh as `main` moves. In this tracer slice only the
-   * first mergeable branch carries a verdict (`clean`/`conflicts`/
-   * `recalculating`); later branches have `verdict: null` (no badge — issue 105).
-   * Purely advisory — the Merge/Abort affordances are untouched.
+   * Per-branch merge-preview verdicts (issues 104 & 105, ADR-0018): computed in
+   * the background from the FULL sequential merge (merge order, ascending issue
+   * id) and kept fresh as any tip moves. Every finished-unmerged branch carries
+   * a verdict — `clean` / `conflicts (files…)` / `blocked behind NN` /
+   * `recalculating`. Purely advisory — the Merge/Abort affordances are untouched.
    */
   previews?: BranchPreview[];
   /**
@@ -191,10 +191,11 @@ export function Map({
   plannedRepos,
 }: MapProps = {}): JSX.Element {
   const activeRunSet = new Set(activeRunIssueIds ?? []);
-  // Merge-preview verdicts keyed by issue id (issue 104): the finished-unmerged
-  // row shows this branch's badge. Only branches with a non-null verdict appear —
-  // later branches in the tracer slice (issue 105) carry none. A plain record,
-  // not a Map, since this component IS named `Map` and shadows the constructor.
+  // Merge-preview verdicts keyed by issue id (issues 104 & 105): the
+  // finished-unmerged row shows this branch's badge. Every branch with a
+  // non-null verdict appears (the full sequential batch); a null verdict is a
+  // defensive "no badge". A plain record, not a Map, since this component IS
+  // named `Map` and shadows the constructor.
   const previewByIssueId: Record<number, MergePreviewVerdict> = {};
   for (const p of previews ?? []) {
     if (p.verdict) previewByIssueId[p.issueId] = p.verdict;
@@ -1093,8 +1094,9 @@ function IssueRow({
             >
               finished (unmerged)
             </span>
-            {/* Merge preview (issue 104): advisory — whether pressing Merge would
-                land clean or conflict, without pressing it. */}
+            {/* Merge preview (issues 104 & 105): advisory — the branch's verdict
+                in the full sequential merge (clean / conflicts / blocked behind
+                NN), without pressing Merge. */}
             {previewVerdict && <MergePreviewBadge verdict={previewVerdict} />}
           </>
         ) : worktreeRun === 'commit-failed' ? (
@@ -1211,10 +1213,11 @@ function StatusBadge({ status }: { status: BacklogIssue['status'] }): JSX.Elemen
 }
 
 /**
- * The advisory merge-preview badge (issue 104, ADR-0018): `merges clean`,
- * `conflicts (files…)`, or `recalculating…`, driven by the pure `previewBadge`
- * display selector. The conflict file list is in both the label and the tooltip
- * so the blast radius is visible without pressing Merge.
+ * The advisory merge-preview badge (issues 104 & 105, ADR-0018): `merges clean`,
+ * `conflicts (files…)`, `blocked behind NN`, or `recalculating…`, driven by the
+ * pure `previewBadge` display selector. The conflict file list (and the blocking
+ * branch) is in both the label and the tooltip so the blast radius is visible
+ * without pressing Merge.
  */
 function MergePreviewBadge({ verdict }: { verdict: MergePreviewVerdict }): JSX.Element {
   const badge = previewBadge(verdict);

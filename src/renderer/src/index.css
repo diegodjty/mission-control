@@ -741,9 +741,10 @@ body.is-col-resizing {
   background: var(--red-bg);
 }
 
-/* Merge-preview badges (issue 104, ADR-0018): advisory, beside finished
-   (unmerged). Clean = green "it'll land", conflicts = red "it won't", and
-   recalculating = muted amber "main moved, recomputing" — never a stale verdict. */
+/* Merge-preview badges (issues 104 & 105, ADR-0018): advisory, beside finished
+   (unmerged). Clean = green "it'll land", conflicts = red "it won't", blocked =
+   muted red "an earlier branch conflicts, so this never merges", and
+   recalculating = muted amber "a tip moved, recomputing" — never a stale verdict. */
 .run-badge--preview-clean {
   color: var(--green);
   border-color: var(--green-border);
@@ -752,6 +753,16 @@ body.is-col-resizing {
 
 .run-badge--preview-conflicts {
   color: var(--red-soft);
+  border-color: var(--red-border);
+  background: var(--red-bg);
+}
+
+/* Blocked-behind (issue 105): the sequence stops at an earlier conflict, so this
+   branch never merges. Same red family as conflicts but muted + dashed, to read
+   as "downstream consequence" rather than "this branch is the problem". */
+.run-badge--preview-blocked {
+  color: var(--fg-mute);
+  border-style: dashed;
   border-color: var(--red-border);
   background: var(--red-bg);
 }

@@ -32,7 +32,7 @@ import { mergeRuns, abortMerge } from './run-merge';
 import {
   probeMergeTreeSupport,
   readPreviewStamp,
-  simulateForStamp,
+  simulateSequence,
 } from './merge-preview-adapter';
 import { createPreviewCoordinator } from './merge-preview-coordinator';
 import { mergeReadinessOnDisk } from '../shared/worktree-scan';
@@ -315,7 +315,7 @@ void probeMergeTreeSupport()
 const previewCoordinator = createPreviewCoordinator({
   serializer: repoSerializer,
   isSupported: () => previewProbe.supported,
-  simulate: (repoPath, stamp) => simulateForStamp(repoPath, stamp),
+  simulate: (repoPath, stamp) => simulateSequence(repoPath, stamp),
 });
 
 /**
@@ -717,13 +717,15 @@ function registerIpc(): void {
           // Report whether a repo is left mid-merge by a partial merge conflict
           // (issue 24) so the renderer can block a new drain/Run and offer Abort.
           const midMerge = await isMidMerge(repo);
-          // Merge previews (issue 104): a CACHE READ against the coordinator —
-          // the scan itself never computes. Read the cheap freshness stamp
-          // (default + finished-branch tips), then let the coordinator return the
-          // fresh-or-recalculating verdict and (on a stamp mismatch) queue one
-          // coalesced recompute. Suspended when the repo is mid-merge (a verdict
-          // would predict a press that can't happen, ADR-0018) or git is below
-          // the floor (`read` returns []).
+          // Merge previews (issues 104 & 105): a CACHE READ against the
+          // coordinator — the scan itself never computes. Read the cheap
+          // freshness stamp (default + ordered finished-branch tips), then let
+          // the coordinator return each branch's fresh-or-recalculating verdict
+          // (the full sequential batch — clean / conflicts / blocked behind NN)
+          // and (on a stamp/batch mismatch) queue one coalesced recompute.
+          // Suspended when the repo is mid-merge (a verdict would predict a press
+          // that can't happen, ADR-0018) or git is below the floor (`read`
+          // returns []).
           let previews: BranchPreview[] = [];
           if (previewProbe.supported && !midMerge) {
             const candidates = mergeReadinessOnDisk(branches).mergeable;
