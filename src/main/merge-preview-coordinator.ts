@@ -20,6 +20,13 @@
  * The git-floor gate lives here too: below git 2.38 (`isSupported()` false) `read`
  * always returns [] so no badges are shown; the scan handler pairs that with the
  * single passive note.
+ *
+ * Mid-merge suspension (issue 107, ADR-0018): when the scan reports the repo
+ * mid-merge, `read` short-circuits to a `suspended` "merge in progress" verdict
+ * for every branch and queues NO recompute — a mid-merge repo can't be
+ * Merge-pressed, so any verdict would predict a press that cannot happen. The
+ * cache is left untouched; the stamp mismatch resumes previews on the first clean
+ * tick after the human resolves-and-commits or Aborts (main's tip moves).
  */
 import type { RepoSerializer } from '../shared/repo-serializer';
 import {
@@ -41,6 +48,12 @@ export interface PreviewReadInput {
   candidates: MergeCandidate[];
   /** The tips the scan just observed for this repo. */
   currentStamp: PreviewStamp;
+  /**
+   * The repo is mid-merge (issue 24 scan fact). When true, `read` suspends every
+   * branch ("merge in progress") and queues NO recompute (issue 107, ADR-0018).
+   * Omitted ⇒ not mid-merge, the normal cache/stamp path runs.
+   */
+  midMerge?: boolean;
 }
 
 export interface PreviewCoordinator {
@@ -79,8 +92,15 @@ export function createPreviewCoordinator(deps: PreviewCoordinatorDeps): PreviewC
 
   function read(input: PreviewReadInput): BranchPreview[] {
     if (!isSupported()) return [];
-    const { serializerKey, repoPath, candidates, currentStamp } = input;
+    const { serializerKey, repoPath, candidates, currentStamp, midMerge = false } = input;
     if (candidates.length === 0) return [];
+    // Mid-merge (issue 107, ADR-0018): suspend every branch and queue NOTHING — a
+    // verdict would predict a Merge press that can't happen. Return before the
+    // recompute check so no task is enqueued and the cache is left as-is; the
+    // stamp mismatch re-arms recompute once the mid-merge clears.
+    if (midMerge) {
+      return decidePreviews({ candidates, currentStamp, cached: null, midMerge: true });
+    }
     const slugs = candidates.map((c) => c.slug);
     const cached = cache.get(serializerKey) ?? null;
 

@@ -774,6 +774,16 @@ body.is-col-resizing {
   font-style: italic;
 }
 
+/* Suspended (issue 107, ADR-0018): the repo is mid-merge, so no verdict can be
+   computed. Neutral + dashed to read as "paused, waiting on you" — distinct from
+   the amber "recomputing" and from any real clean/conflict verdict. */
+.run-badge--preview-suspended {
+  color: var(--fg-mute);
+  border-style: dashed;
+  border-color: var(--border-strong);
+  background: transparent;
+}
+
 /* The single passive note when merge previews are unavailable (git < 2.38). */
 .map__preview-note {
   font-size: 11px;

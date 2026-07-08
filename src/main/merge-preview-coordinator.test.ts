@@ -41,6 +41,91 @@ describe('preview coordinator — git-floor gate', () => {
   });
 });
 
+describe('preview coordinator — mid-merge suspension (issue 107)', () => {
+  it('suspends every branch and queues NO recompute while mid-merge', () => {
+    const simulate = vi.fn<(repoPath: string, stamp: PreviewStamp) => Promise<SequenceSimOutcome>>();
+    const coord = createPreviewCoordinator({
+      serializer: createRepoSerializer(),
+      isSupported: () => true,
+      simulate,
+    });
+    const out = coord.read({
+      serializerKey: KEY,
+      repoPath: KEY,
+      candidates: [a, b],
+      currentStamp: stampAB,
+      midMerge: true,
+    });
+    expect(out).toEqual([
+      { issueId: 4, slug: '04-a', verdict: { kind: 'suspended' } },
+      { issueId: 7, slug: '07-b', verdict: { kind: 'suspended' } },
+    ]);
+    // The whole point of suspension: no task enqueued, nothing computed.
+    expect(coord.pending(KEY)).toBe(false);
+    expect(simulate).not.toHaveBeenCalled();
+  });
+
+  it('does not disturb a cache built before the mid-merge, and resumes on the next clean tick', async () => {
+    const simulate = vi.fn(async (): Promise<SequenceSimOutcome> => cleanChain2);
+    const coord = createPreviewCoordinator({
+      serializer: createRepoSerializer(),
+      isSupported: () => true,
+      simulate,
+    });
+    // Warm a fresh cache before the merge.
+    coord.read({ serializerKey: KEY, repoPath: KEY, candidates: [a, b], currentStamp: stampAB });
+    await tick();
+    expect(simulate).toHaveBeenCalledTimes(1);
+
+    // Mid-merge ticks: suspended, and still no new recompute.
+    const suspended = coord.read({
+      serializerKey: KEY,
+      repoPath: KEY,
+      candidates: [a, b],
+      currentStamp: stampAB,
+      midMerge: true,
+    });
+    expect(suspended.every((p) => p.verdict?.kind === 'suspended')).toBe(true);
+    await tick();
+    expect(simulate).toHaveBeenCalledTimes(1);
+
+    // Abort returned main to exactly the pre-merge tip → the cache is still valid,
+    // so previews resume immediately with no recompute (freshness via the stamp).
+    const resumed = coord.read({ serializerKey: KEY, repoPath: KEY, candidates: [a, b], currentStamp: stampAB });
+    expect(resumed.map((p) => p.verdict)).toEqual([{ kind: 'clean' }, { kind: 'clean' }]);
+    expect(simulate).toHaveBeenCalledTimes(1);
+  });
+
+  it('resolve + commit moves main → the resumed tick recomputes for the new tip', async () => {
+    const simulate = vi.fn(async (): Promise<SequenceSimOutcome> => cleanChain2);
+    const coord = createPreviewCoordinator({
+      serializer: createRepoSerializer(),
+      isSupported: () => true,
+      simulate,
+    });
+    coord.read({ serializerKey: KEY, repoPath: KEY, candidates: [a, b], currentStamp: stampAB });
+    await tick();
+    expect(simulate).toHaveBeenCalledTimes(1);
+
+    // Suspended while mid-merge (no recompute).
+    coord.read({ serializerKey: KEY, repoPath: KEY, candidates: [a, b], currentStamp: stampAB, midMerge: true });
+    await tick();
+    expect(simulate).toHaveBeenCalledTimes(1);
+
+    // Resolve + commit moved main → the pre-merge cache is stale → recalculating +
+    // exactly one fresh recompute.
+    const resumed = coord.read({
+      serializerKey: KEY,
+      repoPath: KEY,
+      candidates: [a, b],
+      currentStamp: stampAB_movedMain,
+    });
+    expect(resumed.every((p) => p.verdict?.kind === 'recalculating')).toBe(true);
+    await tick();
+    expect(simulate).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('preview coordinator — full-batch sequence cache + recompute (issue 105)', () => {
   it('shows recalculating for every branch on a cold cache, then the fresh sequence once it lands', async () => {
     const simulate = vi.fn(async (): Promise<SequenceSimOutcome> => cleanChain2);

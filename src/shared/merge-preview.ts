@@ -69,8 +69,16 @@ export type SettledVerdict =
   | { kind: 'conflicts'; files: string[] }
   | { kind: 'blocked'; behindIssueId: number };
 
-/** A branch's displayed merge-preview verdict, including the transient state. */
-export type MergePreviewVerdict = SettledVerdict | { kind: 'recalculating' };
+/**
+ * A branch's displayed merge-preview verdict, including the two transient states:
+ * `recalculating` (a tip moved; the sequence is being recomputed) and `suspended`
+ * (the repo is mid-merge, so no verdict can be computed — ADR-0018, issue 107).
+ * Neither transient state is a `SettledVerdict`: neither is cached.
+ */
+export type MergePreviewVerdict =
+  | SettledVerdict
+  | { kind: 'recalculating' }
+  | { kind: 'suspended' };
 
 /**
  * One branch's preview as it travels with the scan result to the Map. A null
@@ -163,14 +171,31 @@ export function sequenceVerdicts(
  * never a mix of fresh-and-stale rows, because the sequence is recomputed as one
  * unit. `candidates` MUST already be ordered ascending by issue id (as
  * `mergeReadinessOnDisk(...).mergeable` supplies them).
+ *
+ * Mid-merge suspension (issue 107, ADR-0018) takes precedence over everything: a
+ * repo whose partial Merge hit a conflict (MERGE_HEAD set) can't be Merge-pressed
+ * at all, so any verdict would predict a press that cannot happen. When `midMerge`
+ * is set, EVERY branch shows `suspended` ("merge in progress") regardless of
+ * cache or stamp — never `recalculating`, never a stale verdict. Previews resume
+ * on their own once the mid-merge clears: Abort or resolve+commit moves main's
+ * tip, the stamp mismatch catches it, and the next tick recomputes.
  */
 export function decidePreviews(input: {
   candidates: MergeCandidate[];
   currentStamp: PreviewStamp;
   cached: CachedPreview | null;
+  /** The repo is mid-merge ⇒ suspend every branch, compute nothing. Omitted ⇒ no. */
+  midMerge?: boolean;
 }): BranchPreview[] {
-  const { candidates, currentStamp, cached } = input;
+  const { candidates, currentStamp, cached, midMerge = false } = input;
   if (candidates.length === 0) return [];
+  if (midMerge) {
+    return candidates.map((c) => ({
+      issueId: c.issueId,
+      slug: c.slug,
+      verdict: { kind: 'suspended' },
+    }));
+  }
   const slugs = candidates.map((c) => c.slug);
   const fresh =
     cached !== null && slugsEqual(cached.slugs, slugs) && stampsEqual(cached.stamp, currentStamp);
@@ -221,7 +246,7 @@ export function branchPreviewsEqual(a: BranchPreview[], b: BranchPreview[]): boo
 export interface PreviewBadge {
   label: string;
   title: string;
-  tone: 'clean' | 'conflicts' | 'blocked' | 'recalculating';
+  tone: 'clean' | 'conflicts' | 'blocked' | 'recalculating' | 'suspended';
 }
 
 /** Format an issue id the way the Map shows it (`NN`, zero-padded to two). */
@@ -267,6 +292,15 @@ export function previewBadge(verdict: MergePreviewVerdict): PreviewBadge {
         label: 'recalculating…',
         title: 'The default branch or a finished branch moved — recomputing the merge preview.',
         tone: 'recalculating',
+      };
+    case 'suspended':
+      return {
+        label: 'merge in progress',
+        title:
+          'This repo is mid-merge — a merge stopped on a conflict, so a preview would ' +
+          'predict a Merge press that can’t happen. Previews are suspended until you ' +
+          'resolve and commit, or Abort; fresh verdicts return once main is clean again.',
+        tone: 'suspended',
       };
   }
 }

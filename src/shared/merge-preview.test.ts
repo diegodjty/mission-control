@@ -206,6 +206,75 @@ describe('decidePreviews — full-batch sequential verdicts (issue 105)', () => 
   });
 });
 
+describe('mid-merge suspension (issue 107, ADR-0018)', () => {
+  it('suspends EVERY branch while mid-merge — never a verdict, never recalculating', () => {
+    const out = decidePreviews({
+      candidates: [a, b, c],
+      currentStamp: stampABC,
+      cached: null,
+      midMerge: true,
+    });
+    expect(out).toEqual([
+      { issueId: 4, slug: '04-a', verdict: { kind: 'suspended' } },
+      { issueId: 7, slug: '07-b', verdict: { kind: 'suspended' } },
+      { issueId: 9, slug: '09-c', verdict: { kind: 'suspended' } },
+    ]);
+  });
+
+  it('suspends even when the cache is otherwise FRESH (a mid-merge repo can’t be pressed)', () => {
+    const out = decidePreviews({
+      candidates: [a, b, c],
+      currentStamp: stampABC,
+      cached: cache(stampABC, ['04-a', '07-b', '09-c'], clean), // would be all-clean if fresh
+      midMerge: true,
+    });
+    expect(out.every((p) => p.verdict?.kind === 'suspended')).toBe(true);
+  });
+
+  it('emits nothing for an empty batch even mid-merge', () => {
+    expect(decidePreviews({ candidates: [], currentStamp: stampABC, cached: null, midMerge: true })).toEqual(
+      [],
+    );
+  });
+
+  // Exit path 1 — Abort returns main to a settled tip (different from the
+  // pre-merge one it was cached against). The first clean tick sees the moved
+  // stamp, so the batch recalculates (never a stale verdict), then the recompute
+  // for the new tip lands and fresh verdicts appear.
+  it('Abort → clean main: the moved tip recalculates, then the fresh verdict lands', () => {
+    const afterAbort: PreviewStamp = { defaultTip: 'main-post-abort', branchTips: ['t4', 't7', 't9'] };
+    const preMergeCache = cache(stampABC, ['04-a', '07-b', '09-c'], clean);
+    // tick right after mid-merge clears: main moved → recalculating for all.
+    const tick1 = decidePreviews({ candidates: [a, b, c], currentStamp: afterAbort, cached: preMergeCache });
+    expect(tick1.every((p) => p.verdict?.kind === 'recalculating')).toBe(true);
+    expect(previewNeedsRecompute(preMergeCache, ['04-a', '07-b', '09-c'], afterAbort)).toBe(true);
+    // recompute for the new tip lands → fresh verdicts.
+    const freshCache = cache(afterAbort, ['04-a', '07-b', '09-c'], clean);
+    const tick2 = decidePreviews({ candidates: [a, b, c], currentStamp: afterAbort, cached: freshCache });
+    expect(tick2.map((p) => p.verdict)).toEqual([{ kind: 'clean' }, { kind: 'clean' }, { kind: 'clean' }]);
+  });
+
+  // Exit path 2 — the human resolves the conflict and commits, advancing main to
+  // the merge commit; the earlier-conflicting branch (04-a) is now merged, so the
+  // batch shrinks and the fresh verdict reflects the NEWLY-MERGED main.
+  it('resolve + commit → fresh verdicts reflect the newly-merged main', () => {
+    const afterResolve: PreviewStamp = { defaultTip: 'main-resolved', branchTips: ['t7', 't9'] };
+    const preMergeCache = cache(stampABC, ['04-a', '07-b', '09-c'], clean);
+    // batch shrank (04-a merged) AND main moved → recalculating for the remaining two.
+    const tick1 = decidePreviews({ candidates: [b, c], currentStamp: afterResolve, cached: preMergeCache });
+    expect(tick1.every((p) => p.verdict?.kind === 'recalculating')).toBe(true);
+    expect(previewNeedsRecompute(preMergeCache, ['07-b', '09-c'], afterResolve)).toBe(true);
+    // recompute against the resolved main surfaces a fresh conflict on 07-b.
+    const conflictOnB: SequenceSimOutcome = { steps: [{ kind: 'conflict', files: ['shared.txt'] }] };
+    const freshCache = cache(afterResolve, ['07-b', '09-c'], conflictOnB);
+    const tick2 = decidePreviews({ candidates: [b, c], currentStamp: afterResolve, cached: freshCache });
+    expect(tick2).toEqual([
+      { issueId: 7, slug: '07-b', verdict: { kind: 'conflicts', files: ['shared.txt'] } },
+      { issueId: 9, slug: '09-c', verdict: { kind: 'blocked', behindIssueId: 7 } },
+    ]);
+  });
+});
+
 describe('branchPreviewsEqual — the scan no-change guard', () => {
   const cleanA: BranchPreview = { issueId: 4, slug: '04-a', verdict: { kind: 'clean' } };
 
@@ -240,6 +309,13 @@ describe('branchPreviewsEqual — the scan no-change guard', () => {
     expect(branchPreviewsEqual([nullV], [{ ...nullV }])).toBe(true);
     expect(branchPreviewsEqual([nullV], [{ ...nullV, verdict: { kind: 'clean' } }])).toBe(false);
   });
+
+  it('refreshes when suspension lifts (suspended → recalculating/clean must not be dropped)', () => {
+    const susp: BranchPreview = { ...cleanA, verdict: { kind: 'suspended' } };
+    expect(branchPreviewsEqual([susp], [{ ...susp }])).toBe(true);
+    expect(branchPreviewsEqual([susp], [{ ...cleanA, verdict: { kind: 'recalculating' } }])).toBe(false);
+    expect(branchPreviewsEqual([susp], [cleanA])).toBe(false);
+  });
 });
 
 describe('previewBadge — the pure display mapping', () => {
@@ -267,5 +343,12 @@ describe('previewBadge — the pure display mapping', () => {
 
   it('labels a recalculating verdict', () => {
     expect(previewBadge({ kind: 'recalculating' }).tone).toBe('recalculating');
+  });
+
+  it('labels a suspended (mid-merge) verdict', () => {
+    const badge = previewBadge({ kind: 'suspended' });
+    expect(badge.label).toBe('merge in progress');
+    expect(badge.tone).toBe('suspended');
+    expect(badge.title).toContain('mid-merge');
   });
 });

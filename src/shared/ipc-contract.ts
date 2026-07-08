@@ -563,8 +563,10 @@ export interface AfkScanResult {
    * never computes). Every finished-unmerged branch per repo carries a verdict
    * from the FULL sequential merge in merge order (`clean` / `conflicts (files…)`
    * / `blocked behind NN` / `recalculating`); the sequence stops at the first
-   * predicted conflict, so branches after it read `blocked behind NN`. Empty when
-   * previews are unavailable (git < 2.38) or the repo is mid-merge.
+   * predicted conflict, so branches after it read `blocked behind NN`. A mid-merge
+   * repo instead badges every branch `suspended` ("merge in progress", issue 107)
+   * — no verdict is computed while a partial merge is unresolved. Empty only when
+   * previews are unavailable (git < 2.38).
    */
   previews: BranchPreview[];
   /**
