@@ -185,6 +185,63 @@ describe('preview coordinator — full-batch sequence cache + recompute (issue 1
   });
 });
 
+describe('preview coordinator — artifact supersession through the cache (issue 106)', () => {
+  it('surfaces the artifact verdict for the offender and clean for siblings once the recompute lands', async () => {
+    const simulate = vi.fn(
+      async (): Promise<SequenceSimOutcome> => ({
+        steps: [{ kind: 'clean' }, { kind: 'clean' }],
+        artifactPaths: [[], ['node_modules']],
+      }),
+    );
+    const coord = createPreviewCoordinator({
+      serializer: createRepoSerializer(),
+      isSupported: () => true,
+      simulate,
+    });
+    coord.read({ serializerKey: KEY, repoPath: KEY, candidates: [a, b], currentStamp: stampAB });
+    await tick();
+    const out = coord.read({ serializerKey: KEY, repoPath: KEY, candidates: [a, b], currentStamp: stampAB });
+    expect(out).toEqual([
+      { issueId: 4, slug: '04-a', verdict: { kind: 'clean' } },
+      { issueId: 7, slug: '07-b', verdict: { kind: 'artifact', paths: ['node_modules'] } },
+    ]);
+    expect(simulate).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-queues within one tick when the offender tip moves, then shows the recomputed real verdict', async () => {
+    // First recompute flags b as an offender; the second (after its tip moves)
+    // finds the artifact gone — the freshness stamp carries the artifact fact.
+    const outcomes: SequenceSimOutcome[] = [
+      { steps: [{ kind: 'clean' }, { kind: 'clean' }], artifactPaths: [[], ['node_modules']] },
+      { steps: [{ kind: 'clean' }, { kind: 'clean' }], artifactPaths: [[], []] },
+    ];
+    let call = 0;
+    const simulate = vi.fn(async (): Promise<SequenceSimOutcome> => outcomes[call++]);
+    const coord = createPreviewCoordinator({
+      serializer: createRepoSerializer(),
+      isSupported: () => true,
+      simulate,
+    });
+
+    coord.read({ serializerKey: KEY, repoPath: KEY, candidates: [a, b], currentStamp: stampAB });
+    await tick();
+    expect(
+      coord.read({ serializerKey: KEY, repoPath: KEY, candidates: [a, b], currentStamp: stampAB })[1]
+        .verdict,
+    ).toEqual({ kind: 'artifact', paths: ['node_modules'] });
+
+    // b amended → its tip moved → stale → recalculating + a second recompute.
+    const movedB: PreviewStamp = { defaultTip: 'main-aaa', branchTips: ['t4', 'AMENDED'] };
+    const stale = coord.read({ serializerKey: KEY, repoPath: KEY, candidates: [a, b], currentStamp: movedB });
+    expect(stale.every((p) => p.verdict?.kind === 'recalculating')).toBe(true);
+    await tick();
+    expect(simulate).toHaveBeenCalledTimes(2);
+
+    const fresh = coord.read({ serializerKey: KEY, repoPath: KEY, candidates: [a, b], currentStamp: movedB });
+    expect(fresh[1].verdict).toEqual({ kind: 'clean' });
+  });
+});
+
 describe('preview coordinator — serializer discipline', () => {
   it('a real action queued during a burst waits behind AT MOST the one in-flight preview task', async () => {
     const serializer = createRepoSerializer();

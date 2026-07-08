@@ -22,7 +22,7 @@ import {
   simulateFirstMerge,
   simulateSequence,
 } from './merge-preview-adapter';
-import { sequenceVerdicts } from '../shared/merge-preview';
+import { sequenceVerdicts, applyArtifactVerdicts } from '../shared/merge-preview';
 import type { MergeCandidate } from '../shared/merge-preview';
 
 const exec = promisify(execFile);
@@ -235,6 +235,96 @@ describe('simulateSequence — the sequential simulation (issue 105)', () => {
     expect(sequenceVerdicts(candidates, outcome)).toEqual([
       { kind: 'conflicts', files: ['shared.txt'] },
       { kind: 'blocked', behindIssueId: 4 },
+    ]);
+  });
+});
+
+describe('simulateSequence — install-artifact detection (issue 106)', () => {
+  it('flags the branch that would add build-output / node_modules paths, per branch in order', async () => {
+    await makeBranch('04-a', async () => {
+      await writeFile(join(repo, 'a.txt'), 'from a\n');
+    });
+    await makeBranch('07-b', async () => {
+      // A build-output path AND a committed node_modules install artifact — the
+      // issue-98 class merge-tree alone can't see (both add DISJOINT files, so a
+      // pure merge preview would call every branch clean: the worst badge lie).
+      await mkdir(join(repo, 'dist'), { recursive: true });
+      await writeFile(join(repo, 'dist', 'bundle.js'), 'built\n');
+      await mkdir(join(repo, 'node_modules', 'left-pad'), { recursive: true });
+      await writeFile(join(repo, 'node_modules', 'left-pad', 'index.js'), 'module.exports = 1\n');
+    });
+    await makeBranch('09-c', async () => {
+      await writeFile(join(repo, 'c.txt'), 'from c\n');
+    });
+
+    const candidates: MergeCandidate[] = [
+      { issueId: 4, slug: '04-a' },
+      { issueId: 7, slug: '07-b' },
+      { issueId: 9, slug: '09-c' },
+    ];
+    const stamp = await readPreviewStamp(repo, 'main', candidates);
+    const outcome = await simulateSequence(repo, stamp);
+
+    // merge-tree ALONE badges every branch clean (disjoint files).
+    expect(outcome.steps).toEqual([{ kind: 'clean' }, { kind: 'clean' }, { kind: 'clean' }]);
+    // The hygiene diff flags branch b's artifact paths, per branch in merge order.
+    expect(outcome.artifactPaths?.[0]).toEqual([]);
+    expect(outcome.artifactPaths?.[1]).toEqual(
+      expect.arrayContaining(['dist/bundle.js', 'node_modules/left-pad/index.js']),
+    );
+    expect(outcome.artifactPaths?.[1]).toHaveLength(2);
+    expect(outcome.artifactPaths?.[2]).toEqual([]);
+
+    // End-to-end: the offender supersedes to `artifact`; the clean siblings keep clean.
+    const verdicts = applyArtifactVerdicts(
+      sequenceVerdicts(candidates, outcome),
+      outcome.artifactPaths,
+    );
+    expect(verdicts[0]).toEqual({ kind: 'clean' });
+    expect(verdicts[1].kind).toBe('artifact');
+    expect(verdicts[2]).toEqual({ kind: 'clean' });
+  });
+
+  it('a clean batch reports no artifact paths for any branch', async () => {
+    await makeBranch('04-a', async () => {
+      await writeFile(join(repo, 'a.txt'), 'from a\n');
+    });
+    await makeBranch('07-b', async () => {
+      await writeFile(join(repo, 'b.txt'), 'from b\n');
+    });
+    const candidates: MergeCandidate[] = [
+      { issueId: 4, slug: '04-a' },
+      { issueId: 7, slug: '07-b' },
+    ];
+    const stamp = await readPreviewStamp(repo, 'main', candidates);
+    const outcome = await simulateSequence(repo, stamp);
+    expect(outcome.artifactPaths).toEqual([[], []]);
+  });
+
+  it('recomputes to no artifact once the offending path is removed (staleness input)', async () => {
+    // The offender branch, then a re-run that drops the artifact: the diff no
+    // longer reports it, so the recompute yields a real (clean) verdict — the
+    // adapter side of "the artifact fact participates in staleness".
+    await makeBranch('04-a', async () => {
+      await mkdir(join(repo, 'out'), { recursive: true });
+      await writeFile(join(repo, 'out', 'app.js'), 'built\n');
+    });
+    const candidates: MergeCandidate[] = [{ issueId: 4, slug: '04-a' }];
+    const before = await simulateSequence(repo, await readPreviewStamp(repo, 'main', candidates));
+    expect(before.artifactPaths?.[0]).toEqual(['out/app.js']);
+
+    // Amend the branch to drop the artifact (a re-run that fixed the hygiene issue).
+    await git(repo, 'checkout', branchFor('04-a'));
+    await git(repo, 'rm', '-r', '--quiet', 'out');
+    await writeFile(join(repo, 'real.txt'), 'real work\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-m', 'drop build output, keep real work');
+    await git(repo, 'checkout', 'main');
+
+    const after = await simulateSequence(repo, await readPreviewStamp(repo, 'main', candidates));
+    expect(after.artifactPaths?.[0]).toEqual([]);
+    expect(applyArtifactVerdicts(sequenceVerdicts(candidates, after), after.artifactPaths)).toEqual([
+      { kind: 'clean' },
     ]);
   });
 });

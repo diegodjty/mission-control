@@ -1,5 +1,5 @@
 /**
- * Merge-preview decision module (pure — the deep module) — issues 104 & 105, ADR-0018.
+ * Merge-preview decision module (pure — the deep module) — issues 104, 105 & 106, ADR-0018.
  *
  * The entire Merge-preview badge contract is decided HERE, with no git, fs, or
  * Electron: given the ordered merge candidates, the tips the scan just observed
@@ -17,6 +17,22 @@
  *     the first conflicting branch), because the real merge exits at k and later
  *     branches never merge — no speculative verdicts past the stop.
  * (Issue 104's tracer badged only the first branch; 105 fills in the rest.)
+ *
+ * Artifact supersession (issue 106). The install-artifact hygiene check (issue
+ * 98 — a branch that would add a committed `node_modules` symlink or `dist`/`out`
+ * build output to the default branch) is folded in PER OFFENDER: such a branch
+ * badges `won't merge — adds install artifacts` with the offending paths, and
+ * that verdict SUPERSEDES whatever textual verdict the sequence gave it (a lone
+ * merge-tree run would call it `clean`, the worst badge lie). It is a per-branch
+ * STABLE fact — a diff against the default tip, order-independent — because the
+ * press-time hygiene refusal fires for ANY requested offender regardless of merge
+ * order (issue 98). Two invariants keep the supersession honest: it touches only
+ * the offender's OWN badge (innocent siblings keep their real `clean`/`conflicts`
+ * verdicts — one bad branch never smears the batch), and it is overlaid AFTER the
+ * textual sequence is decided, so later branches' `blocked behind NN` (computed
+ * from the textual conflict positions) is unchanged by it. The batch-level
+ * refusal (pressing Merge with any offender refuses EVERYTHING) stays a press-time
+ * message, never a badge — the badges stay per-branch.
  *
  * Freshness rides the ~1.5 s scan poll (no `.git` watcher): every settled
  * sequence is stamped with the (default-branch tip, ordered finished-branch
@@ -48,26 +64,42 @@ export type RawSimOutcome =
   | { kind: 'conflict'; files: string[] };
 
 /**
- * The raw outcome of simulating the WHOLE merge sequence (issue 105, from the
- * adapter). `steps` holds one entry per candidate IN MERGE ORDER, up to and
- * INCLUDING the first conflict: a clean chain has one `clean` per candidate; a
- * conflict at index k gives `steps.length === k + 1` with `steps[k]` the
- * conflict and everything before it `clean`. Candidates after the first
- * conflict are deliberately NOT simulated — the real merge stops there.
+ * The raw outcome of recomputing a batch's whole preview (issues 105 & 106, from
+ * the adapter), cached and stamped as one unit.
+ *
+ * `steps` is the merge-tree sequence (issue 105): one entry per candidate IN
+ * MERGE ORDER, up to and INCLUDING the first conflict — a clean chain has one
+ * `clean` per candidate; a conflict at index k gives `steps.length === k + 1`
+ * with `steps[k]` the conflict and everything before it `clean`. Candidates after
+ * the first conflict are deliberately NOT simulated — the real merge stops there.
+ *
+ * `artifactPaths` is the per-branch install-artifact hygiene fact (issue 106):
+ * one entry PER CANDIDATE in merge order (parallel to the stamp's `branchTips`),
+ * holding the ignored-artifact paths that branch would add to the default branch,
+ * `[]` when it adds none. Unlike `steps`, it is computed for EVERY candidate —
+ * including any past the sequence's first-conflict stop — because it is a diff
+ * against the default tip, order-independent, and the press-time refusal fires
+ * regardless of position. Optional so pre-106 cache fixtures (steps only) read as
+ * "no offenders".
  */
 export interface SequenceSimOutcome {
   steps: RawSimOutcome[];
+  artifactPaths?: string[][];
 }
 
 /**
  * A settled (cacheable/displayable) verdict — the transient `recalculating`
  * excluded. `blocked` names the first-conflicting branch (issue 105): this
- * branch never merges because the sequence stops before it.
+ * branch never merges because the sequence stops before it. `artifact` names the
+ * ignored install-artifact paths this branch would add (issue 106): it would be
+ * refused at the press-time hygiene preflight, so it "won't merge" regardless of
+ * its textual merge outcome.
  */
 export type SettledVerdict =
   | { kind: 'clean' }
   | { kind: 'conflicts'; files: string[] }
-  | { kind: 'blocked'; behindIssueId: number };
+  | { kind: 'blocked'; behindIssueId: number }
+  | { kind: 'artifact'; paths: string[] };
 
 /** A branch's displayed merge-preview verdict, including the transient state. */
 export type MergePreviewVerdict = SettledVerdict | { kind: 'recalculating' };
@@ -156,7 +188,30 @@ export function sequenceVerdicts(
 }
 
 /**
- * Decide every candidate's displayed verdict (issue 105). A FRESH cache (same
+ * Overlay the per-branch install-artifact hygiene verdict on the textual
+ * sequence verdicts (issue 106) — the supersession described in the module
+ * header. For each candidate, a NON-EMPTY `artifactPaths[i]` replaces its
+ * verdict with `{ kind: 'artifact', paths }`; everything else is returned
+ * UNCHANGED. Kept a separate pass (rather than folded into `sequenceVerdicts`)
+ * so the two invariants are structural: only offenders are touched (clean
+ * siblings keep their real verdict), and the textual verdicts — including every
+ * `blocked behind NN` — are already decided before the overlay, so the
+ * supersession cannot move them. `artifactPaths` absent (a pre-106 cache) is a
+ * no-op.
+ */
+export function applyArtifactVerdicts(
+  verdicts: SettledVerdict[],
+  artifactPaths: string[][] | undefined,
+): SettledVerdict[] {
+  if (artifactPaths === undefined) return verdicts;
+  return verdicts.map((verdict, i) => {
+    const paths = artifactPaths[i];
+    return paths && paths.length > 0 ? { kind: 'artifact', paths } : verdict;
+  });
+}
+
+/**
+ * Decide every candidate's displayed verdict (issues 105 & 106). A FRESH cache (same
  * ordered batch, matching stamp) maps its settled sequence to per-branch
  * verdicts via `sequenceVerdicts`; anything else (cold, stale, or a changed
  * batch) shows `recalculating` for EVERY branch — never a stale verdict, and
@@ -181,7 +236,10 @@ export function decidePreviews(input: {
       verdict: { kind: 'recalculating' },
     }));
   }
-  const verdicts = sequenceVerdicts(candidates, cached.outcome);
+  const verdicts = applyArtifactVerdicts(
+    sequenceVerdicts(candidates, cached.outcome),
+    cached.outcome.artifactPaths,
+  );
   return candidates.map((c, i) => ({ issueId: c.issueId, slug: c.slug, verdict: verdicts[i] }));
 }
 
@@ -197,6 +255,9 @@ export function verdictEqual(
   }
   if (a.kind === 'blocked' && b.kind === 'blocked') {
     return a.behindIssueId === b.behindIssueId;
+  }
+  if (a.kind === 'artifact' && b.kind === 'artifact') {
+    return a.paths.length === b.paths.length && a.paths.every((p, i) => p === b.paths[i]);
   }
   return true;
 }
@@ -221,7 +282,7 @@ export function branchPreviewsEqual(a: BranchPreview[], b: BranchPreview[]): boo
 export interface PreviewBadge {
   label: string;
   title: string;
-  tone: 'clean' | 'conflicts' | 'blocked' | 'recalculating';
+  tone: 'clean' | 'conflicts' | 'blocked' | 'artifact' | 'recalculating';
 }
 
 /** Format an issue id the way the Map shows it (`NN`, zero-padded to two). */
@@ -234,7 +295,9 @@ function issueLabel(issueId: number): string {
  * `conflicts` names the files it found so the blast radius — a lockfile vs. the
  * module two Runs both rewrote — is visible without pressing Merge; `blocked`
  * names the earlier branch (issue 105) whose predicted conflict stops the merge
- * before this one.
+ * before this one; `artifact` (issue 106) names the ignored install-artifact
+ * paths the branch would add, the reason the press-time hygiene preflight refuses
+ * it.
  */
 export function previewBadge(verdict: MergePreviewVerdict): PreviewBadge {
   switch (verdict.kind) {
@@ -261,6 +324,20 @@ export function previewBadge(verdict: MergePreviewVerdict): PreviewBadge {
           `Issue ${issueLabel(verdict.behindIssueId)} is predicted to conflict earlier in the ` +
           `merge sequence, so pressing Merge stops there — this branch never merges.`,
         tone: 'blocked',
+      };
+    case 'artifact':
+      return {
+        label:
+          verdict.paths.length > 0
+            ? `won't merge — adds install artifacts (${verdict.paths.join(', ')})`
+            : "won't merge — adds install artifacts",
+        title:
+          `Merging this branch would add ignored install artifact(s) to the default branch` +
+          (verdict.paths.length > 0 ? `: ${verdict.paths.join(', ')}` : '') +
+          `. A committed node_modules is a self-referential symlink that corrupts the install ` +
+          `on merge (issue 98), so pressing Merge refuses the whole batch — remove the ` +
+          `artifact path(s) from the branch, then Merge again.`,
+        tone: 'artifact',
       };
     case 'recalculating':
       return {
