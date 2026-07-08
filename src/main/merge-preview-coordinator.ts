@@ -1,13 +1,15 @@
 /**
- * Preview coordinator (main process) — issue 104, ADR-0018.
+ * Preview coordinator (main process) — issues 104 & 105, ADR-0018.
  *
  * The per-repo verdict cache that turns the ~1.5 s scan tick's cheap stamp read
- * into a fresh-or-`recalculating` badge WITHOUT ever computing on the scan path.
- * `read` is a pure cache read plus a stamp comparison; when the stamp mismatches
- * (main or a branch tip moved, a new first branch, or a cold cache) it returns
- * `recalculating` for the first branch and queues ONE coalesced recompute per
- * repo through the SHARED per-repo serializer — never per-branch, never two
- * pending (ADR-0018 freshness).
+ * into fresh-or-`recalculating` badges WITHOUT ever computing on the scan path.
+ * `read` is a pure cache read plus a batch+stamp comparison; when it mismatches
+ * (the default tip or any branch tip moved, or the finished-branch set itself
+ * changed — a new branch, a discard, a re-run) it returns `recalculating` for
+ * EVERY branch and queues ONE coalesced recompute per repo through the SHARED
+ * per-repo serializer — never per-branch, never two pending (ADR-0018 freshness).
+ * The recompute simulates the whole sequence (issue 105), so a conflict on an
+ * early branch correctly reshuffles every downstream `blocked behind NN`.
  *
  * Serializer discipline (issue 31 + ADR-0018): the recompute runs on the same
  * key the real Merge / worktree-commit handlers use, so a background simulation
@@ -23,12 +25,11 @@ import type { RepoSerializer } from '../shared/repo-serializer';
 import {
   decidePreviews,
   previewNeedsRecompute,
-  verdictFromSimulation,
   type BranchPreview,
   type CachedPreview,
   type MergeCandidate,
   type PreviewStamp,
-  type RawSimOutcome,
+  type SequenceSimOutcome,
 } from '../shared/merge-preview';
 
 export interface PreviewReadInput {
@@ -46,8 +47,8 @@ export interface PreviewCoordinator {
   /** True when git clears the merge-tree floor; false ⇒ `read` always returns []. */
   readonly supported: boolean;
   /**
-   * Cache read + stamp check for the scan payload; queues one coalesced recompute
-   * on a mismatch. Never computes a verdict itself.
+   * Cache read + batch/stamp check for the scan payload; queues one coalesced
+   * recompute on a mismatch. Never computes a verdict itself.
    */
   read(input: PreviewReadInput): BranchPreview[];
   /** Test/inspection: is a recompute pending for this serializer key? */
@@ -63,11 +64,12 @@ export interface PreviewCoordinatorDeps {
    */
   isSupported: () => boolean;
   /**
-   * Run the actual first-branch simulation against `repoPath` for `stamp`
-   * (defaultTip vs. branchTips[0]). Injected so the coordinator stays git-free
-   * and unit-testable; index.ts wires the real adapter (`simulateForStamp`).
+   * Run the actual SEQUENCE simulation against `repoPath` for `stamp` (fold the
+   * ordered branch tips into the default tip, stopping at the first conflict).
+   * Injected so the coordinator stays git-free and unit-testable; index.ts wires
+   * the real adapter (`simulateSequence`).
    */
-  simulate: (repoPath: string, stamp: PreviewStamp) => Promise<RawSimOutcome>;
+  simulate: (repoPath: string, stamp: PreviewStamp) => Promise<SequenceSimOutcome>;
 }
 
 export function createPreviewCoordinator(deps: PreviewCoordinatorDeps): PreviewCoordinator {
@@ -79,39 +81,39 @@ export function createPreviewCoordinator(deps: PreviewCoordinatorDeps): PreviewC
     if (!isSupported()) return [];
     const { serializerKey, repoPath, candidates, currentStamp } = input;
     if (candidates.length === 0) return [];
-    const first = candidates[0];
+    const slugs = candidates.map((c) => c.slug);
     const cached = cache.get(serializerKey) ?? null;
 
     if (
-      previewNeedsRecompute(cached, first.slug, currentStamp) &&
+      previewNeedsRecompute(cached, slugs, currentStamp) &&
       !pending.has(serializerKey)
     ) {
       // Coalesce: set pending BEFORE queueing so a burst of scan ticks while this
       // recompute is in flight queues nothing extra (single-threaded, so no read
       // can slip between the check and this set).
       pending.add(serializerKey);
-      // Capture the stamp/slug this recompute is FOR; store the verdict against
-      // exactly them so a later tick can tell whether tips moved again.
+      // Capture the batch/stamp this recompute is FOR; store the sequence against
+      // exactly them so a later tick can tell whether anything moved again.
       const stampForTask = currentStamp;
-      const slugForTask = first.slug;
+      const slugsForTask = slugs;
       void serializer
         .run(serializerKey, () => simulate(repoPath, stampForTask))
-        .then((raw: RawSimOutcome) => {
+        .then((outcome: SequenceSimOutcome) => {
           cache.set(serializerKey, {
             stamp: stampForTask,
-            firstSlug: slugForTask,
-            verdict: verdictFromSimulation(raw),
+            slugs: slugsForTask,
+            outcome,
           });
         })
         .catch(() => {
           // A failed simulation leaves no fresh cache entry; the next scan tick,
-          // still seeing a mismatch, re-queues. The badge stays `recalculating`
+          // still seeing a mismatch, re-queues. The badges stay `recalculating`
           // until a simulation succeeds — never a wrong verdict.
         })
         .finally(() => {
           // Re-arm the coalescer: the NEXT scan re-checks the (possibly moved)
-          // stamp and queues again if still stale — ADR-0018's "stamp re-checked
-          // when the task completes".
+          // stamp/batch and queues again if still stale — ADR-0018's "stamp
+          // re-checked when the task completes".
           pending.delete(serializerKey);
         });
     }

@@ -558,11 +558,12 @@ export interface AfkScanResult {
    */
   midMerge: boolean;
   /**
-   * Per-branch merge-preview verdicts (issue 104, ADR-0018), computed in the
-   * background and read from the coordinator's cache on this scan (the scan never
-   * computes). In this tracer slice only the FIRST mergeable branch per repo
-   * carries a verdict (`clean` / `conflicts` / `recalculating`); later branches
-   * appear with `verdict: null` — full-batch verdicts are issue 105. Empty when
+   * Per-branch merge-preview verdicts (issues 104 & 105, ADR-0018), computed in
+   * the background and read from the coordinator's cache on this scan (the scan
+   * never computes). Every finished-unmerged branch per repo carries a verdict
+   * from the FULL sequential merge in merge order (`clean` / `conflicts (files…)`
+   * / `blocked behind NN` / `recalculating`); the sequence stops at the first
+   * predicted conflict, so branches after it read `blocked behind NN`. Empty when
    * previews are unavailable (git < 2.38) or the repo is mid-merge.
    */
   previews: BranchPreview[];

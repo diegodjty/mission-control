@@ -1,14 +1,18 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createRepoSerializer } from '../shared/repo-serializer';
 import { createPreviewCoordinator } from './merge-preview-coordinator';
-import type { MergeCandidate, PreviewStamp, RawSimOutcome } from '../shared/merge-preview';
+import type { MergeCandidate, PreviewStamp, SequenceSimOutcome } from '../shared/merge-preview';
 
 const KEY = '/repo/a';
-const first: MergeCandidate = { issueId: 4, slug: '04-first' };
-const second: MergeCandidate = { issueId: 7, slug: '07-second' };
+const a: MergeCandidate = { issueId: 4, slug: '04-a' };
+const b: MergeCandidate = { issueId: 7, slug: '07-b' };
+const c: MergeCandidate = { issueId: 9, slug: '09-c' };
 
-const stampA: PreviewStamp = { defaultTip: 'main-aaa', branchTips: ['b4-aaa'] };
-const stampB: PreviewStamp = { defaultTip: 'main-bbb', branchTips: ['b4-aaa'] };
+const stampAB: PreviewStamp = { defaultTip: 'main-aaa', branchTips: ['t4', 't7'] };
+const stampAB_movedMain: PreviewStamp = { defaultTip: 'main-bbb', branchTips: ['t4', 't7'] };
+const stampABC: PreviewStamp = { defaultTip: 'main-aaa', branchTips: ['t4', 't7', 't9'] };
+
+const cleanChain2: SequenceSimOutcome = { steps: [{ kind: 'clean' }, { kind: 'clean' }] };
 
 /** A promise whose resolve is exposed so a test can hold a simulation open. */
 function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
@@ -21,9 +25,9 @@ function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
 
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
-describe('preview coordinator — git-floor gate (issue 104)', () => {
+describe('preview coordinator — git-floor gate', () => {
   it('returns no previews and never simulates when git is below the floor', () => {
-    const simulate = vi.fn<(repoPath: string, stamp: PreviewStamp) => Promise<RawSimOutcome>>();
+    const simulate = vi.fn<(repoPath: string, stamp: PreviewStamp) => Promise<SequenceSimOutcome>>();
     const coord = createPreviewCoordinator({
       serializer: createRepoSerializer(),
       isSupported: () => false,
@@ -31,65 +35,63 @@ describe('preview coordinator — git-floor gate (issue 104)', () => {
     });
     expect(coord.supported).toBe(false);
     expect(
-      coord.read({ serializerKey: KEY, repoPath: KEY, candidates: [first], currentStamp: stampA }),
+      coord.read({ serializerKey: KEY, repoPath: KEY, candidates: [a, b], currentStamp: stampAB }),
     ).toEqual([]);
     expect(simulate).not.toHaveBeenCalled();
   });
 });
 
-describe('preview coordinator — cache read + recompute (issue 104)', () => {
-  it('shows recalculating on a cold cache, then the fresh verdict once the recompute lands', async () => {
-    const simulate = vi.fn(async (): Promise<RawSimOutcome> => ({ kind: 'clean' }));
+describe('preview coordinator — full-batch sequence cache + recompute (issue 105)', () => {
+  it('shows recalculating for every branch on a cold cache, then the fresh sequence once it lands', async () => {
+    const simulate = vi.fn(async (): Promise<SequenceSimOutcome> => cleanChain2);
     const coord = createPreviewCoordinator({
       serializer: createRepoSerializer(),
       isSupported: () => true,
       simulate,
     });
 
-    const cold = coord.read({
-      serializerKey: KEY,
-      repoPath: KEY,
-      candidates: [first],
-      currentStamp: stampA,
-    });
-    expect(cold).toEqual([{ issueId: 4, slug: '04-first', verdict: { kind: 'recalculating' } }]);
+    const cold = coord.read({ serializerKey: KEY, repoPath: KEY, candidates: [a, b], currentStamp: stampAB });
+    expect(cold.map((p) => p.verdict)).toEqual([{ kind: 'recalculating' }, { kind: 'recalculating' }]);
     expect(coord.pending(KEY)).toBe(true);
 
     await tick();
     expect(coord.pending(KEY)).toBe(false);
 
-    const fresh = coord.read({
-      serializerKey: KEY,
-      repoPath: KEY,
-      candidates: [first],
-      currentStamp: stampA,
-    });
-    expect(fresh).toEqual([{ issueId: 4, slug: '04-first', verdict: { kind: 'clean' } }]);
+    const fresh = coord.read({ serializerKey: KEY, repoPath: KEY, candidates: [a, b], currentStamp: stampAB });
+    expect(fresh.map((p) => p.verdict)).toEqual([{ kind: 'clean' }, { kind: 'clean' }]);
+    // ONE simulation for the whole batch — not one per branch.
     expect(simulate).toHaveBeenCalledTimes(1);
   });
 
-  it('surfaces a conflict verdict with the offending files', async () => {
+  it('a mid-sequence conflict badges clean / conflicts / blocked-behind across the batch', async () => {
     const simulate = vi.fn(
-      async (): Promise<RawSimOutcome> => ({ kind: 'conflict', files: ['src/x.ts'] }),
+      async (): Promise<SequenceSimOutcome> => ({
+        steps: [{ kind: 'clean' }, { kind: 'conflict', files: ['shared.txt'] }],
+      }),
     );
     const coord = createPreviewCoordinator({
       serializer: createRepoSerializer(),
       isSupported: () => true,
       simulate,
     });
-    coord.read({ serializerKey: KEY, repoPath: KEY, candidates: [first], currentStamp: stampA });
+    coord.read({ serializerKey: KEY, repoPath: KEY, candidates: [a, b, c], currentStamp: stampABC });
     await tick();
     const out = coord.read({
       serializerKey: KEY,
       repoPath: KEY,
-      candidates: [first],
-      currentStamp: stampA,
+      candidates: [a, b, c],
+      currentStamp: stampABC,
     });
-    expect(out[0].verdict).toEqual({ kind: 'conflicts', files: ['src/x.ts'] });
+    expect(out).toEqual([
+      { issueId: 4, slug: '04-a', verdict: { kind: 'clean' } },
+      { issueId: 7, slug: '07-b', verdict: { kind: 'conflicts', files: ['shared.txt'] } },
+      { issueId: 9, slug: '09-c', verdict: { kind: 'blocked', behindIssueId: 7 } },
+    ]);
+    expect(simulate).toHaveBeenCalledTimes(1);
   });
 
   it('coalesces a burst of invalidations into ONE pending recompute per repo', async () => {
-    const gate = deferred<RawSimOutcome>();
+    const gate = deferred<SequenceSimOutcome>();
     const simulate = vi.fn(() => gate.promise);
     const coord = createPreviewCoordinator({
       serializer: createRepoSerializer(),
@@ -97,84 +99,96 @@ describe('preview coordinator — cache read + recompute (issue 104)', () => {
       simulate,
     });
 
-    // First read queues the recompute; ten more while it is pending queue nothing.
     for (let i = 0; i < 10; i++) {
-      coord.read({ serializerKey: KEY, repoPath: KEY, candidates: [first], currentStamp: stampA });
+      coord.read({ serializerKey: KEY, repoPath: KEY, candidates: [a, b], currentStamp: stampAB });
     }
     expect(coord.pending(KEY)).toBe(true);
 
-    // The serializer runs the ONE queued task on a microtask; let it start. It
-    // then blocks on the (unresolved) gate, so pending stays true and no burst
-    // read queued a second simulation.
     await tick();
     expect(simulate).toHaveBeenCalledTimes(1);
     expect(coord.pending(KEY)).toBe(true);
 
-    gate.resolve({ kind: 'clean' });
+    gate.resolve(cleanChain2);
     await tick();
     expect(coord.pending(KEY)).toBe(false);
     expect(simulate).toHaveBeenCalledTimes(1);
   });
 
-  it('re-checks the stamp on completion: a moved tip re-queues, a stable one does not', async () => {
-    const simulate = vi.fn(async (): Promise<RawSimOutcome> => ({ kind: 'clean' }));
+  it('re-checks on completion: a moved main tip re-queues, a stable one does not', async () => {
+    const simulate = vi.fn(async (): Promise<SequenceSimOutcome> => cleanChain2);
     const coord = createPreviewCoordinator({
       serializer: createRepoSerializer(),
       isSupported: () => true,
       simulate,
     });
 
-    coord.read({ serializerKey: KEY, repoPath: KEY, candidates: [first], currentStamp: stampA });
+    coord.read({ serializerKey: KEY, repoPath: KEY, candidates: [a, b], currentStamp: stampAB });
     await tick();
     // Same stamp → fresh, no new recompute.
-    coord.read({ serializerKey: KEY, repoPath: KEY, candidates: [first], currentStamp: stampA });
+    coord.read({ serializerKey: KEY, repoPath: KEY, candidates: [a, b], currentStamp: stampAB });
     await tick();
     expect(simulate).toHaveBeenCalledTimes(1);
 
-    // main moved (stampB) → recalculating + a second recompute.
+    // main moved → recalculating + a second recompute.
     const stale = coord.read({
       serializerKey: KEY,
       repoPath: KEY,
-      candidates: [first],
-      currentStamp: stampB,
+      candidates: [a, b],
+      currentStamp: stampAB_movedMain,
     });
-    expect(stale[0].verdict).toEqual({ kind: 'recalculating' });
+    expect(stale.every((p) => p.verdict?.kind === 'recalculating')).toBe(true);
     await tick();
     expect(simulate).toHaveBeenCalledTimes(2);
   });
 
-  it('in a two-branch batch, only the first branch is simulated / badged', async () => {
-    const simulate = vi.fn(async (): Promise<RawSimOutcome> => ({ kind: 'clean' }));
-    const twoStamp: PreviewStamp = { defaultTip: 'main-aaa', branchTips: ['b4-aaa', 'b7-aaa'] };
+  it('a NEW finished branch appearing invalidates the batch and recomputes within one tick', async () => {
+    const simulate = vi.fn(async (): Promise<SequenceSimOutcome> => cleanChain2);
     const coord = createPreviewCoordinator({
       serializer: createRepoSerializer(),
       isSupported: () => true,
       simulate,
     });
-    coord.read({
-      serializerKey: KEY,
-      repoPath: KEY,
-      candidates: [first, second],
-      currentStamp: twoStamp,
-    });
+
+    coord.read({ serializerKey: KEY, repoPath: KEY, candidates: [a, b], currentStamp: stampAB });
     await tick();
-    const out = coord.read({
+    expect(simulate).toHaveBeenCalledTimes(1);
+
+    // A third finished branch appears → the cached 2-branch sequence is stale.
+    const grown = coord.read({
       serializerKey: KEY,
       repoPath: KEY,
-      candidates: [first, second],
-      currentStamp: twoStamp,
+      candidates: [a, b, c],
+      currentStamp: stampABC,
     });
-    expect(out[0].verdict).toEqual({ kind: 'clean' });
-    expect(out[1].verdict).toBeNull();
-    // Only one simulation ran for the whole batch — the first branch's.
-    expect(simulate).toHaveBeenCalledTimes(1);
+    expect(grown).toHaveLength(3);
+    expect(grown.every((p) => p.verdict?.kind === 'recalculating')).toBe(true);
+    await tick();
+    expect(simulate).toHaveBeenCalledTimes(2);
+  });
+
+  it('a DISCARDED branch (batch shrank) invalidates and recomputes', async () => {
+    const simulate = vi.fn(async (): Promise<SequenceSimOutcome> => ({ steps: [{ kind: 'clean' }] }));
+    const coord = createPreviewCoordinator({
+      serializer: createRepoSerializer(),
+      isSupported: () => true,
+      simulate,
+    });
+    coord.read({ serializerKey: KEY, repoPath: KEY, candidates: [a, b], currentStamp: stampAB });
+    await tick();
+    // b discarded → only a remains.
+    const stampA: PreviewStamp = { defaultTip: 'main-aaa', branchTips: ['t4'] };
+    const out = coord.read({ serializerKey: KEY, repoPath: KEY, candidates: [a], currentStamp: stampA });
+    expect(out).toHaveLength(1);
+    expect(out[0].verdict).toEqual({ kind: 'recalculating' });
+    await tick();
+    expect(simulate).toHaveBeenCalledTimes(2);
   });
 });
 
-describe('preview coordinator — serializer discipline (issue 104)', () => {
+describe('preview coordinator — serializer discipline', () => {
   it('a real action queued during a burst waits behind AT MOST the one in-flight preview task', async () => {
     const serializer = createRepoSerializer();
-    const gate = deferred<RawSimOutcome>();
+    const gate = deferred<SequenceSimOutcome>();
     const order: string[] = [];
     const simulate = vi.fn(async () => {
       order.push('preview-start');
@@ -184,23 +198,18 @@ describe('preview coordinator — serializer discipline (issue 104)', () => {
     });
     const coord = createPreviewCoordinator({ serializer, isSupported: () => true, simulate });
 
-    // Queue the preview recompute, then a burst that must coalesce (no extra tasks).
     for (let i = 0; i < 5; i++) {
-      coord.read({ serializerKey: KEY, repoPath: KEY, candidates: [first], currentStamp: stampA });
+      coord.read({ serializerKey: KEY, repoPath: KEY, candidates: [a, b], currentStamp: stampAB });
     }
-    // A real Merge/commit queued on the SAME serializer key afterwards.
     const merge = serializer.run(KEY, () => {
       order.push('merge');
     });
 
-    // The merge cannot run until the single in-flight preview finishes.
     await tick();
     expect(order).toEqual(['preview-start']);
 
-    gate.resolve({ kind: 'clean' });
+    gate.resolve(cleanChain2);
     await merge;
-    // Exactly one preview ran (coalesced), and the merge ran right after it —
-    // never queued behind a backlog of preview tasks.
     expect(simulate).toHaveBeenCalledTimes(1);
     expect(order).toEqual(['preview-start', 'preview-end', 'merge']);
   });

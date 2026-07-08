@@ -1,23 +1,30 @@
 /**
- * Merge-preview decision module (pure — the deep module) — issue 104, ADR-0018.
+ * Merge-preview decision module (pure — the deep module) — issues 104 & 105, ADR-0018.
  *
  * The entire Merge-preview badge contract is decided HERE, with no git, fs, or
  * Electron: given the ordered merge candidates, the tips the scan just observed
- * (the "stamp"), and the coordinator's cached verdict, emit each branch's
- * displayed verdict and answer "does the first branch need recomputing?".
+ * (the "stamp"), and the coordinator's cached sequence outcome, emit each
+ * branch's displayed verdict and answer "does this batch need recomputing?".
  *
- * This slice (the tracer bullet) badges only the FIRST branch in merge order
- * (ascending issue id) — the one branch whose pairwise-against-default preview
- * is EXACT, because it merges first so its sequence position cannot change the
- * outcome. Later branches carry `verdict: null` (no badge yet): a pairwise guess
- * there would violate the sequence semantics ADR-0018 settled, and full-batch
- * verdicts are issue 105.
+ * Sequence semantics (issue 105). The preview simulates the FULL merge sequence
+ * in current merge order (ascending issue id) — exactly what pressing Merge does
+ * via `afk-merge.sh`: merge the first branch, then each subsequent branch on top
+ * of the running result, STOPPING at the first predicted conflict. So the
+ * verdicts a settled sequence produces are:
+ *   - a clean chain  → every branch `clean`;
+ *   - a conflict at position k → branches before k `clean`, branch k
+ *     `conflicts (files…)`, and every branch AFTER k `blocked behind NN` (NN =
+ *     the first conflicting branch), because the real merge exits at k and later
+ *     branches never merge — no speculative verdicts past the stop.
+ * (Issue 104's tracer badged only the first branch; 105 fills in the rest.)
  *
- * Freshness rides the ~1.5 s scan poll (no `.git` watcher): every settled verdict
- * is stamped with the (default-branch tip, ordered finished-branch tips) it was
- * computed against; a stamp mismatch shows `recalculating` — never a stale
- * verdict — and the coordinator queues a recompute. Pure so the whole verdict
- * matrix is unit-testable in isolation (see the PRD "Testing Decisions").
+ * Freshness rides the ~1.5 s scan poll (no `.git` watcher): every settled
+ * sequence is stamped with the (default-branch tip, ordered finished-branch
+ * tips) it was computed against — so ANY batch change (a new finished branch, a
+ * discarded one, a re-run moving a tip) is a stamp/slug mismatch that shows
+ * `recalculating` (never a stale verdict) and makes the coordinator recompute
+ * the whole sequence. Pure so the whole verdict matrix is unit-testable in
+ * isolation (see the PRD "Testing Decisions").
  */
 import type { MergeCandidate } from './merge-plan';
 
@@ -35,21 +42,40 @@ export interface PreviewStamp {
   branchTips: string[];
 }
 
-/** The raw outcome of simulating one branch's merge (from the adapter). */
+/** The raw outcome of simulating one branch's merge step (from the adapter). */
 export type RawSimOutcome =
   | { kind: 'clean' }
   | { kind: 'conflict'; files: string[] };
 
-/** A settled (cacheable/displayable) verdict — the transient `recalculating` excluded. */
-export type SettledVerdict = { kind: 'clean' } | { kind: 'conflicts'; files: string[] };
+/**
+ * The raw outcome of simulating the WHOLE merge sequence (issue 105, from the
+ * adapter). `steps` holds one entry per candidate IN MERGE ORDER, up to and
+ * INCLUDING the first conflict: a clean chain has one `clean` per candidate; a
+ * conflict at index k gives `steps.length === k + 1` with `steps[k]` the
+ * conflict and everything before it `clean`. Candidates after the first
+ * conflict are deliberately NOT simulated — the real merge stops there.
+ */
+export interface SequenceSimOutcome {
+  steps: RawSimOutcome[];
+}
+
+/**
+ * A settled (cacheable/displayable) verdict — the transient `recalculating`
+ * excluded. `blocked` names the first-conflicting branch (issue 105): this
+ * branch never merges because the sequence stops before it.
+ */
+export type SettledVerdict =
+  | { kind: 'clean' }
+  | { kind: 'conflicts'; files: string[] }
+  | { kind: 'blocked'; behindIssueId: number };
 
 /** A branch's displayed merge-preview verdict, including the transient state. */
 export type MergePreviewVerdict = SettledVerdict | { kind: 'recalculating' };
 
 /**
  * One branch's preview as it travels with the scan result to the Map. A null
- * verdict means "no badge yet" — a later branch in this tracer slice (issue 105
- * fills these in).
+ * verdict means "no verdict" — a defensive state the renderer simply shows no
+ * badge for; in normal operation every candidate carries a verdict (issue 105).
  */
 export interface BranchPreview {
   issueId: number;
@@ -57,18 +83,26 @@ export interface BranchPreview {
   verdict: MergePreviewVerdict | null;
 }
 
-/** The coordinator's cached verdict for a repo's first branch + its stamp. */
+/**
+ * The coordinator's cached SEQUENCE outcome for a repo's whole batch + the tips
+ * and the ordered candidate identity it was computed against. A different batch
+ * (branch added/discarded/reordered) or a moved tip invalidates it.
+ */
 export interface CachedPreview {
   stamp: PreviewStamp;
-  /** The slug the verdict is for — a different first branch invalidates it. */
-  firstSlug: string;
-  /** A settled verdict only — `recalculating` is display-only, never cached. */
-  verdict: SettledVerdict;
+  /** The ordered candidate slugs the sequence was computed for (batch identity). */
+  slugs: string[];
+  /** The raw per-step sequence outcome (clean chain, or clean…+first conflict). */
+  outcome: SequenceSimOutcome;
 }
 
-/** Turn a raw simulation outcome into the settled verdict to cache/display. */
-export function verdictFromSimulation(raw: RawSimOutcome): SettledVerdict {
-  return raw.kind === 'clean' ? { kind: 'clean' } : { kind: 'conflicts', files: raw.files };
+/** Value-equality of two ordered slug lists (the batch identity). */
+export function slugsEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
 }
 
 /** Value-equality of two stamps (default tip + ordered branch tips). */
@@ -82,31 +116,53 @@ export function stampsEqual(a: PreviewStamp, b: PreviewStamp): boolean {
 }
 
 /**
- * Whether the first branch's verdict must be recomputed: no cache, a different
- * first branch, or a stamp mismatch (main or a branch tip moved). The coordinator
- * consults this to decide whether to queue a (coalesced) recompute.
+ * Whether the sequence must be recomputed: no cache, a changed batch (candidate
+ * slug set/order), or a stamp mismatch (the default tip or any branch tip
+ * moved). The coordinator consults this to decide whether to queue a (coalesced)
+ * recompute. A single mismatch invalidates the WHOLE sequence — a conflict on an
+ * early branch reshuffles every downstream `blocked behind NN`.
  */
 export function previewNeedsRecompute(
   cached: CachedPreview | null,
-  firstSlug: string,
+  candidateSlugs: string[],
   currentStamp: PreviewStamp,
 ): boolean {
   return (
     cached === null ||
-    cached.firstSlug !== firstSlug ||
+    !slugsEqual(cached.slugs, candidateSlugs) ||
     !stampsEqual(cached.stamp, currentStamp)
   );
 }
 
 /**
- * Decide each candidate's displayed verdict for the tracer slice (issue 104).
- *
- * Only the FIRST candidate (candidates[0], lowest issue id) carries a verdict. A
- * FRESH cache (same first branch, matching stamp) shows its settled verdict;
- * anything else (cold, stale, or a changed first branch) shows `recalculating` —
- * never a stale verdict. Every later candidate carries `verdict: null` — no badge
- * yet (issue 105). `candidates` MUST already be ordered ascending by issue id
- * (as `mergeReadinessOnDisk(...).mergeable` supplies them).
+ * Turn a settled sequence outcome into each candidate's verdict (pure). The
+ * first `conflict` step is the stop point: before it, `clean`; at it,
+ * `conflicts`; after it, `blocked behind <first conflicting issue id>`. A
+ * conflict-free sequence badges every candidate `clean`.
+ */
+export function sequenceVerdicts(
+  candidates: MergeCandidate[],
+  outcome: SequenceSimOutcome,
+): SettledVerdict[] {
+  const conflictIndex = outcome.steps.findIndex((s) => s.kind === 'conflict');
+  return candidates.map((_c, i) => {
+    if (conflictIndex === -1 || i < conflictIndex) return { kind: 'clean' };
+    if (i === conflictIndex) {
+      const step = outcome.steps[i];
+      return { kind: 'conflicts', files: step.kind === 'conflict' ? step.files : [] };
+    }
+    return { kind: 'blocked', behindIssueId: candidates[conflictIndex].issueId };
+  });
+}
+
+/**
+ * Decide every candidate's displayed verdict (issue 105). A FRESH cache (same
+ * ordered batch, matching stamp) maps its settled sequence to per-branch
+ * verdicts via `sequenceVerdicts`; anything else (cold, stale, or a changed
+ * batch) shows `recalculating` for EVERY branch — never a stale verdict, and
+ * never a mix of fresh-and-stale rows, because the sequence is recomputed as one
+ * unit. `candidates` MUST already be ordered ascending by issue id (as
+ * `mergeReadinessOnDisk(...).mergeable` supplies them).
  */
 export function decidePreviews(input: {
   candidates: MergeCandidate[];
@@ -115,20 +171,21 @@ export function decidePreviews(input: {
 }): BranchPreview[] {
   const { candidates, currentStamp, cached } = input;
   if (candidates.length === 0) return [];
-  const first = candidates[0];
+  const slugs = candidates.map((c) => c.slug);
   const fresh =
-    cached !== null &&
-    cached.firstSlug === first.slug &&
-    stampsEqual(cached.stamp, currentStamp);
-  const firstVerdict: MergePreviewVerdict = fresh ? cached.verdict : { kind: 'recalculating' };
-  return candidates.map((c, i) => ({
-    issueId: c.issueId,
-    slug: c.slug,
-    verdict: i === 0 ? firstVerdict : null,
-  }));
+    cached !== null && slugsEqual(cached.slugs, slugs) && stampsEqual(cached.stamp, currentStamp);
+  if (!fresh) {
+    return candidates.map((c) => ({
+      issueId: c.issueId,
+      slug: c.slug,
+      verdict: { kind: 'recalculating' },
+    }));
+  }
+  const verdicts = sequenceVerdicts(candidates, cached.outcome);
+  return candidates.map((c, i) => ({ issueId: c.issueId, slug: c.slug, verdict: verdicts[i] }));
 }
 
-/** Value-equality of two verdicts (or nulls), including the conflict file list. */
+/** Value-equality of two verdicts (or nulls), including verdict-specific fields. */
 export function verdictEqual(
   a: MergePreviewVerdict | null,
   b: MergePreviewVerdict | null,
@@ -137,6 +194,9 @@ export function verdictEqual(
   if (a.kind !== b.kind) return false;
   if (a.kind === 'conflicts' && b.kind === 'conflicts') {
     return a.files.length === b.files.length && a.files.every((f, i) => f === b.files[i]);
+  }
+  if (a.kind === 'blocked' && b.kind === 'blocked') {
+    return a.behindIssueId === b.behindIssueId;
   }
   return true;
 }
@@ -161,20 +221,28 @@ export function branchPreviewsEqual(a: BranchPreview[], b: BranchPreview[]): boo
 export interface PreviewBadge {
   label: string;
   title: string;
-  tone: 'clean' | 'conflicts' | 'recalculating';
+  tone: 'clean' | 'conflicts' | 'blocked' | 'recalculating';
+}
+
+/** Format an issue id the way the Map shows it (`NN`, zero-padded to two). */
+function issueLabel(issueId: number): string {
+  return String(issueId).padStart(2, '0');
 }
 
 /**
  * Map a verdict to its Map badge (pure display selector, mirroring merge-display).
  * `conflicts` names the files it found so the blast radius — a lockfile vs. the
- * module two Runs both rewrote — is visible without pressing Merge.
+ * module two Runs both rewrote — is visible without pressing Merge; `blocked`
+ * names the earlier branch (issue 105) whose predicted conflict stops the merge
+ * before this one.
  */
 export function previewBadge(verdict: MergePreviewVerdict): PreviewBadge {
   switch (verdict.kind) {
     case 'clean':
       return {
         label: 'merges clean',
-        title: 'Previewed against the current default-branch tip: this branch merges cleanly.',
+        title:
+          'Previewed against the full merge sequence in merge order: this branch merges cleanly.',
         tone: 'clean',
       };
     case 'conflicts':
@@ -182,14 +250,22 @@ export function previewBadge(verdict: MergePreviewVerdict): PreviewBadge {
         label: verdict.files.length > 0 ? `conflicts (${verdict.files.join(', ')})` : 'conflicts',
         title:
           verdict.files.length > 0
-            ? `Merging this branch would conflict in: ${verdict.files.join(', ')}`
-            : 'Merging this branch would conflict.',
+            ? `Merging this branch (in sequence) would conflict in: ${verdict.files.join(', ')}`
+            : 'Merging this branch (in sequence) would conflict.',
         tone: 'conflicts',
+      };
+    case 'blocked':
+      return {
+        label: `blocked behind ${issueLabel(verdict.behindIssueId)}`,
+        title:
+          `Issue ${issueLabel(verdict.behindIssueId)} is predicted to conflict earlier in the ` +
+          `merge sequence, so pressing Merge stops there — this branch never merges.`,
+        tone: 'blocked',
       };
     case 'recalculating':
       return {
         label: 'recalculating…',
-        title: 'The default branch or this branch moved — recomputing the merge preview.',
+        title: 'The default branch or a finished branch moved — recomputing the merge preview.',
         tone: 'recalculating',
       };
   }
