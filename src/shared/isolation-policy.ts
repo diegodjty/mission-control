@@ -37,6 +37,21 @@ export interface IsolationRun {
    * the one repo), where the caller supplies the repo out-of-band as before.
    */
   repoPath?: string;
+  /**
+   * This Run sits on a dependency chain being drained (issue 111): its issue
+   * transitively `depends_on`, or is depended-on by, another issue completed or
+   * active in the same drain. Such a Run must build on its dependency's
+   * COMMITTED work, which lives on the integration branch (a solo Run's
+   * `commitFinishedMain` lands there) — never on a sibling `afk/NN` branch a
+   * worktree wouldn't see. So a chained Run stays SOLO on the integration branch
+   * even while parallel mode is on for genuinely-independent concurrent Runs (or
+   * for a leftover worktree awaiting merge, `reconcile` below). Only genuinely
+   * concurrent AND independent Runs (no dependency edge between them) isolate
+   * into worktrees. The CALLER marks this from the dependency graph
+   * (`soloChainedIssueIds`, run-coordinator) — this module only honors it.
+   * Absent/false ⇒ an independent Run, decided by concurrency exactly as before.
+   */
+  chained?: boolean;
 }
 
 /** Where a Run does its work. */
@@ -104,9 +119,19 @@ export interface DecideIsolationOptions {
  * Decide the desired isolation state for a set of Runs.
  *
  * `<= 1` Run ⇒ solo: parallel disabled, the lone Run (if any) works on `main`.
- * `>= 2` Runs ⇒ parallel: parallel enabled, every Run gets its own worktree on
- * an `afk/NN-slug` branch. Deterministic (sorted by issueId) so re-deciding the
- * same input yields the same decision.
+ * `>= 2` Runs ⇒ parallel: parallel enabled, and each genuinely-INDEPENDENT Run
+ * gets its own worktree on an `afk/NN-slug` branch. Deterministic (sorted by
+ * issueId) so re-deciding the same input yields the same decision.
+ *
+ * **Dependency chains stay solo (issue 111).** A Run marked `chained` sits on a
+ * dependency edge within the drain and must build on its dependency's committed
+ * work, which lives on the integration branch — so it is placed on `main` even
+ * when parallel mode is on. Worktrees are cut only for genuinely concurrent AND
+ * independent Runs; a worktree cut from the integration-branch HEAD would miss a
+ * dependency whose work sits on a sibling `afk/NN` branch, which is exactly the
+ * stale-base bug this closes. Parallel mode is therefore enabled only when at
+ * least one INDEPENDENT Run needs a worktree (`>= 2` Runs with one not chained);
+ * an all-chained set (e.g. a 2-issue chain) stays solo, no `.afk-parallel`.
  *
  * When the target is **unisolatable** (`options.isolatable === false`, ADR-0017)
  * the concurrency check is skipped entirely: the decision is always solo, so a
@@ -118,13 +143,18 @@ export function decideIsolation(
 ): IsolationDecision {
   const isolatable = options.isolatable ?? true;
   const sorted = [...runs].sort((a, b) => a.issueId - b.issueId);
-  const parallel = isolatable && sorted.length >= 2;
+  // Parallel mode exists to isolate concurrent INDEPENDENT Runs into worktrees.
+  // A chained Run never takes a worktree (it stays solo on the integration
+  // branch), so parallel is warranted only when 2+ Runs are live AND at least
+  // one of them is independent and would actually get a worktree.
+  const parallel = isolatable && sorted.length >= 2 && sorted.some((r) => !r.chained);
   const placements: PlacedRun[] = sorted.map((run) => ({
     issueId: run.issueId,
     slug: run.slug,
-    placement: parallel
-      ? { kind: 'worktree', branch: branchFor(run.slug) }
-      : { kind: 'main' },
+    placement:
+      parallel && !run.chained
+        ? { kind: 'worktree', branch: branchFor(run.slug) }
+        : { kind: 'main' },
   }));
   return { parallel, placements };
 }

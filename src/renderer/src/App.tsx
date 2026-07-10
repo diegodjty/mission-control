@@ -89,7 +89,12 @@ import {
   latestReceiptOutcomeFor,
   mismatchKey,
 } from '../../shared/receipt-audit';
-import { planDrain, drainAvailability, type ActiveRun } from '../../shared/run-coordinator';
+import {
+  planDrain,
+  drainAvailability,
+  soloChainedIssueIds,
+  type ActiveRun,
+} from '../../shared/run-coordinator';
 import { isNotableDrainActivity } from '../../shared/workbench-memory';
 import { hasInFlightRun } from '../../shared/run-eligibility';
 import {
@@ -1442,17 +1447,22 @@ export function App(): JSX.Element {
 
       // The Runs that need isolation once this one joins = the ones still live
       // (running or in a worktree) plus the new target, deduped by issueId.
-      // Each carries its own target repo so isolation keys per repo (issue 72).
+      // Each carries its own target repo so isolation keys per repo (issue 72),
+      // and a `chained` flag so a Run on a dependency chain stays solo on the
+      // integration branch rather than a stale-based worktree (issue 111).
+      const solo = backlog ? soloChainedIssueIds(backlog.issues) : new Set<number>();
       const active: IsolationRun[] = runs.filter(needsIsolation).map((r) => ({
         issueId: r.target.issueId,
         slug: slugOf(r.target.issueFileName),
         repoPath: repoForIssueId(r.target.issueId),
+        chained: solo.has(r.target.issueId),
       }));
       const issueRepo = repoForIssueId(target.issueId);
       const isolationRuns = isolationRunSetWith(active, {
         issueId: target.issueId,
         slug: slugOf(target.issueFileName),
         repoPath: issueRepo,
+        chained: solo.has(target.issueId),
       });
 
       // Apply the resolved placements: re-point every tracked Run to its cwd —
@@ -1524,6 +1534,7 @@ export function App(): JSX.Element {
       repoForIssueId,
       workbenchPathsForRun,
       activeProject,
+      backlog,
     ],
   );
 
@@ -2594,16 +2605,24 @@ export function App(): JSX.Element {
     // about to start, each carrying its own target repo (issue 72): isolation
     // keys on concurrency PER REPO, so two startable issues in different repos
     // each stay solo in their own repo while 2+ in one repo get worktrees.
+    // Each also carries a `chained` flag (issue 111): a Run on a dependency
+    // chain in this drain stays SOLO on the integration branch — where its
+    // dependency's committed work lives — rather than a worktree cut from a
+    // stale base, even when parallel mode is on for independent siblings or a
+    // leftover worktree awaiting merge.
+    const solo = soloChainedIssueIds(plannable);
     const isolationRuns: IsolationRun[] = [
       ...runs.map((r) => ({
         issueId: r.target.issueId,
         slug: slugOf(r.target.issueFileName),
         repoPath: repoForIssueId(r.target.issueId),
+        chained: solo.has(r.target.issueId),
       })),
       ...startableIssues.map((i) => ({
         issueId: i.id,
         slug: slugOf(i.fileName),
         repoPath: repoForIssueId(i.id),
+        chained: solo.has(i.id),
       })),
     ];
 

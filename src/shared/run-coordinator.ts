@@ -78,6 +78,47 @@ export function isParkedHitl(
   );
 }
 
+/**
+ * The issue ids that must run SOLO on the integration branch because they sit on
+ * a dependency chain being drained (issue 111, option 2). An issue is
+ * solo-chained when it shares a dependency edge — in EITHER direction (it
+ * `depends_on` the other, or the other `depends_on` it) — with another issue
+ * that is **not yet `done`**. Both endpoints of such an edge are returned.
+ *
+ * Why either direction, and why "not-done":
+ *  - A DEPENDENT Run must build on its dependency's committed work. That work is
+ *    on the integration branch only if the dependency itself ran solo (its
+ *    `commitFinishedMain` landed there) rather than on a sibling `afk/NN`
+ *    branch. So the DEPENDENCY must be kept solo too — hence both endpoints.
+ *  - Edges to an already-`done` issue don't force solo: a dependency finished
+ *    before this drain has its work merged into the integration branch already,
+ *    and a dependency finished *during* this drain was itself solo-chained while
+ *    its dependent was still open, so its work is on the integration branch by
+ *    the time the dependent runs. Ignoring done-edges is what keeps a whole
+ *    batch that all `depends_on` a finished foundation issue from being forced
+ *    solo — genuine independents still parallelize (issue 111 out-of-scope note).
+ *
+ * PURE and derived from `BacklogIssue.dependsOn`/`status` alone, so the
+ * coordinator, the isolation marking, and the tests agree by construction.
+ */
+export function soloChainedIssueIds(issues: BacklogIssue[]): Set<number> {
+  const notDoneIds = new Set(issues.filter((i) => i.status !== 'done').map((i) => i.id));
+  const solo = new Set<number>();
+  for (const issue of issues) {
+    if (!notDoneIds.has(issue.id)) continue;
+    for (const dep of issue.dependsOn) {
+      // An edge counts only when BOTH endpoints are still in play (not-done):
+      // then both must stay solo so the dependency's work reaches the
+      // integration branch before the dependent builds on it.
+      if (notDoneIds.has(dep)) {
+        solo.add(issue.id);
+        solo.add(dep);
+      }
+    }
+  }
+  return solo;
+}
+
 /** Why a drain stopped. */
 export type DrainStopReason = 'no-eligible' | 'run-blocked' | 'mid-merge';
 
@@ -283,9 +324,31 @@ export function planDrain(input: DrainInput): DrainPlan {
     drain = { stop: false, reason: null, blockedIssueId: null, message: '' };
   }
 
-  // No further Panes open once the drain is stopping.
-  const startable = drain.stop ? [] : eligible.slice(0, freeSlots);
-  const queued = drain.stop ? eligible : eligible.slice(freeSlots);
+  // Fill the free slots in ascending id order, but honor the single
+  // integration-branch slot (issue 111): a solo-chained Run works directly on
+  // the integration branch, so at most ONE may be live at a time — two would
+  // collide on the shared tree. Independent Runs isolate into their own
+  // worktrees and fill the remaining slots freely. A solo-chained Run that can't
+  // get the slot (one is already running, or an earlier solo-chained pick took
+  // it this tick) queues, exactly like a Run over the cap. No further Panes open
+  // once the drain is stopping.
+  const solo = soloChainedIssueIds(input.issues);
+  let soloSlotTaken = input.activeRuns.some(
+    (r) => isOccupyingSlot(r) && solo.has(r.issueId),
+  );
+  const startable: number[] = [];
+  if (!drain.stop) {
+    for (const id of eligible) {
+      if (startable.length >= freeSlots) break;
+      if (solo.has(id)) {
+        if (soloSlotTaken) continue;
+        soloSlotTaken = true;
+      }
+      startable.push(id);
+    }
+  }
+  const startableSet = new Set(startable);
+  const queued = drain.stop ? eligible : eligible.filter((id) => !startableSet.has(id));
 
   return { startable, queued, drain };
 }

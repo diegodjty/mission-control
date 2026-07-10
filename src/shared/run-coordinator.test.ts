@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { planDrain, normalizeCap, isParkedHitl, drainAvailability, type ActiveRun } from './run-coordinator';
+import {
+  planDrain,
+  normalizeCap,
+  isParkedHitl,
+  drainAvailability,
+  soloChainedIssueIds,
+  type ActiveRun,
+} from './run-coordinator';
 import type { BacklogIssue, IssueStatus } from './backlog-model';
 
 /** Minimal issue factory — only the fields the coordinator/eligibility read. */
@@ -431,6 +438,95 @@ describe('planDrain — refuses to start on a mid-merge main (issue 24)', () => 
     const issues = [mk(1, 'open'), mk(2, 'open')];
     expect(planDrain({ issues, maxConcurrent: 2, activeRuns: [], midMerge: false }).startable).toEqual([1, 2]);
     expect(planDrain({ issues, maxConcurrent: 2, activeRuns: [] }).startable).toEqual([1, 2]);
+  });
+});
+
+describe('soloChainedIssueIds — dependency chains must stay solo (issue 111)', () => {
+  it('marks BOTH endpoints of an edge between two not-done issues', () => {
+    // 3 depends_on 2, both open: the dependency (2) must land its work on the
+    // integration branch (solo) and the dependent (3) must build on it (solo).
+    const solo = soloChainedIssueIds([mk(1, 'done'), mk(2, 'open'), mk(3, 'open', [2])]);
+    expect([...solo].sort((a, b) => a - b)).toEqual([2, 3]);
+  });
+
+  it('ignores edges to an already-done dependency — the foundation case', () => {
+    // Everything depends_on the finished foundation issue 1; its work is already
+    // on the integration branch, so no dependent is forced solo. This is what
+    // keeps genuine independents parallelizing (issue 111 out-of-scope note).
+    const solo = soloChainedIssueIds([
+      mk(1, 'done'),
+      mk(2, 'open', [1]),
+      mk(3, 'open', [1]),
+    ]);
+    expect(solo.size).toBe(0);
+  });
+
+  it('does not mark two genuinely independent issues', () => {
+    const solo = soloChainedIssueIds([mk(6, 'open'), mk(7, 'open')]);
+    expect(solo.size).toBe(0);
+  });
+
+  it('marks a chain whose dependency is still wip (active in the drain)', () => {
+    const solo = soloChainedIssueIds([mk(2, 'wip'), mk(3, 'open', [2])]);
+    expect([...solo].sort((a, b) => a - b)).toEqual([2, 3]);
+  });
+
+  it('marks a transitive chain across three not-done issues', () => {
+    const solo = soloChainedIssueIds([
+      mk(2, 'open'),
+      mk(3, 'open', [2]),
+      mk(4, 'open', [3]),
+    ]);
+    expect([...solo].sort((a, b) => a - b)).toEqual([2, 3, 4]);
+  });
+});
+
+describe('planDrain — chained Runs serialize on the integration branch (issue 111)', () => {
+  it('starts only ONE of two independent chain roots at a time, though both are eligible', () => {
+    // Two independent chains: 1→2 and 3→4. Roots 1 and 3 are both eligible, but
+    // each is solo (a not-done dependent hangs off it), so they'd collide on the
+    // integration branch — only the lower id starts; the other queues, even
+    // though the cap has room. The independent-parallel model is untouched.
+    const issues = [
+      mk(1, 'open'),
+      mk(2, 'open', [1]),
+      mk(3, 'open'),
+      mk(4, 'open', [3]),
+    ];
+    const plan = planDrain({ issues, maxConcurrent: 3, activeRuns: [] });
+    expect(plan.startable).toEqual([1]);
+    expect(plan.queued).toEqual([3]); // 2 and 4 are dep-blocked, not eligible yet
+  });
+
+  it('still starts an independent Run alongside a chain root — independence parallelizes', () => {
+    // 1 is a chain root (2 depends on it → solo); 5 is independent. Both start:
+    // the solo Run takes the integration-branch slot, the independent Run gets
+    // its own worktree. No regression to genuine concurrency.
+    const issues = [mk(1, 'open'), mk(2, 'open', [1]), mk(5, 'open')];
+    const plan = planDrain({ issues, maxConcurrent: 3, activeRuns: [] });
+    expect(plan.startable).toEqual([1, 5]);
+    expect(plan.queued).toEqual([]);
+  });
+
+  it('holds a chain root while a solo-chained Run is already running', () => {
+    // 1→2 is running solo (1 wip, running). 3→4 is another chain whose root 3 is
+    // eligible — but the single integration-branch slot is taken, so 3 waits.
+    const issues = [
+      mk(1, 'wip'),
+      mk(2, 'open', [1]),
+      mk(3, 'open'),
+      mk(4, 'open', [3]),
+    ];
+    const plan = planDrain({ issues, maxConcurrent: 3, activeRuns: [running(1)] });
+    expect(plan.startable).toEqual([]);
+    expect(plan.queued).toEqual([3]);
+  });
+
+  it('does not constrain purely independent Runs (no chains → unchanged behavior)', () => {
+    const issues = [mk(1, 'open'), mk(2, 'open'), mk(3, 'open')];
+    const plan = planDrain({ issues, maxConcurrent: 2, activeRuns: [] });
+    expect(plan.startable).toEqual([1, 2]);
+    expect(plan.queued).toEqual([3]);
   });
 });
 
