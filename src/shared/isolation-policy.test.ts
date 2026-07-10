@@ -66,6 +66,63 @@ describe('decideIsolation — solo vs parallel', () => {
   });
 });
 
+describe('decideIsolation — dependency chains stay solo (issue 111)', () => {
+  const chained = (issueId: number, slug: string): IsolationRun => ({
+    issueId,
+    slug,
+    chained: true,
+  });
+
+  it('a chained Run stays on main even when a concurrent independent Run isolates', () => {
+    // 3 sits on a dependency chain (chained); 4 is independent. The concurrency
+    // is real, so parallel mode is on and 4 gets a worktree — but 3 must build
+    // on its dependency's committed work on the integration branch, so it stays
+    // solo on `main`, never a worktree cut from a stale base.
+    const d = decideIsolation([chained(3, '03-dependent'), run(4, '04-independent')]);
+    expect(d.parallel).toBe(true);
+    expect(d.placements).toEqual([
+      { issueId: 3, slug: '03-dependent', placement: { kind: 'main' } },
+      {
+        issueId: 4,
+        slug: '04-independent',
+        placement: { kind: 'worktree', branch: 'afk/04-independent' },
+      },
+    ]);
+  });
+
+  it('two Runs on a dependency edge (both chained) stay solo — no parallel mode', () => {
+    // A 2-issue chain: both endpoints are chained, so neither takes a worktree
+    // and parallel mode is never enabled — they serialize solo on the
+    // integration branch (the dependent can't run until the dependency is done).
+    const d = decideIsolation([chained(2, '02-a'), chained(3, '03-b')]);
+    expect(d.parallel).toBe(false);
+    expect(d.placements.map((p) => p.placement.kind)).toEqual(['main', 'main']);
+  });
+
+  it('two independent Runs still parallelize into worktrees — no regression', () => {
+    // Neither is chained: the pre-issue-111 behavior is unchanged.
+    const d = decideIsolation([run(6, '06-parallel-a'), run(7, '07-parallel-b')]);
+    expect(d.parallel).toBe(true);
+    expect(d.placements.map((p) => p.placement.kind)).toEqual(['worktree', 'worktree']);
+  });
+
+  it('a lone chained Run is solo, exactly like any lone Run', () => {
+    const d = decideIsolation([chained(3, '03-dependent')]);
+    expect(d.parallel).toBe(false);
+    expect(d.placements).toEqual([
+      { issueId: 3, slug: '03-dependent', placement: { kind: 'main' } },
+    ]);
+  });
+
+  it('an unisolatable target keeps a chained Run solo too (ADR-0017 unchanged)', () => {
+    const d = decideIsolation([chained(3, '03-dependent'), run(4, '04-independent')], {
+      isolatable: false,
+    });
+    expect(d.parallel).toBe(false);
+    expect(d.placements.map((p) => p.placement.kind)).toEqual(['main', 'main']);
+  });
+});
+
 describe('decideIsolationWith — the manual "▶ Run" path (issue 20)', () => {
   it('a single manual Run (nothing else live) stays solo on main', () => {
     const d = decideIsolationWith([], run(3, '03-run-issue-in-pane'));
@@ -235,6 +292,26 @@ describe('reconcile — leftover worktrees survive an unrelated Run (issue 28)',
       { type: 'remove-worktree', slug: 'a', branch: 'afk/a' },
       { type: 'disable-parallel' },
     ]);
+  });
+
+  it('a chained Run beside a leftover worktree lands on main, leftover kept, parallel on (issue 111)', () => {
+    // The reported bug's shape: a leftover worktree `x` from a pending merge
+    // keeps `.afk-parallel` on. A dependent Run (3, chained) starts. It must NOT
+    // be cut a worktree from the stale integration-branch HEAD — it lands solo
+    // on `main` (no create-worktree command for it), the leftover survives, and
+    // parallel mode stays on for the pending merge.
+    const current: IsolationState = { parallel: true, worktreeSlugs: ['x'] };
+    const desired = decideIsolation([
+      { issueId: 3, slug: '03-dependent', chained: true },
+      { issueId: 9, slug: 'x' },
+    ]);
+    // 9/x is an independent leftover-owned Run in the set, so parallel stays on…
+    expect(desired.parallel).toBe(true);
+    // …but nothing is created for the chained Run, and the leftover is untouched.
+    expect(reconcile(current, desired)).toEqual([]);
+    expect(desired.placements.find((p) => p.issueId === 3)?.placement).toEqual({
+      kind: 'main',
+    });
   });
 });
 

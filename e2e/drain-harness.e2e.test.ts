@@ -80,6 +80,8 @@ import {
   scanAfkBranches,
   isMidMerge,
   detectDefaultBranch,
+  enableParallel,
+  isParallel,
 } from '../src/main/git-worktree-adapter';
 import { mergeRuns, defaultMergeScriptPath } from '../src/main/run-merge';
 import {
@@ -101,7 +103,12 @@ import { buildRunPrompt } from '../src/main/resolve-run-command';
 import { buildDispatcherPrompt } from '../src/main/dispatcher-session';
 import { CORE_MEMORY_LABEL } from '../src/shared/workbench-memory';
 import { branchFor } from '../src/shared/isolation-policy';
-import { planDrain, type ActiveRun, type DrainPlan } from '../src/shared/run-coordinator';
+import {
+  planDrain,
+  soloChainedIssueIds,
+  type ActiveRun,
+  type DrainPlan,
+} from '../src/shared/run-coordinator';
 import { deriveRunStatus } from '../src/shared/run-state';
 import {
   lifecycleKindForOutcome,
@@ -759,6 +766,82 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
     expect(existsSync(join(repo, 'issues', 'completions', `${six.slug}.md`))).toBe(true);
     expect(existsSync(join(repo, 'issues', 'completions', `${seven.slug}.md`))).toBe(true);
     expect((await git(repo, 'status', '--porcelain')).trim()).toBe('');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Scenario 4b (issue 111) — a dependency chain stays SOLO on the integration
+  // branch even while parallel mode is on for an unrelated leftover worktree, so
+  // the dependent Run builds on its dependency's COMMITTED work rather than a
+  // worktree cut from a stale base.
+  // ---------------------------------------------------------------------------
+  it('Scenario 4b: a dependency chain stays solo on the integration branch, so the dependent Run observes its dependency\'s committed work (issue 111)', async () => {
+    ingestFrom(sandbox.issuesDir);
+
+    // A leftover worktree from an unrelated pending merge keeps `.afk-parallel`
+    // ON — the exact state that used to force every subsequent Run into a
+    // worktree cut from the (stale) integration-branch HEAD.
+    const leftover = sandboxIssue(7);
+    await createWorktree(repo, leftover.slug, branchFor(leftover.slug));
+    await runFakeWorker({ repo, worktree: worktreePathFor(repo, leftover.slug), issue: leftover });
+    await enableParallel(repo);
+    expect(isParallel(repo)).toBe(true);
+    const leftoverRun = { issueId: 7, slug: leftover.slug }; // finished-unmerged, kept in the set
+
+    // The chain: A = 02, B = 03 (`depends_on: [2]`). The coordinator marks both
+    // as solo-on-integration-branch because they sit on a dependency edge among
+    // not-done issues in the drain.
+    const A = sandboxIssue(2);
+    const B = sandboxIssue(3);
+    const backlog = await readBacklog(repo);
+    const solo = soloChainedIssueIds(backlog.issues);
+    expect(solo.has(2)).toBe(true);
+    expect(solo.has(3)).toBe(true);
+    expect(solo.has(7)).toBe(false); // the leftover is independent
+
+    // --- A's Run: placed SOLO on the integration branch despite parallel-on ---
+    const isoA = await applyIsolation(repo, [
+      leftoverRun,
+      { issueId: 2, slug: A.slug, chained: solo.has(2) },
+    ]);
+    // The leftover keeps parallel mode on…
+    expect(isoA.parallel).toBe(true);
+    const placeA = isoA.placements.find((p) => p.issueId === 2)!;
+    // …but the chained dependency lands SOLO on the integration branch, NOT a
+    // worktree cut from a stale base — the core fix (pre-111 this was a worktree).
+    expect(placeA.cwd).toBe(repo);
+    expect(placeA.branch).toBeNull();
+    // The unrelated leftover worktree is untouched (its pending merge is safe).
+    expect(existsSync(worktreePathFor(repo, leftover.slug))).toBe(true);
+
+    // A does its code work SOLO in the integration checkout and adds a symbol;
+    // Mission Control owns the solo commit, landing it on the integration branch.
+    await runFakeWorker({ repo, issue: A }); // solo: writes work/02-*.txt, flips done
+    const symbolPath = join(repo, 'work', 'shared-symbol.ts');
+    await writeFile(symbolPath, 'export const FROM_A = 111; // symbol A added\n');
+    await waitForReceipt(2);
+    const commitA = await commitFinishedMain(repo, A.slug);
+    expect(commitA.committed).toBe(true);
+    // A's symbol is now on the integration branch (main).
+    expect(await git(repo, 'ls-files')).toContain('work/shared-symbol.ts');
+
+    // --- B's Run: its base now includes A's committed work ---
+    // 02 is done, so `soloChainedIssueIds` no longer forces 03 solo — but that's
+    // safe precisely because 02 ran solo and its work is on the integration
+    // branch, so 03's worktree (cut from that HEAD) or a solo 03 both see it
+    // (issue 111 AC1's two allowed forms).
+    const backlog2 = await readBacklog(repo);
+    const isoB = await applyIsolation(repo, [
+      leftoverRun,
+      { issueId: 3, slug: B.slug, chained: soloChainedIssueIds(backlog2.issues).has(3) },
+    ]);
+    const placeB = isoB.placements.find((p) => p.issueId === 3)!;
+
+    // The core assertion (issue 111 AC5): B's Run OBSERVED A's committed change —
+    // A's symbol is present and readable in B's Run cwd, never missing because B
+    // was cut from a base lacking its dependency's work.
+    const seenByB = await readFile(join(placeB.cwd, 'work', 'shared-symbol.ts'), 'utf8');
+    expect(seenByB).toContain('FROM_A');
+    expect(existsSync(join(placeB.cwd, 'work', `${A.slug}.txt`))).toBe(true);
   });
 
   // ---------------------------------------------------------------------------
