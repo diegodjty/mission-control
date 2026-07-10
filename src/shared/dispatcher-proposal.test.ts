@@ -22,12 +22,21 @@ const ALL_ACTIONS: DispatcherAction[] = [
   'discard-and-continue',
   'amend-plan',
   'course-change',
+  'merge-preflight',
+  'receipt-adopt',
   'merge-conflict',
   'hitl-signoff',
+  'protected-branch-land',
 ];
 
-// ADR-0011: the entire blocking list; everything else is non-blocking.
-const BLOCKING_ACTIONS: DispatcherAction[] = ['merge-conflict', 'abort-drain', 'hitl-signoff'];
+// ADR-0011 (as amended by issue 113): the entire blocking list; everything else
+// is non-blocking.
+const BLOCKING_ACTIONS: DispatcherAction[] = [
+  'merge-conflict',
+  'abort-drain',
+  'hitl-signoff',
+  'protected-branch-land',
+];
 const NON_BLOCKING_ACTIONS: DispatcherAction[] = [
   'commit-checkpoint',
   'start-next',
@@ -38,6 +47,8 @@ const NON_BLOCKING_ACTIONS: DispatcherAction[] = [
   'discard-and-continue',
   'amend-plan',
   'course-change',
+  'merge-preflight',
+  'receipt-adopt',
 ];
 
 describe('describeAction', () => {
@@ -61,7 +72,7 @@ describe('recordActivity', () => {
     }
   });
 
-  it('records only a blocking action as a pending proposal (ADR-0011 3-item list)', () => {
+  it('records only a blocking action as a pending proposal (ADR-0011 list, 4 items as of issue 113)', () => {
     for (const action of BLOCKING_ACTIONS) {
       const a = recordActivity(`x:${action}`, action);
       expect(a.authority).toBe('blocking');

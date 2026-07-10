@@ -173,6 +173,20 @@ function oneLineNote(text: string): string {
   return text.trim().replace(/\s*[\r\n]+\s*/g, ' · ');
 }
 
+/**
+ * The prominent "big warning" (issue 113) shown as a `protected-branch-land`
+ * proposal label and typed into the chat: landing a Run's work on a protected
+ * branch (`main`/`master`) needs an explicit click because such a branch is
+ * usually wired to production/deploy workflows.
+ */
+function protectedLandWarning(branch: string): string {
+  return (
+    `⚠️ About to land Run work on the protected branch '${branch}'. ` +
+    `'${branch}' may be tied to production/deploy workflows — approve to proceed, ` +
+    `or reject to leave the finished work on its branch/worktree unmerged.`
+  );
+}
+
 /** Read the persisted rail width, clamped; falls back to the default when unset. */
 function loadDispatcherWidth(): number {
   try {
@@ -636,6 +650,29 @@ export function App(): JSX.Element {
   // looping on it. Reset on Project switch / dispatcher dismissal.
   const autoMergeSig = useRef<string | null>(null);
 
+  // --- Protected-branch guard (issue 113) ----------------------------------
+  // Before a Run's work LANDS on a protected branch (`main`/`master`), the drain
+  // STOPS for an explicit one-click confirmation (a `protected-branch-land`
+  // blocking proposal, ADR-0011 as amended). `protectedGatedSoloIds` holds solo
+  // Run ids whose `main`-commit is withheld pending that click, so the commit
+  // effect stops re-firing (and looping) until the human approves.
+  // `protectedLandTargets` maps a proposal id to what approving re-executes (the
+  // merge, or a specific solo commit) with confirmation. Reset on Project switch
+  // / dispatcher dismissal, like the other proposal bookkeeping.
+  const protectedGatedSoloIds = useRef<Set<number>>(new Set<number>());
+  const protectedLandTargets = useRef<
+    Record<
+      string,
+      { kind: 'merge'; auto: boolean } | { kind: 'solo'; issueId: number; nextPhase: SoloCommitPhase }
+    >
+  >({});
+  // The solo-commit path resolves its withheld landings here (a state queue),
+  // drained into a proposal + chat warning by an effect below — `commitSoloRun`
+  // runs before the surfacing helpers exist, mirroring `soloAdoptions` (issue 62).
+  const [soloProtectedGates, setSoloProtectedGates] = useState<
+    { issueId: number; branch: string; nextPhase: SoloCommitPhase }[]
+  >([]);
+
   // --- Mid-merge state (issue 24) ------------------------------------------
   // `main` is left mid-merge when a partial `afk-merge.sh` run committed some
   // slugs then hit a conflict (a conflicted index / MERGE_HEAD). It is polled
@@ -782,6 +819,10 @@ export function App(): JSX.Element {
     soloGraceTimers.current = {};
     soloGraceElapsed.current.clear();
     committedWorktreeIds.current.clear();
+    // Protected-branch guard bookkeeping (issue 113) is per-Project.
+    protectedGatedSoloIds.current.clear();
+    protectedLandTargets.current = {};
+    setSoloProtectedGates([]);
     // The Run-log feed is per-Project (issue 34): clear it and the Receipt
     // audit bookkeeping so the new Project starts blank and loads its own log.
     setRunLog([]);
@@ -1087,8 +1128,12 @@ export function App(): JSX.Element {
   // Commit a solo Run's finished work on `main` via the adapter, moving its
   // phase (issues 25 + 59). A rejected commit reverts the phase so a later
   // observation retries; the adapter commit itself is idempotent on a clean tree.
+  // `confirmProtected` (issue 113) carries the human's click-through for landing
+  // on a protected branch — the normal observation path passes false and, if the
+  // target is `main`/`master`, the commit is WITHHELD (nothing lands) and gated
+  // for confirmation; the approval path re-invokes with true.
   const commitSoloRun = useCallback(
-    (run: TrackedRun, nextPhase: SoloCommitPhase): void => {
+    (run: TrackedRun, nextPhase: SoloCommitPhase, confirmProtected = false): void => {
       if (projectPath === null) return;
       const id = run.target.issueId;
       const prior = soloCommitPhases.current[id] ?? 'unstarted';
@@ -1099,8 +1144,24 @@ export function App(): JSX.Element {
           slug: slugOf(run.target.issueFileName),
           // The Run's own target repo (issue 72) — the default for legacy.
           repoPath: repoForIssueId(run.target.issueId),
+          confirmProtectedLand: confirmProtected,
         })
         .then((outcome) => {
+          // Protected-branch withhold (issue 113): nothing landed on `main`.
+          // Revert the phase, STOP re-firing this id (so the effect doesn't loop)
+          // and queue the gate — an effect below records the blocking proposal
+          // and the "big warning" once the surfacing helpers exist.
+          if (outcome.protectedBranch && !confirmProtected) {
+            soloCommitPhases.current[id] = prior;
+            protectedGatedSoloIds.current.add(id);
+            const branch = outcome.protectedBranch;
+            setSoloProtectedGates((prev) =>
+              prev.some((g) => g.issueId === id)
+                ? prev
+                : [...prev, { issueId: id, branch, nextPhase }],
+            );
+            return;
+          }
           // Stray Receipts adopted alongside the run commit (issue 62) — queue
           // them for a passive `receipt-adopt` note (the log effect below).
           if (outcome.adopted !== undefined && outcome.adopted.length > 0) {
@@ -1134,6 +1195,10 @@ export function App(): JSX.Element {
     for (const run of runs) {
       if (isIsolated(run)) continue;
       const id = run.target.issueId;
+      // Withheld pending the protected-branch confirmation (issue 113): don't
+      // re-attempt the commit — it would just withhold again and loop. The
+      // approval path clears this id and re-commits with confirmation.
+      if (protectedGatedSoloIds.current.has(id)) continue;
       const step = decideSoloCommitStep({
         runStatus: runStatusOf(run),
         isolated: false,
@@ -1982,6 +2047,32 @@ export function App(): JSX.Element {
     setSoloAdoptions([]);
   }, [soloAdoptions, surfaceNarrative]);
 
+  // Drain the SOLO-path protected-branch withholds (issue 113) into a blocking
+  // gate. Queued in `commitSoloRun` (which runs before the surfacing helpers
+  // exist); here — once they do — each becomes a `protected-branch-land` pending
+  // proposal (the DispatcherPanel's approve/reject) AND a chat warning via the
+  // pump, deduped per issue. Approving re-commits with confirmation; rejecting
+  // leaves the finished work uncommitted on the protected branch. The target
+  // records what approval re-executes.
+  useEffect(() => {
+    if (soloProtectedGates.length === 0) return;
+    for (const gate of soloProtectedGates) {
+      const pid = `protected-branch-land:solo:${gate.issueId}`;
+      protectedLandTargets.current[pid] = {
+        kind: 'solo',
+        issueId: gate.issueId,
+        nextPhase: gate.nextPhase,
+      };
+      setDispatcherActivities((prev) =>
+        prev.some((a) => a.id === pid)
+          ? prev
+          : [...prev, recordActivity(pid, 'protected-branch-land', protectedLandWarning(gate.branch))],
+      );
+      surfaceEvent(pid, 'protected-branch-land', protectedLandWarning(gate.branch));
+    }
+    setSoloProtectedGates([]);
+  }, [soloProtectedGates, surfaceEvent]);
+
   useEffect(() => {
     if ((dispatcher?.sessionId ?? null) === null) return;
     for (const rec of runLog) {
@@ -2452,6 +2543,12 @@ export function App(): JSX.Element {
     seenReconciled.current = null;
     debouncedStatusModelRef.current = null;
     autoMergeSig.current = null;
+    // Clearing the proposals (above) must also clear the protected-branch guard's
+    // bookkeeping (issue 113) — otherwise a solo commit could stay withheld with
+    // no visible gate; the fresh Dispatcher re-raises it from a re-fired commit.
+    protectedGatedSoloIds.current.clear();
+    protectedLandTargets.current = {};
+    setSoloProtectedGates([]);
   }, [dispatcherPump]);
 
   // Drag the divider between the Map and the Dispatcher rail to resize it (issue
@@ -2707,7 +2804,7 @@ export function App(): JSX.Element {
   // passive `merge` note and relays its summary; a conflict / preflight failure
   // records a blocking `merge-conflict` proposal and surfaces the reason (never
   // auto-resolved). The pure `decideDispatcherMerge` makes that auto-vs-gate call.
-  const runMergeCore = useCallback((auto: boolean): void => {
+  const runMergeCore = useCallback((auto: boolean, confirmProtected = false): void => {
     if (projectPath === null || merging) return;
     // Merge stays PER REPO (issue 72): one afk-merge invocation integrates one
     // repo's branches. Group the mergeable set by the repo each branch lives
@@ -2735,9 +2832,35 @@ export function App(): JSX.Element {
     setMerging(true);
     setMergeDisplay(pendingMergeDisplay(slugs.length));
     void window.mc
-      .mergeRuns({ projectPath, slugs, repoPath: firstRepo === '' ? undefined : firstRepo })
+      .mergeRuns({
+        projectPath,
+        slugs,
+        repoPath: firstRepo === '' ? undefined : firstRepo,
+        confirmProtectedLand: confirmProtected,
+      })
       .then((result) => {
         setMergeDisplay(mergeResultDisplay(result));
+        // Protected-branch withhold (issue 113): the target is a protected branch
+        // (`main`/`master`) and the human hasn't confirmed, so NOTHING landed.
+        // Raise the blocking "big warning" gate (approve re-runs with confirmation)
+        // and STOP — do not classify this as a conflict/preflight failure or run
+        // the merged-cleanup below. Applies to the autonomous drain merge AND the
+        // user-initiated Merge (both flow through here).
+        if (result.protectedBranch && !confirmProtected) {
+          const branch = result.protectedBranch;
+          const pid = `protected-branch-land:merge:${sig}`;
+          protectedLandTargets.current[pid] = { kind: 'merge', auto };
+          setDispatcherActivities((prev) =>
+            prev.some((a) => a.id === pid)
+              ? prev
+              : [
+                  ...prev,
+                  recordActivity(pid, 'protected-branch-land', protectedLandWarning(branch)),
+                ],
+          );
+          surfaceEvent(pid, 'protected-branch-land', protectedLandWarning(branch));
+          return;
+        }
         if (auto) {
           // A stray-Receipt adoption (issue 62) is a repair MC did on its own:
           // it auto-committed known artifacts (dirty files under
@@ -2871,9 +2994,25 @@ export function App(): JSX.Element {
         // clears the gate and the drain continues.
         const target = discardTargets.current[id];
         if (target) discardRun(target.issueId, target.slug);
+      } else if (action === 'protected-branch-land') {
+        // The human clicked through the "big warning" (issue 113): re-execute the
+        // withheld landing WITH confirmation. A merge re-runs `runMergeCore` (same
+        // auto posture); a solo commit re-fires that Run's `main`-commit — after
+        // clearing its gated marker so the commit effect stops skipping it.
+        const target = protectedLandTargets.current[id];
+        if (target?.kind === 'merge') {
+          // Re-run the withheld merge WITH confirmation. The direct call handles
+          // it; the auto-merge effect stays guarded (a clean merge drops the
+          // branches; a conflict sets midMerge — both self-guard against a re-fire).
+          runMergeCore(target.auto, true);
+        } else if (target?.kind === 'solo') {
+          protectedGatedSoloIds.current.delete(target.issueId);
+          const run = runs.find((r) => r.target.issueId === target.issueId);
+          if (run) commitSoloRun(run, target.nextPhase, true);
+        }
       }
     },
-    [runMerge, stopDrain, discardRun],
+    [runMerge, stopDrain, discardRun, runMergeCore, commitSoloRun, runs],
   );
 
   // Reject a pending proposal: drop it (mark rejected) and DO NOT execute — the

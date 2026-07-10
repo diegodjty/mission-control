@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   classifyAuthority,
   isBlocking,
+  isProtectedBranch,
+  DEFAULT_PROTECTED_BRANCHES,
   type Authority,
   type DispatcherAction,
 } from './dispatcher-authority';
@@ -23,24 +25,31 @@ const LINE: Record<DispatcherAction, Authority> = {
   'course-change': 'passive',
   'merge-preflight': 'passive',
   'receipt-adopt': 'passive',
-  // The three-item blocking list.
+  // The blocking list (four items as of issue 113, amending ADR-0011).
   'merge-conflict': 'blocking',
   'abort-drain': 'blocking',
   'hitl-signoff': 'blocking',
+  'protected-branch-land': 'blocking',
 };
 
-// The ENTIRE blocking list per ADR-0011 — nothing else may block.
-const BLOCKING: DispatcherAction[] = ['merge-conflict', 'abort-drain', 'hitl-signoff'];
+// The ENTIRE blocking list per ADR-0011 as amended by issue 113 — nothing else
+// may block. Issue 113 adds `protected-branch-land` to the original three.
+const BLOCKING: DispatcherAction[] = [
+  'merge-conflict',
+  'abort-drain',
+  'hitl-signoff',
+  'protected-branch-land',
+];
 
 describe('dispatcher authority classifier (ADR-0011, silent-autonomy default)', () => {
-  it('blocks on EXACTLY the three-item interruption list, nothing else', () => {
+  it('blocks on EXACTLY the interruption list, nothing else (four items as of issue 113)', () => {
     for (const action of BLOCKING) {
       expect(classifyAuthority(action)).toBe('blocking');
       expect(isBlocking(action)).toBe(true);
     }
     const blocking = (Object.keys(LINE) as DispatcherAction[]).filter((a) => isBlocking(a));
     expect(blocking.sort()).toEqual([...BLOCKING].sort());
-    expect(blocking).toHaveLength(3);
+    expect(blocking).toHaveLength(4);
   });
 
   it('makes a clean merge, logging an issue, amend-plan and discard-and-continue non-blocking', () => {
@@ -91,5 +100,45 @@ describe('dispatcher authority classifier (ADR-0011, silent-autonomy default)', 
     for (const action of Object.keys(LINE) as DispatcherAction[]) {
       expect(['blocking', 'passive', 'silent']).toContain(classifyAuthority(action));
     }
+  });
+
+  it('landing on a protected branch is a blocking gate (issue 113)', () => {
+    expect(classifyAuthority('protected-branch-land')).toBe('blocking');
+    expect(isBlocking('protected-branch-land')).toBe(true);
+  });
+});
+
+describe('isProtectedBranch (issue 113 — the "big warning" trigger)', () => {
+  it('treats the default set main/master as protected', () => {
+    expect(DEFAULT_PROTECTED_BRANCHES).toEqual(['main', 'master']);
+    expect(isProtectedBranch('main')).toBe(true);
+    expect(isProtectedBranch('master')).toBe(true);
+  });
+
+  it('does NOT treat a feature branch as protected — it lands unchanged', () => {
+    expect(isProtectedBranch('afk/113-merge-target')).toBe(false);
+    expect(isProtectedBranch('feature/login')).toBe(false);
+    expect(isProtectedBranch('develop')).toBe(false);
+  });
+
+  it('is case- and whitespace-insensitive (errs toward warning)', () => {
+    expect(isProtectedBranch('Main')).toBe(true);
+    expect(isProtectedBranch('MASTER')).toBe(true);
+    // Raw git output can carry a trailing newline.
+    expect(isProtectedBranch('main\n')).toBe(true);
+  });
+
+  it('treats an empty/unknown branch as NOT protected (nothing to warn about)', () => {
+    expect(isProtectedBranch('')).toBe(false);
+    expect(isProtectedBranch(null)).toBe(false);
+    expect(isProtectedBranch(undefined)).toBe(false);
+  });
+
+  it('honors a custom protected set (config overrides the default)', () => {
+    const config = { protected: ['trunk', 'release'] };
+    expect(isProtectedBranch('trunk', config)).toBe(true);
+    expect(isProtectedBranch('release', config)).toBe(true);
+    // With a custom set, the defaults are NOT implicitly protected.
+    expect(isProtectedBranch('main', config)).toBe(false);
   });
 });

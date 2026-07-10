@@ -25,6 +25,7 @@ import {
 } from '../shared/isolation-policy';
 import { buildBacklog, type IssueStatus } from '../shared/backlog-model';
 import { resolveDefaultBranch } from '../shared/default-branch';
+import { isProtectedBranch } from '../shared/dispatcher-authority';
 import { shouldCommitWorktree, shouldCommitMain } from '../shared/run-state';
 import {
   issueIdFromSlug,
@@ -629,6 +630,15 @@ export interface WorktreeCommitOutcome {
    * finished path only (issue 62); absent/empty for worktree commits.
    */
   adopted?: string[];
+  /**
+   * The protected branch this SOLO commit was WITHHELD from pending confirmation
+   * (issue 113) — set only when the target is protected (`main`/`master`), the
+   * guard is enabled, and it was not confirmed. Nothing was committed; the drain
+   * raises the "big warning" gate and re-invokes with confirmation on approval.
+   * Absent when not withheld (and never set for a worktree commit — an `afk/`
+   * branch is never protected).
+   */
+  protectedBranch?: string | null;
 }
 
 export interface FinishedCommitOptions {
@@ -648,6 +658,16 @@ export interface FinishedCommitOptions {
    * workbench Project's code repo is unknown state, not a known artifact.
    */
   adoptStrays?: boolean;
+  /**
+   * The protected-branch guard (issue 113), for the SOLO `main`-commit path only.
+   * When present, a commit whose target is a protected branch (`main`/`master`)
+   * is WITHHELD unless `confirmed` — the outcome carries `protectedBranch` and
+   * nothing is committed (checked BEFORE stray-Receipt adoption, which itself
+   * commits), so the drain can raise the "big warning" gate and re-invoke with
+   * `confirmed: true` on approval. Absent ⇒ no guard (legacy/adapter callers;
+   * behavior unchanged). The production MainCommit IPC handler always passes it.
+   */
+  protectedBranchGuard?: { confirmed: boolean };
 }
 
 export async function commitFinishedWorktree(
@@ -791,6 +811,23 @@ export async function commitFinishedMain(
       : await readMainIssueStatus(projectPath, slug);
   if (!shouldCommitMain({ isolated: false, mainStatus })) {
     return { committed: false, error: null };
+  }
+
+  // Protected-branch guard (issue 113): withhold landing this finished Run's work
+  // on a protected branch (`main`/`master`) until the human confirms with the
+  // "big warning". Checked BEFORE stray-Receipt adoption below (which itself
+  // commits) so a withhold truly leaves the protected branch untouched. Only
+  // enforced when the caller opts in (the production MainCommit IPC handler);
+  // legacy/adapter callers omit the guard → unchanged. A clean tree is a no-op,
+  // not a landing, so it never raises the warning.
+  if (options.protectedBranchGuard && !options.protectedBranchGuard.confirmed) {
+    const branch = await detectDefaultBranch(projectPath);
+    if (isProtectedBranch(branch)) {
+      const porcelain = await git(projectPath, ['status', '--porcelain']);
+      return porcelain.trim().length > 0
+        ? { committed: false, error: null, protectedBranch: branch }
+        : { committed: false, error: null };
+    }
   }
 
   // Adopt stray Receipts FIRST (issue 62): a Receipt under `issues/completions/`

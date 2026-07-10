@@ -333,3 +333,63 @@ describe('issue 62 — the solo finished path adopts a stray Receipt', () => {
     expect(await commitCountMain()).toBe(before);
   });
 });
+
+describe('issue 113 — protected-branch guard on the solo commit path', () => {
+  /** Commit count on the current branch (HEAD), whatever it is. */
+  async function commitCountHead(): Promise<number> {
+    return Number((await git(repo, 'rev-list', '--count', 'HEAD')).trim());
+  }
+
+  it('WITHHOLDS the solo commit on main until confirmed, then commits when confirmed', async () => {
+    await simulateSoloAgent('done');
+    const before = await commitCountMain();
+    expect(await mainIsClean()).toBe(false);
+
+    // Guard enabled, NOT confirmed → withheld: nothing committed, main still dirty.
+    const withheld = await commitFinishedMain(repo, SOLO_SLUG, {
+      protectedBranchGuard: { confirmed: false },
+    });
+    expect(withheld.committed).toBe(false);
+    expect(withheld.error).toBeNull();
+    expect(withheld.protectedBranch).toBe('main');
+    expect(await commitCountMain()).toBe(before);
+    expect(await mainIsClean()).toBe(false);
+
+    // Confirmed → the commit lands on main exactly as the unguarded path would.
+    const confirmed = await commitFinishedMain(repo, SOLO_SLUG, {
+      protectedBranchGuard: { confirmed: true },
+    });
+    expect(confirmed.committed).toBe(true);
+    expect(confirmed.protectedBranch ?? null).toBeNull();
+    expect(await commitCountMain()).toBe(before + 1);
+    expect(await mainIsClean()).toBe(true);
+  });
+
+  it('a clean tree is a no-op, never a spurious withhold, even with the guard enabled', async () => {
+    // Nothing finished/dirty on main → there is nothing to LAND, so the guard
+    // must not raise the warning (no `protectedBranch`), it just does nothing.
+    const outcome = await commitFinishedMain(repo, SOLO_SLUG, {
+      protectedBranchGuard: { confirmed: false },
+    });
+    expect(outcome.committed).toBe(false);
+    expect(outcome.protectedBranch ?? null).toBeNull();
+  });
+
+  it('never withholds on a non-protected feature branch — regression guard: still lands on the current branch', async () => {
+    // The main checkout moves onto a feature branch; a solo Run finishes on it.
+    await git(repo, 'checkout', '-b', 'feature/solo');
+    await simulateSoloAgent('done');
+    const before = await commitCountHead();
+
+    const outcome = await commitFinishedMain(repo, SOLO_SLUG, {
+      protectedBranchGuard: { confirmed: false },
+    });
+    // Guard enabled but the branch isn't protected → commit lands as usual.
+    expect(outcome.committed).toBe(true);
+    expect(outcome.protectedBranch ?? null).toBeNull();
+    expect(await commitCountHead()).toBe(before + 1);
+    // It landed on the feature branch (the current branch), not main.
+    expect((await git(repo, 'symbolic-ref', '--short', 'HEAD')).trim()).toBe('feature/solo');
+    expect((await git(repo, 'status', '--porcelain')).trim()).toBe('');
+  });
+});
