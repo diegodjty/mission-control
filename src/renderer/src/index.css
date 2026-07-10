@@ -2701,3 +2701,97 @@ body.is-col-resizing {
 .app__view {
   animation: mcFade 0.5s ease;
 }
+
+/* --- Interrupt confirmation (issue 114) ------------------------------------
+   A runner is fixing an issue in this Window's Project and the user picked a
+   different Project (switcher or Launcher Continue). This modal offers to open
+   the other Project in a NEW Window instead of tearing the live Run down. */
+.app__interrupt-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(4, 7, 11, 0.62);
+  animation: mcFade 0.18s ease;
+}
+
+.app__interrupt {
+  width: 100%;
+  max-width: 460px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px 22px;
+  background: var(--bg1);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: var(--shadow-cmd);
+}
+
+.app__interrupt-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.app__interrupt-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--fg-soft);
+}
+
+.app__interrupt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.app__interrupt-primary {
+  background: var(--teal-border);
+  border: 1px solid var(--teal-border);
+  border-radius: 6px;
+  color: var(--fg);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 8px 14px;
+}
+
+.app__interrupt-primary:hover {
+  border-color: var(--teal);
+}
+
+.app__interrupt-danger {
+  background: var(--red-bg);
+  border: 1px solid var(--red-border);
+  border-radius: 6px;
+  color: var(--red-soft);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 8px 14px;
+}
+
+.app__interrupt-danger:hover {
+  border-color: var(--red);
+}
+
+.app__interrupt-cancel {
+  background: none;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  color: var(--fg-soft);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 8px 14px;
+  margin-left: auto;
+}
+
+.app__interrupt-cancel:hover {
+  border-color: var(--border-strong);
+  color: var(--fg);
+}

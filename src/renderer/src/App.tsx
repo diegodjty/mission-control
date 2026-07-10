@@ -121,6 +121,7 @@ import {
   scanForProject,
   type ScopedScan,
 } from '../../shared/project-switch';
+import { shouldConfirmInterrupt } from '../../shared/interrupt-guard';
 import {
   orphanedClaims,
   reopenWipToOpen,
@@ -291,6 +292,18 @@ export function App(): JSX.Element {
   const [activeProjectKey, setActiveProjectKey] = useState<string | null>(null);
   const [newRepoPath, setNewRepoPath] = useState('');
   const [projectError, setProjectError] = useState<string | null>(null);
+  // A Project change this Window paused because a runner is live (issue 114):
+  // switching/opening a different Project here would tear the running Run down,
+  // so `attemptProjectChange` stashes the intended change and shows a
+  // confirmation offering "open in a new Window" instead. `path` is what
+  // `openWindow` gets (the key/dir is a valid open handle, issue 71); `proceed`
+  // performs the in-place change if the human chooses to interrupt anyway. Null
+  // when nothing is pending.
+  const [pendingProjectChange, setPendingProjectChange] = useState<{
+    path: string;
+    label: string;
+    proceed: () => void;
+  } | null>(null);
   // Mirrors `activeProjectKey` for the callbacks/effects that need the CURRENT
   // active Project without re-subscribing (issue 26): they compare it against
   // an incoming key via `isProjectSwitch` to decide whether to reset
@@ -1358,6 +1371,30 @@ export function App(): JSX.Element {
   const liveRunIssueIds = useMemo(
     () => runningIssueIds(runs, runStatusOf, (r) => r.target.issueId),
     [runs, runStatusOf],
+  );
+
+  // Attempt to change this Window's Project (issue 114). When a runner is live
+  // in the current Project, changing here would kill it (resetForProjectSwitch
+  // tears the Runs down), so the pure `shouldConfirmInterrupt` gates whether to
+  // pause: if it would interrupt a live runner, stash the change and show the
+  // "open in a new Window instead?" confirmation; otherwise perform it straight
+  // away. The two user-facing switch surfaces — the Project bar switcher and the
+  // Launcher's Continue list — both route through here so they behave the same.
+  const attemptProjectChange = useCallback(
+    (change: { path: string; label: string; proceed: () => void }): void => {
+      if (
+        shouldConfirmInterrupt({
+          hasLiveRunner: liveRunIssueIds.length > 0,
+          currentKey: activeProjectKeyRef.current,
+          targetKey: change.path,
+        })
+      ) {
+        setPendingProjectChange(change);
+      } else {
+        change.proceed();
+      }
+    },
+    [liveRunIssueIds],
   );
 
   // Pure derivations from the on-disk scan + the live-Run set: which issues show
@@ -3097,7 +3134,13 @@ export function App(): JSX.Element {
           activeProjectKey={activeProjectKey}
           newRepoPath={newRepoPath}
           onNewRepoPathChange={setNewRepoPath}
-          onSwitch={(key) => void switchProject(key)}
+          onSwitch={(key) =>
+            attemptProjectChange({
+              path: key,
+              label: projects.find((p) => p.key === key)?.label || key,
+              proceed: () => void switchProject(key),
+            })
+          }
           onBrowse={() => void browseForFolder()}
           onOpenHere={() => void openProjectHere(newRepoPath.trim())}
           onOpenNewWindow={openInNewWindow}
@@ -3517,7 +3560,13 @@ export function App(): JSX.Element {
               }
               activeProjectKey={activeProjectKey}
               onBackToProject={activeProjectKey !== null ? () => setView('map') : null}
-              onContinue={(p) => void openProjectHere(p.workbenchDir)}
+              onContinue={(p) =>
+                attemptProjectChange({
+                  path: p.workbenchDir,
+                  label: p.label,
+                  proceed: () => void openProjectHere(p.workbenchDir),
+                })
+              }
               onProjectCreated={(created) => void landOnNewProject(created)}
               onBigFeatureProject={(p) => void startPlanning(p)}
               onJustTalkProject={talkToProject}
@@ -3549,6 +3598,65 @@ export function App(): JSX.Element {
           </div>
         )}
       </div>
+
+      {/* Interrupt confirmation (issue 114): a runner is fixing an issue in the
+          Project this Window has open, and the user picked a different one in
+          the switcher or the Launcher's Continue list. Rather than silently
+          killing the live Run, offer to open the other Project in a NEW Window
+          — which leaves this one (and its runner) untouched. "Switch here
+          anyway" performs the interrupting change; Cancel stays put (the
+          controlled switcher/Launcher snap back on their own). */}
+      {pendingProjectChange !== null && (
+        <div
+          className="app__interrupt-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="interrupt-title"
+        >
+          <div className="app__interrupt">
+            <h2 className="app__interrupt-title" id="interrupt-title">
+              A runner is working here
+            </h2>
+            <p className="app__interrupt-text">
+              <strong>
+                {projects.find((p) => p.key === activeProjectKey)?.label ?? 'This project'}
+              </strong>{' '}
+              has a runner fixing an issue. Opening{' '}
+              <strong>{pendingProjectChange.label}</strong> in this window would interrupt it. Open{' '}
+              <strong>{pendingProjectChange.label}</strong> in a new window instead so the running
+              work keeps going?
+            </p>
+            <div className="app__interrupt-actions">
+              <button
+                className="app__interrupt-primary"
+                onClick={() => {
+                  void window.mc.openWindow({ path: pendingProjectChange.path });
+                  setPendingProjectChange(null);
+                }}
+                title="Open the other project in a new window; this window's runner keeps going"
+              >
+                Open in new window
+              </button>
+              <button
+                className="app__interrupt-danger"
+                onClick={() => {
+                  pendingProjectChange.proceed();
+                  setPendingProjectChange(null);
+                }}
+                title="Switch this window now — the running work here is interrupted"
+              >
+                Switch here anyway
+              </button>
+              <button
+                className="app__interrupt-cancel"
+                onClick={() => setPendingProjectChange(null)}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
