@@ -72,6 +72,8 @@ const LABELS: Record<DispatcherAction, string> = {
   'merge-conflict': 'Resolve the merge conflict on main (or abort it)',
   'abort-drain': 'Abort the drain',
   'hitl-signoff': 'Sign off the HITL issue awaiting manual verification',
+  'protected-branch-land':
+    'Confirm landing Run work on a protected branch (main/master) — it may be tied to production',
 };
 
 /** Plain-language description of an action, for the chat panel. */

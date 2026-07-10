@@ -40,6 +40,7 @@ import {
 import { ensureLocallyIgnored } from './local-ignore';
 import { afkMergeConfContent } from '../shared/merge-plan';
 import { branchFor } from '../shared/isolation-policy';
+import { isProtectedBranch } from '../shared/dispatcher-authority';
 import {
   ignoredArtifactPaths,
   artifactMergeRefusalMessage,
@@ -172,6 +173,15 @@ export interface MergeRunsOptions {
    * workbench claim surface. Absent for legacy (in-repo reads, unchanged).
    */
   workbenchIssuesRoot?: string;
+  /**
+   * The protected-branch guard (issue 113). When present, a merge whose target
+   * is a protected branch (`main`/`master`) is WITHHELD unless `confirmed` — the
+   * result carries `protectedBranch` and nothing runs, so the drain can raise the
+   * "big warning" gate and, on approval, re-invoke with `confirmed: true`. Absent
+   * ⇒ no guard (legacy/adapter callers; behavior unchanged). The production
+   * MergeRuns IPC handler always passes it.
+   */
+  protectedBranchGuard?: { confirmed: boolean };
 }
 
 interface ExecFailure {
@@ -223,6 +233,37 @@ export async function mergeRuns(
 
   await ensureMergeConf(projectPath);
 
+  // The branch afk-merge.sh integrates into is the repo's CURRENTLY-checked-out
+  // branch (issues 27/113), not a hardcoded `main` — detect it so every message
+  // names the real one AND the protected-branch guard below reads the true target.
+  const defaultBranch = await detectDefaultBranch(projectPath);
+
+  // Protected-branch guard (issue 113): if the target is a protected branch
+  // (`main`/`master`) and the human hasn't confirmed, WITHHOLD the whole merge —
+  // BEFORE stray-Receipt adoption (which itself commits) or the script runs — so
+  // nothing lands on the protected branch. The drain raises the "big warning"
+  // gate off `protectedBranch`; on approval it re-invokes with `confirmed: true`.
+  // A non-protected feature branch is unchanged (falls through, auto-proceeds).
+  if (
+    options.protectedBranchGuard &&
+    !options.protectedBranchGuard.confirmed &&
+    isProtectedBranch(defaultBranch)
+  ) {
+    return {
+      ok: false,
+      conflicted: false,
+      midMerge: false,
+      merged: [],
+      adopted: [],
+      protectedBranch: defaultBranch,
+      message:
+        `About to land Run work on the protected branch '${defaultBranch}'. ` +
+        `'${defaultBranch}' may be tied to production/deploy workflows — confirm to merge, ` +
+        `or decline to leave the finished work on its branch/worktree unmerged.`,
+      output: '',
+    };
+  }
+
   // Adopt stray Receipts BEFORE the script's clean-tree preflight (issue 62,
   // ADR-0013): a Worker that misplaced its Receipt into the main checkout's
   // `issues/completions/` (instead of its own worktree's copy) is a KNOWN,
@@ -237,10 +278,6 @@ export async function mergeRuns(
       ? { adopted: [], error: null }
       : await adoptStrayReceipts(projectPath);
   const adopted = adoption.adopted;
-
-  // The branch afk-merge.sh integrates into is the repo's default branch, not a
-  // hardcoded `main` (issue 27) — detect it so every message names the real one.
-  const defaultBranch = await detectDefaultBranch(projectPath);
 
   // Ignored-artifact preflight (issue 98): refuse — BEFORE running afk-merge.sh at
   // all — any branch that would add a local install artifact (a committed
@@ -268,10 +305,25 @@ export async function mergeRuns(
     };
   }
 
+  // --into: integrate into the code repo's CURRENTLY-checked-out branch (issue
+  // 113), which `detectDefaultBranch` read above via `git symbolic-ref --short
+  // HEAD`. Passing it explicitly stops afk-merge.sh from re-guessing and
+  // PREFERRING a local `main`/`master`/`origin/HEAD` — the old behavior that
+  // refused ("wrong branch" preflight) whenever the repo sat on a feature
+  // branch. A feature-branch checkout now integrates into that feature branch.
   // --keep: never let the script touch worktree paths/branches (see file header
   // — its <slug>/<label> layout does not match ours). --no-test: Mission
   // Control verifies separately; the merge action stays focused on integration.
-  const args = [scriptPath, '--project', projectPath, '--keep', '--no-test', ...slugs];
+  const args = [
+    scriptPath,
+    '--project',
+    projectPath,
+    '--into',
+    defaultBranch,
+    '--keep',
+    '--no-test',
+    ...slugs,
+  ];
 
   let stdout = '';
   let stderr = '';

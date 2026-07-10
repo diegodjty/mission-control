@@ -17,8 +17,14 @@ import {
 } from './dispatcher-channel';
 import type { Authority, DispatcherAction } from './dispatcher-authority';
 
-// ADR-0011's three-item blocking list — the ONLY things routed to the chat PTY.
-const BLOCKING_ACTIONS: DispatcherAction[] = ['merge-conflict', 'abort-drain', 'hitl-signoff'];
+// ADR-0011's blocking list (four items as of issue 113) — the ONLY things routed
+// to the chat PTY.
+const BLOCKING_ACTIONS: DispatcherAction[] = [
+  'merge-conflict',
+  'abort-drain',
+  'hitl-signoff',
+  'protected-branch-land',
+];
 // Everything else is a routine passive/silent fact routed to the ambient log.
 const NON_BLOCKING_ACTIONS: DispatcherAction[] = [
   'commit-checkpoint',
@@ -30,6 +36,8 @@ const NON_BLOCKING_ACTIONS: DispatcherAction[] = [
   'discard-and-continue',
   'amend-plan',
   'course-change',
+  'merge-preflight',
+  'receipt-adopt',
 ];
 
 describe('channelForAuthority', () => {
@@ -44,7 +52,7 @@ describe('channelForAuthority', () => {
 });
 
 describe('channelForAction (the routing decision)', () => {
-  it('sends ONLY the three blocking-approval prompts to the chat', () => {
+  it('sends ONLY the blocking-approval prompts to the chat (four as of issue 113)', () => {
     for (const action of BLOCKING_ACTIONS) {
       expect(channelForAction(action)).toBe('chat');
       expect(usesChat(action)).toBe(true);

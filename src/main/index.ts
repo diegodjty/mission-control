@@ -657,8 +657,15 @@ function registerIpc(): void {
               adoptStrays: false,
             }
           : {};
+      // Protected-branch guard (issue 113): the solo auto-commit lands on the
+      // repo's current branch, so if that is `main`/`master` the commit is
+      // withheld until the human confirms — the drain raises the "big warning".
+      const commitOpts = {
+        ...workbenchOpts,
+        protectedBranchGuard: { confirmed: req.confirmProtectedLand ?? false },
+      };
       return repoSerializer.run(normalizeProjectKey(repo), () =>
-        commitFinishedMain(repo, req.slug, workbenchOpts),
+        commitFinishedMain(repo, req.slug, commitOpts),
       );
     },
   );
@@ -838,10 +845,16 @@ function registerIpc(): void {
       // is BYPASSED (Receipts never live in a workbench Project's code repo —
       // dirt there is unknown state and keeps the truthful preflight halt),
       // and the merged-worktree sweep reads the workbench claim surface.
-      const mergeOpts =
-        identity?.kind === 'workbench'
+      const mergeOpts = {
+        ...(identity?.kind === 'workbench'
           ? { adoptStrays: false, workbenchIssuesRoot: identity.issuesRoot }
-          : {};
+          : {}),
+        // Protected-branch guard (issue 113): a merge whose target is the repo's
+        // checked-out `main`/`master` is withheld until the human confirms the
+        // "big warning" — applies to the autonomous drain merge AND this same
+        // handler's user-initiated Merge (both route through here).
+        protectedBranchGuard: { confirmed: req.confirmProtectedLand ?? false },
+      };
       return repoSerializer.run(normalizeProjectKey(repo), () =>
         mergeRuns(repo, req.slugs, mergeOpts),
       );

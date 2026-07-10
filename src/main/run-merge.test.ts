@@ -602,3 +602,103 @@ describe('ignored-artifact merge preflight (issue 98) — refuses a branch carry
     expect(await branchExists('96-y')).toBe(true);
   });
 });
+
+describe('merge targets the checked-out branch, never a forced main (issue 113 — Part A)', () => {
+  it('integrates a finished branch into a FEATURE-branch checkout and passes preflight', async () => {
+    // The repo's main checkout sits on a feature branch while `main` still
+    // exists locally — the exact shape where pre-113 afk-merge.sh PREFERRED
+    // `main` and refused with a "wrong branch" preflight. MC now passes the
+    // detected current branch via `--into`, so it integrates into the feature
+    // branch and never forces `main`.
+    await git(repo, 'checkout', '-b', 'feature/login');
+    const wt = await finishedRun('03-a', 'a.txt', 'from run 3\n');
+    expect(existsSync(wt)).toBe(true);
+
+    const result = await mergeRuns(repo, ['03-a'], { scriptPath: SCRIPT });
+
+    // No "wrong branch" refusal: the merge succeeds on the feature branch.
+    expect(result.ok).toBe(true);
+    expect(result.conflicted).toBe(false);
+    expect(result.merged).toEqual(['03-a']);
+    // The message names the DETECTED feature branch, not a hardcoded main.
+    expect(result.message).toContain('into feature/login');
+    expect(result.message).not.toContain('into main');
+
+    // The work landed on the feature branch; `main` is untouched.
+    await git(repo, 'checkout', 'feature/login');
+    expect(await git(repo, 'ls-files')).toContain('a.txt');
+    await git(repo, 'checkout', 'main');
+    expect(await git(repo, 'ls-files')).not.toContain('a.txt');
+  });
+});
+
+describe('protected-branch guard on the merge path (issue 113 — Part B)', () => {
+  it('WITHHOLDS a merge onto a protected branch (main) until confirmed, landing nothing', async () => {
+    const wt = await finishedRun('03-a', 'a.txt', 'from run 3\n');
+
+    // The repo is on `main` (protected). Guard enabled, NOT confirmed → withheld.
+    const withheld = await mergeRuns(repo, ['03-a'], {
+      scriptPath: SCRIPT,
+      protectedBranchGuard: { confirmed: false },
+    });
+    expect(withheld.ok).toBe(false);
+    expect(withheld.conflicted).toBe(false);
+    expect(withheld.merged).toEqual([]);
+    expect(withheld.protectedBranch).toBe('main');
+    expect(withheld.message).toMatch(/protected branch 'main'/);
+
+    // NOTHING landed: the branch + worktree survive and `main` has no new work.
+    expect(await branchExists('03-a')).toBe(true);
+    expect(existsSync(wt)).toBe(true);
+    await git(repo, 'checkout', 'main');
+    expect(await git(repo, 'ls-files')).not.toContain('a.txt');
+
+    // Confirmed → the very same merge proceeds and lands on main.
+    const confirmed = await mergeRuns(repo, ['03-a'], {
+      scriptPath: SCRIPT,
+      protectedBranchGuard: { confirmed: true },
+    });
+    expect(confirmed.ok).toBe(true);
+    expect(confirmed.merged).toEqual(['03-a']);
+    expect(confirmed.protectedBranch ?? null).toBeNull();
+    await git(repo, 'checkout', 'main');
+    expect(await git(repo, 'ls-files')).toContain('a.txt');
+  });
+
+  it('does NOT withhold a merge onto a non-protected feature branch (auto-proceeds unchanged)', async () => {
+    await git(repo, 'checkout', '-b', 'feature/checkout');
+    await finishedRun('03-a', 'a.txt', 'from run 3\n');
+
+    // Guard enabled + unconfirmed, but the target is a feature branch → proceeds.
+    const result = await mergeRuns(repo, ['03-a'], {
+      scriptPath: SCRIPT,
+      protectedBranchGuard: { confirmed: false },
+    });
+    expect(result.ok).toBe(true);
+    expect(result.merged).toEqual(['03-a']);
+    expect(result.protectedBranch ?? null).toBeNull();
+  });
+
+  it('leaves the protected branch clean — no stray-Receipt adoption commit lands during a withhold', async () => {
+    // A stray Receipt on main would normally be ADOPTED (committed) before the
+    // preflight. The protected-branch withhold happens FIRST, so not even the
+    // adoption commit touches main while the human hasn't confirmed.
+    await finishedRun('03-a', 'a.txt', 'from run 3\n');
+    await mkdir(join(repo, 'issues', 'completions'), { recursive: true });
+    await writeFile(
+      join(repo, 'issues', 'completions', '05-stray.md'),
+      '---\nissue: 5\noutcome: needs-verification\n---\nstray\n',
+    );
+    const commitsBefore = (await git(repo, 'rev-list', '--count', 'main')).trim();
+
+    const withheld = await mergeRuns(repo, ['03-a'], {
+      scriptPath: SCRIPT,
+      protectedBranchGuard: { confirmed: false },
+    });
+    expect(withheld.protectedBranch).toBe('main');
+    expect(withheld.adopted).toEqual([]);
+    // No adoption commit landed on main while withheld.
+    expect((await git(repo, 'rev-list', '--count', 'main')).trim()).toBe(commitsBefore);
+    expect(await git(repo, 'log', '--format=%s', 'main')).not.toContain('adopt stray Receipt');
+  });
+});

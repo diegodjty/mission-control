@@ -122,7 +122,7 @@ import {
   reduceTyping,
   type TypingState,
 } from '../src/shared/dispatcher-channel';
-import { classifyAuthority } from '../src/shared/dispatcher-authority';
+import { classifyAuthority, isProtectedBranch } from '../src/shared/dispatcher-authority';
 import {
   narrativeChannelFor,
   narrativeKindForLifecycle,
@@ -1426,6 +1426,94 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
     // Not mid-merge; the engineered conflict didn't smear an artifact verdict.
     expect(scan.midMerge).toBe(false);
     expect(scan.previews.some((p) => p.verdict?.kind === 'artifact')).toBe(false);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Scenario 10 — issue 113: merge targets the branch you're on, and landing on a
+  // protected branch STOPS for the "big warning". Drives the REAL afk-merge.sh
+  // (with MC's `--into` current-branch targeting) and the assembled guard exactly
+  // as the drain wires it — the machine gate before any human QA.
+  // ---------------------------------------------------------------------------
+  it('Scenario 10a (issue 113 Part A): a FEATURE-branch checkout integrates afk/ branches into that feature branch, never forced main', async () => {
+    // The repo sits on a feature branch while `main` still exists locally — the
+    // exact shape pre-113 afk-merge.sh refused with a "wrong branch" preflight.
+    await git(repo, 'checkout', '-b', 'feature/ship');
+    const six = sandboxIssue(6);
+
+    // A finished-unmerged Run in a worktree off the feature branch.
+    const wt = worktreePathFor(repo, six.slug);
+    await createWorktree(repo, six.slug, branchFor(six.slug));
+    await mkdir(join(wt, 'work'), { recursive: true });
+    await writeFile(join(wt, 'work', `${six.slug}.txt`), 'feature-branch work\n');
+    await writeFile(join(wt, 'issues', `${six.slug}.md`), issueFileContent(six, 'done'));
+    await git(wt, 'add', '.');
+    await git(wt, 'commit', '-m', `afk: complete ${six.slug}`);
+
+    // MC detects the CURRENT branch and passes it to afk-merge.sh via --into.
+    expect(await detectDefaultBranch(repo)).toBe('feature/ship');
+    const result = await mergeRuns(repo, [six.slug], { scriptPath: SCRIPT });
+
+    // No "wrong branch" refusal: it integrates into the feature branch.
+    expect(result.ok).toBe(true);
+    expect(result.conflicted).toBe(false);
+    expect(result.merged).toEqual([six.slug]);
+    expect(result.message).toContain('into feature/ship');
+    expect(result.message).not.toContain('into main');
+
+    // The work landed on the feature branch; `main` never received it.
+    await git(repo, 'checkout', 'feature/ship');
+    expect(await git(repo, 'ls-files')).toContain(`work/${six.slug}.txt`);
+    await git(repo, 'checkout', 'main');
+    expect(await git(repo, 'ls-files')).not.toContain(`work/${six.slug}.txt`);
+  });
+
+  it('Scenario 10b (issue 113 Part B): landing on protected main is a blocking gate — nothing lands until confirmed', async () => {
+    // The sandbox repo is on `main` (protected). The drain composes the gate
+    // exactly as App.tsx does: a protected target → a `protected-branch-land`
+    // action → blocking (the drain STOPS for the "big warning").
+    const branch = await detectDefaultBranch(repo);
+    expect(branch).toBe('main');
+    expect(isProtectedBranch(branch)).toBe(true);
+    expect(classifyAuthority('protected-branch-land')).toBe('blocking');
+
+    // A finished-unmerged Run ready to integrate onto main.
+    const six = sandboxIssue(6);
+    const wt = worktreePathFor(repo, six.slug);
+    await createWorktree(repo, six.slug, branchFor(six.slug));
+    await mkdir(join(wt, 'work'), { recursive: true });
+    await writeFile(join(wt, 'work', `${six.slug}.txt`), 'main-bound work\n');
+    await writeFile(join(wt, 'issues', `${six.slug}.md`), issueFileContent(six, 'done'));
+    await git(wt, 'add', '.');
+    await git(wt, 'commit', '-m', `afk: complete ${six.slug}`);
+    const baseline = await commitCount();
+
+    // The guarded merge WITHHOLDS: nothing lands on main, and the result names the
+    // protected branch so the drain raises the gate (declining leaves it here).
+    const withheld = await mergeRuns(repo, [six.slug], {
+      scriptPath: SCRIPT,
+      protectedBranchGuard: { confirmed: false },
+    });
+    expect(withheld.ok).toBe(false);
+    expect(withheld.conflicted).toBe(false);
+    expect(withheld.protectedBranch).toBe('main');
+    expect(withheld.merged).toEqual([]);
+    expect(await commitCount()).toBe(baseline); // main untouched
+    expect(existsSync(wt)).toBe(true); // work waits on its worktree/branch
+    // The afk/ branch survives for the confirmed retry (rev-parse succeeds).
+    await expect(
+      git(repo, 'rev-parse', '--verify', '--quiet', branchFor(six.slug)),
+    ).resolves.toBeDefined();
+    expect(await git(repo, 'ls-files')).not.toContain(`work/${six.slug}.txt`);
+
+    // Approving the "big warning" re-runs WITH confirmation → the work lands.
+    const confirmed = await mergeRuns(repo, [six.slug], {
+      scriptPath: SCRIPT,
+      protectedBranchGuard: { confirmed: true },
+    });
+    expect(confirmed.ok).toBe(true);
+    expect(confirmed.merged).toEqual([six.slug]);
+    expect(confirmed.protectedBranch ?? null).toBeNull();
+    expect(await git(repo, 'ls-files')).toContain(`work/${six.slug}.txt`);
   });
 });
 

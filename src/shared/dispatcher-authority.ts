@@ -6,9 +6,13 @@
  * This module encodes that division: a proposed action → one of three tiers:
  *
  *   - `blocking` — the Dispatcher must STOP and get a one-click human approval
- *     before it proceeds. The ENTIRE blocking list is three items and nothing
+ *     before it proceeds. The ENTIRE blocking list is four items and nothing
  *     else: (1) a Merge that hit a conflict, (2) aborting/stopping a drain,
- *     (3) a HITL issue awaiting the user's sign-off.
+ *     (3) a HITL issue awaiting the user's sign-off, and (4) landing a Run's work
+ *     on a PROTECTED branch (`main`/`master` — issue 113, amending ADR-0011,
+ *     pending Diego's sign-off). `main` is typically tied to production/deploy
+ *     workflows, so a merge/commit onto it must get an explicit "big warning"
+ *     confirmation; a non-protected feature branch is unchanged (auto-proceeds).
  *   - `passive`  — a notable, non-blocking state change worth an ambient,
  *     ignorable note (committed a checkpoint, a clean merge, a follow-up issue
  *     logged, a plan amended, a stranded worktree discarded, a course tweak).
@@ -26,8 +30,9 @@
  */
 
 /**
- * A thing the Dispatcher might do. The `blocking` set is the ADR-0011 three-item
- * interruption list; everything else is non-blocking (`passive` or `silent`).
+ * A thing the Dispatcher might do. The `blocking` set is the ADR-0011 interruption
+ * list (four items as amended by issue 113); everything else is non-blocking
+ * (`passive` or `silent`).
  */
 export type DispatcherAction =
   // --- Silent mechanics (no note) ---
@@ -81,7 +86,7 @@ export type DispatcherAction =
    * unknown dirt outside that set still halts (`merge-preflight`).
    */
   | 'receipt-adopt'
-  // --- Blocking approval — the ADR-0011 three-item list ---
+  // --- Blocking approval — the ADR-0011 list (four items as of issue 113) ---
   /**
    * A Merge that hit a conflict. The one merge case that still blocks (ADR-0011
    * refines ADR-0002): a conflicting/risky merge must not land on main silently,
@@ -95,7 +100,19 @@ export type DispatcherAction =
    * human-in-the-loop issue parked for manual verification, and only the human
    * can mark it done.
    */
-  | 'hitl-signoff';
+  | 'hitl-signoff'
+  /**
+   * About to land a Run's work (a merge, or the solo auto-commit) on a PROTECTED
+   * branch — `main`/`master` by default (issue 113, amending ADR-0011). Such a
+   * branch is usually wired to production/deploy workflows, so the drain STOPS
+   * and shows a prominent warning requiring an explicit one-click confirmation
+   * before anything lands; declining leaves the work unmerged on its
+   * branch/worktree. A non-protected feature branch never raises this — it is
+   * unchanged (auto-proceeds, per the branch-you're-on targeting). The blocking
+   * classification is what makes it a gate; `isProtectedBranch` decides WHEN to
+   * raise it.
+   */
+  | 'protected-branch-land';
 
 /**
  * Which interruption tier an action falls in (ADR-0011):
@@ -111,7 +128,8 @@ export type Authority = 'blocking' | 'passive' | 'silent';
  * compile until it is classified here, rather than silently defaulting.
  *
  * The `blocking` values are the ENTIRE interruption list: merge-conflict,
- * abort-drain, hitl-signoff. Nothing else blocks (ADR-0011).
+ * abort-drain, hitl-signoff, and protected-branch-land (issue 113, amending
+ * ADR-0011). Nothing else blocks.
  */
 const AUTHORITY: Record<DispatcherAction, Authority> = {
   // Silent mechanics.
@@ -127,10 +145,11 @@ const AUTHORITY: Record<DispatcherAction, Authority> = {
   'course-change': 'passive',
   'merge-preflight': 'passive',
   'receipt-adopt': 'passive',
-  // The three-item blocking list.
+  // The blocking list (four items as of issue 113).
   'merge-conflict': 'blocking',
   'abort-drain': 'blocking',
   'hitl-signoff': 'blocking',
+  'protected-branch-land': 'blocking',
 };
 
 /** Classify a proposed Dispatcher action into its ADR-0011 interruption tier. */
@@ -138,7 +157,45 @@ export function classifyAuthority(action: DispatcherAction): Authority {
   return AUTHORITY[action];
 }
 
-/** Does this action STOP for a one-click human approval (the 3-item list)? */
+/** Does this action STOP for a one-click human approval (the blocking list)? */
 export function isBlocking(action: DispatcherAction): boolean {
   return classifyAuthority(action) === 'blocking';
+}
+
+/**
+ * The default set of PROTECTED branches (issue 113): landing a Run's work on one
+ * of these gates. `main`/`master` are the conventional integration branches most
+ * often wired to production/deploy workflows — the ones Diego wants a "big
+ * warning" before anything lands on. Surfacing this set as a configurable
+ * setting is a deliberate follow-up (out of scope here); a sensible in-code
+ * default is enough for this slice.
+ */
+export const DEFAULT_PROTECTED_BRANCHES: readonly string[] = ['main', 'master'];
+
+/** Optional protected-branch configuration (a custom set overrides the default). */
+export interface ProtectedBranchConfig {
+  /** The protected branch names; when omitted, `DEFAULT_PROTECTED_BRANCHES`. */
+  protected?: readonly string[];
+}
+
+/**
+ * Is `branch` a protected branch (issue 113)? A pure name check against the
+ * configured protected set (default `main`/`master`), so the "should landing on
+ * this branch gate?" decision is unit-testable in isolation and shared across the
+ * merge path and the solo auto-commit path.
+ *
+ * Case- and whitespace-insensitive so a `Main`/`MASTER` checkout (or a stray
+ * trailing newline from raw git output) is still recognized as protected — the
+ * guard errs toward warning rather than silently landing on production. An empty
+ * or unreadable branch name is treated as NOT protected (there is nothing to
+ * warn about, and a real landing always has a concrete branch).
+ */
+export function isProtectedBranch(
+  branch: string | null | undefined,
+  config: ProtectedBranchConfig = {},
+): boolean {
+  const name = (branch ?? '').trim().toLowerCase();
+  if (name.length === 0) return false;
+  const set = config.protected ?? DEFAULT_PROTECTED_BRANCHES;
+  return set.some((b) => b.trim().toLowerCase() === name);
 }

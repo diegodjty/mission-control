@@ -497,11 +497,26 @@ export interface MainCommitRequest {
   projectPath: string;
   /** The `NN-slug` of the finished solo Run, used for the commit message. */
   slug: string;
+  /**
+   * The human clicked through the protected-branch warning for this landing
+   * (issue 113): proceed even though the target is a protected branch
+   * (`main`/`master`). Absent/false ⇒ the guard WITHHOLDS the commit and returns
+   * `protectedBranch` so the drain can raise the warning gate.
+   */
+  confirmProtectedLand?: boolean;
 }
 
 export interface MainCommitResult {
   /** True when a new commit landed on `main` this call (false ⇒ nothing to do). */
   committed: boolean;
+  /**
+   * The protected branch this commit was WITHHELD from pending confirmation
+   * (issue 113) — set only when the target is protected (`main`/`master`) and the
+   * request did not carry `confirmProtectedLand`. Nothing was committed; the drain
+   * raises the "big warning" gate and, on approval, re-invokes with confirmation.
+   * Null/absent when not withheld.
+   */
+  protectedBranch?: string | null;
   /**
    * The git error message when the commit was ATTEMPTED and failed, else null —
    * so a failed auto-commit is surfaced rather than silently leaving `main` dirty.
@@ -639,6 +654,13 @@ export interface MergeRunsRequest {
   projectPath: string;
   /** The `NN-slug`s whose `afk/NN-slug` branches to merge into `main`. */
   slugs: string[];
+  /**
+   * The human clicked through the protected-branch warning for this merge
+   * (issue 113): integrate even though the target (the repo's checked-out branch)
+   * is protected (`main`/`master`). Absent/false ⇒ the guard WITHHOLDS the merge
+   * and returns `protectedBranch` so the drain can raise the warning gate.
+   */
+  confirmProtectedLand?: boolean;
 }
 
 /** The outcome of a human-triggered Merge (issue 08). */
@@ -671,6 +693,14 @@ export interface MergeRunsResult {
    * that set still halts the preflight. Empty/absent when nothing was adopted.
    */
   adopted?: string[];
+  /**
+   * The protected branch this merge was WITHHELD from pending confirmation
+   * (issue 113) — set only when the target is protected (`main`/`master`) and the
+   * request did not carry `confirmProtectedLand`. Nothing was merged; the drain
+   * raises the "big warning" gate and, on approval, re-invokes with confirmation.
+   * Null/absent when not withheld.
+   */
+  protectedBranch?: string | null;
   /** A short human-readable summary for the Map. */
   message: string;
   /** The full `afk-merge.sh` output (stdout+stderr) for the UI to show. */
