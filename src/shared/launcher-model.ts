@@ -18,7 +18,7 @@
  * process; the UI in `renderer/src/Launcher.tsx`.
  */
 
-import type { RunTarget } from './ipc-contract';
+import type { LauncherProject, ProjectCardView, RunTarget } from './ipc-contract';
 
 /** Matches issue files (`NN-slug.md`); everything else is not an issue. */
 const ISSUE_FILE = /^(\d+)-.+\.md$/;
@@ -164,6 +164,60 @@ export function quickFixRunTarget(
   };
 }
 
+// ---------------------------------------------------------------------------
+// ＋ Start something — the two per-Project entry verbs (issue 116, ADR-0019)
+// ---------------------------------------------------------------------------
+
+/**
+ * The two verbs ＋ Start something offers on the Map (issue 116, ADR-0019):
+ * `grill` (plan a feature) and `simple` (a one-sentence standalone issue).
+ */
+export type StartVerb = 'grill' | 'simple';
+
+/**
+ * The button labels, EXACTLY as ADR-0019 names them — the single source of
+ * truth for both the Map's empty-state chooser and its populated ＋ Start
+ * something control, so the two never drift.
+ */
+export const START_VERB_LABELS: Record<StartVerb, string> = {
+  grill: 'Grill a feature',
+  simple: 'Simple issue',
+};
+
+/**
+ * Where a ＋ Start something verb routes for a Project (issue 116): the pure
+ * verb→target that `startSomething` resolves. `route` picks the existing
+ * machinery — `planning` opens the Planning view (grill → PRD → issues),
+ * `quick-fix` opens the one-sentence quick-fix form (Run-now / leave-queued) —
+ * and the `project` is carried through so the renderer dispatches on the
+ * verdict instead of re-deriving anything from window-active state (the same
+ * end-to-end-identity discipline as `quickFixRunTarget`).
+ */
+export interface StartTarget<P> {
+  /** `planning` → the Planning view; `quick-fix` → the quick-fix form. */
+  route: 'planning' | 'quick-fix';
+  /** The verb's label (from `START_VERB_LABELS`), echoed for the affordance. */
+  label: string;
+  /** The Project the verb acts on, unchanged. */
+  project: P;
+}
+
+/**
+ * Resolve a ＋ Start something verb to its route for `project` (issue 116,
+ * folded in alongside `quickFixRunTarget`). PURE and total: `grill` routes to
+ * the Planning view, every other verb (`simple`) to the quick-fix form; the
+ * project is passed straight through. This slice only relocates and re-labels —
+ * neither route is a new flow, so the resolver names a destination and nothing
+ * more.
+ */
+export function startSomething<P>(verb: StartVerb, project: P): StartTarget<P> {
+  return {
+    route: verb === 'grill' ? 'planning' : 'quick-fix',
+    label: START_VERB_LABELS[verb] ?? '',
+    project,
+  };
+}
+
 /**
  * The Quick fix dropdown's initial selection (issue 88): the project the user
  * is visibly on — the Window's active project, when it is one of the listed
@@ -266,4 +320,88 @@ export function sortLauncherProjects<T extends RecencySortable>(projects: readon
     if (aStamp !== bStamp) return aStamp < bStamp ? 1 : -1;
     return a.label < b.label ? -1 : a.label > b.label ? 1 : 0;
   });
+}
+
+// ---------------------------------------------------------------------------
+// Project grid — the project-first home (issue 115, ADR-0019)
+// ---------------------------------------------------------------------------
+//
+// The pure core behind the home page's noun-first chooser: given the per-
+// Project signals the portfolio aggregator already gathers (this slice: the
+// backlog counts + last-activity `LauncherProject` carries), shape each card's
+// display labels and order the grid. Written as a seam so issue 118 can add
+// HITL / liveness / stage signals — and the attention-float ordering — without
+// reshaping the aggregator or the renderer.
+
+/**
+ * The `open · wip · done` tally a project card shows. Unlike `projectStateLine`
+ * (which hides zeros for a quiet Continue row), a card names ALL THREE counts
+ * even when zero — the grid is an at-a-glance portfolio, so "0 open · 0 wip ·
+ * 0 done" is a truthful "nothing here yet", not an omitted fact. Negatives and
+ * absent fields clamp to 0; pure and total.
+ */
+export function cardCountsLabel(counts: BacklogCounts): string {
+  const open = Math.max(0, counts?.open ?? 0);
+  const wip = Math.max(0, counts?.wip ?? 0);
+  const done = Math.max(0, counts?.done ?? 0);
+  return `${open} open · ${wip} wip · ${done} done`;
+}
+
+/**
+ * A relative last-activity label for a card ("just now", "5m ago", "3h ago",
+ * "2d ago", "3w ago", "5mo ago", "2y ago") from an ISO stamp and a reference
+ * `now`. Null / empty / unparseable stamps degrade to "no activity yet", and a
+ * future (clock-skewed) stamp reads "just now" — the function is total, never
+ * throws. Timezone-free: it measures a DURATION, so the local-calendar-day
+ * concern that bit the quick-fix `## Source` stamp does not apply here.
+ */
+export function relativeActivityLabel(iso: string | null, now: Date): string {
+  if (typeof iso !== 'string' || iso.length === 0) return 'no activity yet';
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then)) return 'no activity yet';
+  const sec = Math.floor((now.getTime() - then) / 1000);
+  if (sec < 60) return 'just now';
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  if (day < 7) return `${day}d ago`;
+  if (day < 30) return `${Math.floor(day / 7)}w ago`;
+  if (day < 365) return `${Math.floor(day / 30)}mo ago`;
+  return `${Math.floor(day / 365)}y ago`;
+}
+
+/**
+ * The grid ordering (issue 115): most-recently-active first, quiet projects
+ * last (alphabetical) — this slice's rule IS the recency sort. It is the single
+ * seam issue 118 changes to FLOAT projects that need attention (HITL / a live
+ * drain) above the recency order; the aggregator and renderer call this and
+ * never re-sort, so that later change touches only this function.
+ */
+export function orderProjectCards<T extends RecencySortable>(cards: readonly T[]): T[] {
+  return sortLauncherProjects(cards);
+}
+
+/**
+ * Shape the gathered per-Project signals into the home grid's ordered cards —
+ * the pure core the portfolio aggregator delegates ALL shaping and ordering to.
+ * Given the signals `listLauncherProjects` gathers and a reference `now`, it
+ * derives each card's display labels and returns a `ProjectCardView[]` in grid
+ * order. A superset mapping: every raw `LauncherProject` field survives (the
+ * renderer clicks a card and hands its `workbenchDir` to the in-place switch),
+ * with the card-model labels added on top.
+ */
+export function buildProjectGrid(
+  projects: readonly LauncherProject[],
+  now: Date,
+): ProjectCardView[] {
+  const cards = projects.map(
+    (p): ProjectCardView => ({
+      ...p,
+      countsLabel: cardCountsLabel(p.counts),
+      activityLabel: relativeActivityLabel(p.lastActivity, now),
+    }),
+  );
+  return orderProjectCards(cards);
 }

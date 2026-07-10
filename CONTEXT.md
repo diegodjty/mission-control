@@ -48,8 +48,9 @@ The Mission Control surface for running a backlog — the **Map** plus parallel 
 **Planning view** (v1 per ADR-0016):
 The Mission Control surface for the planning stages: a normal **Pane** running `grill-with-docs`/`to-prd`/`to-issues` beside a live markdown preview of the documents as they are written (workbench PRD/issues + repo CONTEXT/ADRs, file-watched), with stage buttons launching each step. Deliberately thin — not a bespoke structured chat.
 
-**Launcher** (ADR-0016):
-The front door: every empty **Window** asks *what are we doing?* — New project / Big feature / Quick fix / Just talk / Continue — and each action performs its own setup (scaffold + registry entry, a **Planning view**, a one-sentence standalone issue with Run-now, a warm bare **Pane**). The playbook as UI: the user stops remembering; the tool asks.
+**Launcher** (ADR-0016, redefined **project-first** by ADR-0019):
+The front door — the **home page** every empty **Window** shows: a chooser of **all registered Projects** rendered as cards (toggle to a dense list; the choice persists in `localStorage['mc.projectView']`, cards default). Each card shows the backlog line (open·wip·done), a "needs-you" **HITL** badge, liveness ("N running" or last-activity), and pipeline **stage**; a card's ⋯ menu carries *Open in new Window* / *Remove from list*. Clicking a card switches this **Window** in place to that Project's **Map** (via existing `switchProject`); the per-project entry verbs now live on the Map as **＋ Start something** — **Grill a feature** (→ **Planning view**) and **Simple issue** (→ one standalone issue). Only two actions are project-agnostic and stay on the home page: **New project** (scaffold + registry entry) and a quiet **Just talk** (warm bare **Pane**). The playbook as UI, now **noun-first**: pick the Project, then the tool asks what to do.
+_Avoid_: dashboard (the **Map** is the dashboard); the verb-first "what are we doing?" front door (that was ADR-0016, superseded by ADR-0019).
 
 **Inbox** (ADR-0016):
 The cross-project attention surface: derived from lightly watching **every** `status: active` registry project's workbench artifacts — HITL parks awaiting sign-off, curator `CORE.proposed.md` proposals, blocked Runs, HUMAN-SETUP boxes gating issues — plus a since-last-seen journal briefing. Quiet text, never notifications; items click through to their project. The ecosystem hub: future tools surface here by writing workbench artifacts, no new UI channel per tool.
@@ -87,6 +88,7 @@ A **clean, conflict-free Merge auto-proceeds** (refines ADR-0002's "human-trigge
 - **Mission Control** shows one **Map** and hosts many **Panes**.
 - A **Run** happens in exactly one **Pane**; each **Pane** is one fresh session for one issue (matches the `/clear`-per-issue habit).
 - The **Map** reads **Artifacts**; **Panes** produce changes to **Artifacts** (issue status flips, code, completion blocks), which the **Map** then reflects.
+- The **Launcher** (home) is the Project chooser in front of the **Map**; the per-project entry verbs (**＋ Start something**: **Grill a feature** / **Simple issue**) live on the **Map**, whose empty state *is* that chooser (ADR-0019).
 - Concurrent **Runs** are capped by a **max-concurrent** setting.
 - **Mission Control owns the isolation lifecycle:** a lone **Run** works on `main` (solo, no worktree); the moment there are 2+ concurrent **Runs**, it enables parallel mode and gives each **Run** its own **worktree**, then offers a **Merge** action once they finish.
 - The **Dispatcher** drives **Workers** (Runs) via the deterministic **Run Coordinator** for scheduling; it consumes **Completion blocks** (the **Run log**), not raw Pane output. Auto on reversible mechanics, human-approved on scope (see **Dispatcher authority**).
@@ -118,12 +120,13 @@ _Avoid_: dry-run (`afk-merge.sh --dry-run` does not detect conflicts), merge che
 
 - "mission control" initially meant both "watch the process" and "run the process" — resolved: it does both, via two distinct surfaces (**Map** = watch, **Panes** = run).
 - "terminal" was used for the live session — resolved to **Pane** to distinguish the rendered UI element from a raw OS terminal.
+- The **Launcher** was **verb-first** ("what are we doing?" → pick an action, Project came along) — resolved to **noun-first** (ADR-0019): the home page is a Project chooser; the verbs (Grill a feature / Simple issue) moved onto the **Map**. Leading with the Project matches the common case — returning to work already in flight — which the verb prompt ignored.
 
 ## Open (not yet resolved)
 
 - **Merge preview** follow-ups, deliberately deferred by ADR-0018: wip early-warning previews, auto-rebase of finished branches after each merge (needs its own grill — history rewrite on branches Receipts reference), and conflict-aware merge ordering (the sequence simulation already produces the data).
 - Detailed design of the **Planning view** (split-screen interview + live docs) — direction set, specifics deferred.
-- Portfolio overview **Window** (all Projects + stages on one page) — a later additive view, not v1.
+- Portfolio overview **Window** (all Projects + stages on one page) — partially delivered by the project-first **Launcher** (ADR-0019, the at-a-glance grid of cards with stage badges); a dedicated cross-project *analytics* Window remains a later additive view, not v1.
 - How the **Map** gets live updates — file-watch on `issues/` vs. polling. Implementation-level; defer to build-time.
 - Build order: **Execution view** is the first slice; **Planning view** is a later slice.
 - Tech stack for the shell (Next.js + node-pty/xterm.js is the leading candidate but unconfirmed).

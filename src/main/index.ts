@@ -47,6 +47,7 @@ import { registerAppearedRepo } from './register-repo';
 import { deleteIssueFile, readIssueText, writeIssueText } from './issue-file-store';
 import { readCoreMemory, writeDrainJournal } from './memory-files';
 import {
+  buildProjectGrid,
   buildQuickFixIssue,
   localDateStamp,
   nextIssueNumber,
@@ -91,6 +92,7 @@ import {
   type LauncherProject,
   type OnboardingCreateRequest,
   type OnboardingCreateResult,
+  type ProjectGridResult,
   type ProjectRemoveRequest,
   type ProjectRemoveResult,
   type RepoRegisterRequest,
@@ -1200,13 +1202,14 @@ function registerIpc(): void {
     return latest === null ? null : new Date(latest).toISOString();
   };
 
-  // The Launcher's project list: every workbench project — a `status: active`
-  // registry project OR a repo-less project directory (a CONFIG.md with an
-  // empty repos map; ADR-0017 defers its registration, so it has no registry
-  // entry — issue 99) — open in a Window or not, with truthful backlog counts
-  // and a last-activity stamp, most recent first. Read-only: listing never
-  // claims, writes, or commits.
-  ipcMain.handle(IpcChannel.LauncherList, async (): Promise<LauncherListResult> => {
+  // Gather every workbench project — a `status: active` registry project OR a
+  // repo-less project directory (a CONFIG.md with an empty repos map; ADR-0017
+  // defers its registration, so it has no registry entry — issue 99) — open in
+  // a Window or not, with truthful backlog counts and a last-activity stamp,
+  // most recent first. Read-only: gathering never claims, writes, or commits.
+  // Shared by the Launcher's Continue list (LauncherList) and the project-first
+  // home grid (ProjectGrid, issue 115) so both see the same signals.
+  const gatherLauncherProjects = async (): Promise<LauncherProject[]> => {
     const names = await listWorkbenchProjectNames(WORKBENCH_ROOT);
     const projects = await Promise.all(
       names.map(async (name): Promise<LauncherProject> => {
@@ -1233,7 +1236,22 @@ function registerIpc(): void {
         };
       }),
     );
-    return { projects: sortLauncherProjects(projects) };
+    return sortLauncherProjects(projects);
+  };
+
+  // The Launcher's Continue project list (issue 81) — the gathered signals as-is.
+  ipcMain.handle(IpcChannel.LauncherList, async (): Promise<LauncherListResult> => {
+    return { projects: await gatherLauncherProjects() };
+  });
+
+  // The project-first home grid (issue 115, ADR-0019): the portfolio aggregator
+  // — a thin adapter. It gathers the same per-Project signals and delegates ALL
+  // shaping and ordering to the pure card model (`buildProjectGrid`), returning
+  // a `ProjectCardView[]` the renderer draws as cards. Read-only, parallel to
+  // LauncherList; the renderer keeps it live off the existing registry + backlog
+  // subscriptions (no new watcher here).
+  ipcMain.handle(IpcChannel.ProjectGrid, async (): Promise<ProjectGridResult> => {
+    return { cards: buildProjectGrid(await gatherLauncherProjects(), new Date()) };
   });
 
   // Quick fix (issue 81): one sentence → a well-formed standalone issue in the
@@ -1414,6 +1432,11 @@ function registerIpc(): void {
         repoPath: req?.repoPath ?? '',
         key: req?.key ?? '',
       });
+      // A successful self-heal genuinely changed the registry — broadcast so
+      // every Window re-reads (issue 115): the project-first home grid (and the
+      // switcher) picks the newly registered repo up with no manual refresh,
+      // the same way the open/switch/close flows already notify.
+      if (outcome.ok) broadcastRegistryChanged();
       return {
         ok: outcome.ok,
         errors: outcome.errors,

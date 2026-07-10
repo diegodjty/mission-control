@@ -206,6 +206,15 @@ export const IpcChannel = {
    */
   LauncherList: 'launcher:list',
   /**
+   * renderer → main (invoke): the project-first home grid (issue 115,
+   * ADR-0019) — every workbench project shaped into a `ProjectCardView` (its
+   * `LauncherProject` signals + the card model's display labels), in grid
+   * order. A read-only aggregation PARALLEL to `LauncherList`; listing never
+   * claims or writes. Pushed live off the existing registry + backlog
+   * subscriptions (no new watcher). Resolves to a ProjectGridResult.
+   */
+  ProjectGrid: 'project:grid',
+  /**
    * renderer → main (invoke): the Launcher's Quick fix (issue 81, ADR-0016)
    * — turn one sentence into a well-formed STANDALONE issue (`## Source`, no
    * Parent, next free number) in the chosen project's workbench backlog, and
@@ -985,6 +994,27 @@ export interface LauncherListResult {
   projects: LauncherProject[];
 }
 
+/**
+ * One Project as the project-first home grid's CARD sees it (issue 115,
+ * ADR-0019): a SUPERSET of `LauncherProject` — every raw signal it already
+ * carries (identity handles, backlog counts, last-activity) — plus the display
+ * labels the pure card model shapes. This slice adds only the `open·wip·done`
+ * tally line and a relative last-activity label; issue 118 extends the shape
+ * with HITL / liveness / pipeline-stage fields (and attention-float ordering)
+ * WITHOUT a new type, so the aggregator and renderer never reshape.
+ */
+export interface ProjectCardView extends LauncherProject {
+  /** The `open · wip · done` tally line (card model — every count, even zero). */
+  countsLabel: string;
+  /** A relative last-activity label, e.g. "5m ago" / "no activity yet". */
+  activityLabel: string;
+}
+
+export interface ProjectGridResult {
+  /** Every home-grid card, in grid order (most recently active first). */
+  cards: ProjectCardView[];
+}
+
 export interface QuickFixCreateRequest {
   /** The chosen project's workbench root (`~/Workbench/<project>`). */
   workbenchDir: string;
@@ -1258,6 +1288,13 @@ export interface MissionControlApi {
    * project with truthful backlog counts, most recently active first.
    */
   listLauncherProjects(): Promise<LauncherListResult>;
+  /**
+   * The project-first home grid (issue 115): every workbench project as a
+   * `ProjectCardView` (signals + card-model labels), in grid order. Parallel
+   * to `listLauncherProjects`; clicking a card switches the Window in place to
+   * that project's Map.
+   */
+  listProjectCards(): Promise<ProjectGridResult>;
   /**
    * The Launcher's Quick fix (issue 81): one sentence → a standalone issue in
    * the chosen workbench backlog, auto-committed.

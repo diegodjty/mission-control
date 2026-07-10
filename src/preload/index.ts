@@ -23,6 +23,7 @@ import {
   type LauncherListResult,
   type OnboardingCreateRequest,
   type OnboardingCreateResult,
+  type ProjectGridResult,
   type ProjectRemoveRequest,
   type ProjectRemoveResult,
   type RepoRegisterRequest,
@@ -168,6 +169,9 @@ const api: MissionControlApi = {
 
   listLauncherProjects: (): Promise<LauncherListResult> =>
     ipcRenderer.invoke(IpcChannel.LauncherList),
+
+  listProjectCards: (): Promise<ProjectGridResult> =>
+    ipcRenderer.invoke(IpcChannel.ProjectGrid),
 
   createQuickFix: (req: QuickFixCreateRequest): Promise<QuickFixCreateResult> =>
     ipcRenderer.invoke(IpcChannel.QuickFixCreate, req),

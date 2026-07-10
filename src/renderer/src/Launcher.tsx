@@ -3,62 +3,49 @@ import type {
   AttentionSnapshot,
   LauncherProject,
   OnboardingCreateResult,
-  ProjectRemoveResult,
-  QuickFixCreateResult,
+  ProjectCardView,
 } from '../../shared/ipc-contract';
-import { projectStateLine, quickFixDefaultDir } from '../../shared/launcher-model';
+import { projectStateLine } from '../../shared/launcher-model';
 import { defaultWorkspaceRoot, repoKeyFor } from '../../shared/onboarding-model';
+import type { QuickFixIssueRef } from './QuickFixForm';
 
-/** What a successful Quick fix hands back for the Run-now offer. */
-export interface QuickFixIssueRef {
-  issueId: number;
-  fileName: string;
-  title: string;
-}
+// Re-exported so existing importers (App) keep their `./Launcher` import path.
+export type { QuickFixIssueRef };
 
 interface LauncherProps {
   /** Active workbench-registry projects, most recently active first. */
   projects: LauncherProject[];
+  /**
+   * The project-first home grid's cards (issue 115, ADR-0019): a superset of
+   * `projects` carrying the card model's display labels (open·wip·done +
+   * relative last-activity), in grid order. This is the home page's lead
+   * content — since issue 117 the only other home affordances are New project
+   * and a quiet Just talk link (the per-Project verbs moved to the Map).
+   */
+  cards: ProjectCardView[];
+  /**
+   * Open a card's project in place — switch this Window to that project's Map
+   * (issue 115), the same in-place flow Continue uses.
+   */
+  onOpenCard: (card: ProjectCardView) => void;
   /** The app-wide attention snapshot — parked counts per project. */
   attention: AttentionSnapshot;
   /** Set when this Window has a project open (the home affordance's origin). */
   activeProjectLabel: string | null;
-  /**
-   * The open project's key (its workbench dir, for a workbench project) —
-   * Quick fix's dropdown defaults to it and ONLY it (issue 88): the project
-   * the user is visibly on, or an explicit pick. Never a silent projects[0].
-   */
-  activeProjectKey: string | null;
   /** Return to the open project's Map (null when no project is open). */
   onBackToProject: (() => void) | null;
-  /** Continue: open this project in this Window through the normal flow. */
-  onContinue: (project: LauncherProject) => void;
   /**
    * New project (issue 82): the guided flow just created and committed this
-   * workbench project — land the Window on it (with the Big feature /
-   * Quick fix nudge).
+   * workbench project — land the Window on it.
    */
   onProjectCreated: (created: { workbenchDir: string; label: string }) => void;
-  /**
-   * Big feature (issue 83): open the Planning view — a warm Pane beside the
-   * live doc preview — on the chosen workbench project.
-   */
-  onBigFeatureProject: (project: LauncherProject) => void;
   /** Just talk: one warm bare Pane on this project (CORE.md injected). */
   onJustTalkProject: (project: LauncherProject) => void;
   /** Just talk on a bare folder (native picker; no memory, no tracking). */
   onJustTalkFolder: () => void;
-  /** Run the freshly created quick-fix issue now (single bare Run). */
-  onQuickFixRunNow: (project: LauncherProject, issue: QuickFixIssueRef) => void;
-  /**
-   * Remove project (issue 92): the registry entries are already gone (and the
-   * rewrite committed) — drop the project from this Window's list. The
-   * workbench folder and code repos stay on disk untouched.
-   */
-  onProjectRemoved: (project: LauncherProject) => void;
 }
 
-type LauncherMode = 'menu' | 'newproject' | 'bigfeature' | 'quickfix' | 'talk';
+type LauncherMode = 'menu' | 'newproject' | 'talk';
 
 /** One repo row of the New project form. */
 interface RepoRow {
@@ -71,29 +58,26 @@ interface RepoRow {
 const EMPTY_ROW: RepoRow = { key: '', path: '', keyTouched: false };
 
 /**
- * The Launcher (issue 81, ADR-0016): every empty Window IS this surface —
- * *what are we doing?* — and the home affordance returns any Window to it
- * without closing its project. Five actions: New project (issue 82 — the
- * guided onboarding flow: name + repo paths → workbench project + registry
- * entries + one commit, then land on the new project), Big feature (issue 83
- * — pick a project, open the Planning view: a warm Pane beside the live doc
- * preview), Quick fix (one sentence → a standalone workbench issue,
- * auto-committed, with a Run-now offer), Just talk (one warm bare Pane), and
- * Continue (recent projects with a truthful one-line state).
+ * The Launcher (issue 81, ADR-0016; project-first per issue 115/117, ADR-0019):
+ * every empty Window IS this surface, and the home affordance returns any Window
+ * to it without closing its project. Since issue 117 the home page is noun-first:
+ * the grid of registered projects is the lead content (click a card → its Map),
+ * with just two project-agnostic affordances beneath it — New project (issue 82:
+ * the guided onboarding flow that scaffolds a workbench project and lands on it)
+ * as the one primary action, and a quiet Just talk link (one warm bare Pane).
+ * The per-Project verbs (Grill a feature / Simple issue) moved onto the Map's
+ * ＋ Start something (issue 116).
  */
 export function Launcher({
   projects,
+  cards,
+  onOpenCard,
   attention,
   activeProjectLabel,
-  activeProjectKey,
   onBackToProject,
-  onContinue,
   onProjectCreated,
-  onBigFeatureProject,
   onJustTalkProject,
   onJustTalkFolder,
-  onQuickFixRunNow,
-  onProjectRemoved,
 }: LauncherProps): JSX.Element {
   const [mode, setMode] = useState<LauncherMode>('menu');
 
@@ -186,50 +170,6 @@ export function Launcher({
       .finally(() => setOnboarding(false));
   };
 
-  // --- Quick fix state ------------------------------------------------------
-  const [quickFixDir, setQuickFixDir] = useState<string>('');
-  const [sentence, setSentence] = useState('');
-  const [creating, setCreating] = useState(false);
-  const [quickFixError, setQuickFixError] = useState<string | null>(null);
-  // The created issue awaiting the Run-now / leave-queued choice.
-  const [created, setCreated] = useState<{
-    project: LauncherProject;
-    issue: QuickFixIssueRef;
-  } | null>(null);
-  // A quiet menu-mode confirmation ("leave it queued", project removed).
-  const [queuedNote, setQueuedNote] = useState<string | null>(null);
-
-  // --- Remove project state (issue 92) ---------------------------------------
-  // The row whose ✕ was clicked, awaiting the explicit confirm.
-  const [removing, setRemoving] = useState<LauncherProject | null>(null);
-  const [removeBusy, setRemoveBusy] = useState(false);
-  const [removeError, setRemoveError] = useState<string | null>(null);
-
-  const confirmRemove = (): void => {
-    if (removeBusy || removing === null) return;
-    const target = removing;
-    setRemoveBusy(true);
-    setRemoveError(null);
-    void window.mc
-      .removeProject({ dirName: target.dirName })
-      .then((res: ProjectRemoveResult) => {
-        if (!res.ok) {
-          setRemoveError(res.error ?? 'Could not remove the project.');
-          return;
-        }
-        setRemoving(null);
-        setQueuedNote(
-          `${target.label} removed from Mission Control — its workbench folder (issues, memory) and code repos stay on disk.` +
-            (res.warning !== null ? ` ${res.warning}` : ''),
-        );
-        onProjectRemoved(target);
-      })
-      .catch((err: unknown) => {
-        setRemoveError(err instanceof Error ? err.message : String(err));
-      })
-      .finally(() => setRemoveBusy(false));
-  };
-
   /** Parked HITL items awaiting the human, per workbench project dir name. */
   const parkedByProject = useMemo(() => {
     const map: Record<string, number> = {};
@@ -240,70 +180,13 @@ export function Launcher({
     return map;
   }, [attention.items]);
 
-  // The chosen project, or null while nothing is chosen (issue 88): NO silent
-  // projects[0] fallback — that is how a quick fix landed in whichever project
-  // sorted first. Null keeps submit disabled until an explicit/visible pick.
-  const quickFixProject = useMemo(
-    () => projects.find((p) => p.workbenchDir === quickFixDir) ?? null,
-    [projects, quickFixDir],
-  );
-
-  const createQuickFix = (): void => {
-    if (creating) return;
-    if (quickFixProject === null) {
-      // Reachable via Enter in the sentence field — the button is disabled.
-      setQuickFixError('Pick the project this fix belongs to.');
-      return;
-    }
-    const text = sentence.trim();
-    if (text.length === 0) {
-      setQuickFixError('Type one sentence describing the fix.');
-      return;
-    }
-    setCreating(true);
-    setQuickFixError(null);
-    void window.mc
-      .createQuickFix({ workbenchDir: quickFixProject.workbenchDir, sentence: text })
-      .then((res: QuickFixCreateResult) => {
-        if (!res.ok || res.issueId === null || res.fileName === null) {
-          setQuickFixError(res.error ?? 'Could not create the issue.');
-          return;
-        }
-        setCreated({
-          project: quickFixProject,
-          issue: { issueId: res.issueId, fileName: res.fileName, title: res.title ?? text },
-        });
-        setSentence('');
-      })
-      .catch((err: unknown) => {
-        setQuickFixError(err instanceof Error ? err.message : String(err));
-      })
-      .finally(() => setCreating(false));
-  };
-
   const backToMenu = (): void => {
     setMode('menu');
-    setQuickFixError(null);
-    setCreated(null);
     setOnboardErrors([]);
     setOnboardWarnings([]);
-    setRemoving(null);
-    setRemoveError(null);
   };
 
-  /** Enter a non-menu mode: any pending remove-confirm is abandoned. */
-  const enterMode = (next: LauncherMode): void => {
-    setMode(next);
-    setQueuedNote(null);
-    setRemoving(null);
-    setRemoveError(null);
-  };
-
-  const projectRows = (
-    onPick: (p: LauncherProject) => void,
-    verb: string,
-    removable = false,
-  ): JSX.Element =>
+  const projectRows = (onPick: (p: LauncherProject) => void, verb: string): JSX.Element =>
     projects.length === 0 ? (
       <p className="launcher__empty">
         No active workbench projects in ~/Workbench/registry.md yet — use New project, or open a
@@ -312,7 +195,7 @@ export function Launcher({
     ) : (
       <ul className="launcher__list">
         {projects.map((p) => (
-          <li key={p.workbenchDir} className={removable ? 'launcher__removable-row' : undefined}>
+          <li key={p.workbenchDir}>
             <button
               className="launcher__project"
               onClick={() => onPick(p)}
@@ -323,19 +206,6 @@ export function Launcher({
                 {projectStateLine(p.counts, parkedByProject[p.dirName] ?? 0)}
               </span>
             </button>
-            {removable && (
-              <button
-                className="launcher__secondary launcher__remove"
-                title={`Remove ${p.label} from Mission Control (the workbench folder and repos stay on disk)`}
-                onClick={() => {
-                  setRemoving(p);
-                  setRemoveError(null);
-                  setQueuedNote(null);
-                }}
-              >
-                ✕
-              </button>
-            )}
           </li>
         ))}
       </ul>
@@ -352,79 +222,51 @@ export function Launcher({
 
         {mode === 'menu' && (
           <>
-            <h1 className="launcher__title">What are we doing?</h1>
-            {queuedNote !== null && <p className="launcher__note">{queuedNote}</p>}
-            <div className="launcher__actions">
+            {/* Project-first home (issue 115/117, ADR-0019): the grid of
+                registered projects is the home page's lead content — clicking a
+                card switches this Window in place to that project's Map. Beneath
+                it sit the only two project-agnostic affordances (issue 117): New
+                project as the one primary action, and a quiet Just talk link.
+                Everything per-Project now lives on the Map's ＋ Start something
+                (issue 116). With no projects registered, the empty line still
+                leads with New project, not a blank grid. */}
+            <h1 className="launcher__title">Projects</h1>
+            {cards.length === 0 ? (
+              <p className="launcher__empty">No projects yet — set one up to get started.</p>
+            ) : (
+              <ul className="launcher__grid">
+                {cards.map((c) => (
+                  <li key={c.workbenchDir}>
+                    <button
+                      className="launcher__card"
+                      onClick={() => onOpenCard(c)}
+                      title={`Open ${c.label}`}
+                    >
+                      <span className="launcher__card-name">{c.label}</span>
+                      <span className="launcher__card-counts">{c.countsLabel}</span>
+                      <span className="launcher__card-activity">{c.activityLabel}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <div className="launcher__home-actions">
               <button
-                className="launcher__action"
-                onClick={() => enterMode('newproject')}
+                className="launcher__primary"
+                onClick={() => setMode('newproject')}
                 title="Set up a new workbench project (or register an existing repo): name + repo paths → CONFIG, registry entries, one commit"
               >
-                <span className="launcher__action-name">New project</span>
-                <span className="launcher__action-hint">start or register a project</span>
+                New project
               </button>
               <button
-                className="launcher__action"
-                onClick={() => enterMode('bigfeature')}
-                title="Plan a big feature: a Planning session beside a live preview of the docs as they're written"
+                className="launcher__talk-link"
+                onClick={() => setMode('talk')}
+                title="Open a warm bare Pane for a throwaway question — no issue, no tracking"
               >
-                <span className="launcher__action-name">Big feature</span>
-                <span className="launcher__action-hint">grill → PRD → issues</span>
-              </button>
-              <button
-                className="launcher__action"
-                onClick={() => {
-                  enterMode('quickfix');
-                  // Default to the project the user is visibly on — or nothing,
-                  // which requires an explicit pick before submit (issue 88).
-                  setQuickFixDir(quickFixDefaultDir(projects, activeProjectKey));
-                }}
-                title="One sentence becomes a standalone issue in a project's backlog"
-              >
-                <span className="launcher__action-name">Quick fix</span>
-                <span className="launcher__action-hint">one sentence → one issue</span>
-              </button>
-              <button
-                className="launcher__action"
-                onClick={() => enterMode('talk')}
-                title="One warm claude session — no issue, no tracking"
-              >
-                <span className="launcher__action-name">Just talk</span>
-                <span className="launcher__action-hint">a warm session, nothing tracked</span>
+                Just talk
               </button>
             </div>
-
-            <h2 className="launcher__subtitle">Continue</h2>
-            {removing !== null && (
-              <div className="launcher__confirm">
-                <p className="launcher__confirm-text">
-                  Remove <strong>{removing.label}</strong> from Mission Control? Only the
-                  registry entries go — the workbench folder (issues, Receipts, memory) and the
-                  code repos stay on disk, and the change is committed to the workbench so it
-                  can be restored.
-                </p>
-                {removeError !== null && <p className="launcher__error">{removeError}</p>}
-                <div className="launcher__row">
-                  <button
-                    className="launcher__primary"
-                    onClick={confirmRemove}
-                    disabled={removeBusy}
-                  >
-                    {removeBusy ? 'Removing…' : 'Remove project'}
-                  </button>
-                  <button
-                    className="launcher__secondary"
-                    onClick={() => {
-                      setRemoving(null);
-                      setRemoveError(null);
-                    }}
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </div>
-            )}
-            {projectRows(onContinue, 'Open', true)}
           </>
         )}
 
@@ -576,114 +418,6 @@ export function Launcher({
                 </button>
               </div>
             </div>
-          </>
-        )}
-
-        {mode === 'bigfeature' && (
-          <>
-            <h1 className="launcher__title">Big feature</h1>
-            <p className="launcher__hint">
-              grill → PRD → issues. Pick the project: a warm planning session opens beside a
-              live preview of the documents as they are written.
-            </p>
-            {projectRows(onBigFeatureProject, 'Plan in')}
-            <div className="launcher__row">
-              <button className="launcher__secondary" onClick={backToMenu}>
-                Cancel
-              </button>
-            </div>
-          </>
-        )}
-
-        {mode === 'quickfix' && (
-          <>
-            <h1 className="launcher__title">Quick fix</h1>
-            {created === null ? (
-              <div className="launcher__form">
-                <label className="launcher__label">
-                  Project
-                  <select
-                    className="launcher__select"
-                    value={quickFixDir}
-                    onChange={(e) => setQuickFixDir(e.target.value)}
-                  >
-                    {/* No silent default (issue 88): with no project visibly
-                        open, the placeholder holds until an explicit pick —
-                        and it blocks submit. */}
-                    {quickFixProject === null && (
-                      <option value="" disabled>
-                        Pick a project…
-                      </option>
-                    )}
-                    {projects.map((p) => (
-                      <option key={p.workbenchDir} value={p.workbenchDir}>
-                        {p.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="launcher__label">
-                  One sentence — what needs fixing?
-                  <input
-                    className="launcher__input"
-                    type="text"
-                    value={sentence}
-                    placeholder="e.g. The drain message overflows the Map header"
-                    onChange={(e) => setSentence(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') createQuickFix();
-                    }}
-                    autoFocus
-                  />
-                </label>
-                {quickFixError !== null && <p className="launcher__error">{quickFixError}</p>}
-                <div className="launcher__row">
-                  <button
-                    className="launcher__primary"
-                    onClick={createQuickFix}
-                    disabled={creating || quickFixProject === null}
-                  >
-                    {creating ? 'Adding…' : 'Add to backlog'}
-                  </button>
-                  <button className="launcher__secondary" onClick={backToMenu}>
-                    Cancel
-                  </button>
-                </div>
-                {projects.length === 0 && (
-                  <p className="launcher__empty">
-                    Quick fix needs an active workbench project — none is registered yet.
-                  </p>
-                )}
-              </div>
-            ) : (
-              <div className="launcher__form">
-                <p className="launcher__note">
-                  Issue {String(created.issue.issueId).padStart(2, '0')} added to{' '}
-                  {created.project.label} ({created.issue.fileName}) and committed to the
-                  workbench.
-                </p>
-                <div className="launcher__row">
-                  <button
-                    className="launcher__primary"
-                    onClick={() => onQuickFixRunNow(created.project, created.issue)}
-                    title="Open the project and launch exactly one bare Run on this issue (no Dispatcher)"
-                  >
-                    Run now
-                  </button>
-                  <button
-                    className="launcher__secondary"
-                    onClick={() => {
-                      setQueuedNote(
-                        `Issue ${String(created.issue.issueId).padStart(2, '0')} is queued in ${created.project.label} — the next drain (or a manual Run) picks it up.`,
-                      );
-                      backToMenu();
-                    }}
-                  >
-                    Leave it queued
-                  </button>
-                </div>
-              </div>
-            )}
           </>
         )}
 

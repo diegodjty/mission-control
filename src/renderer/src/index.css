@@ -885,6 +885,72 @@ body.is-col-resizing {
   max-width: 40%;
 }
 
+/* ---- ＋ Start something (issue 116, ADR-0019) ---- */
+
+.map__startbar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg0);
+  flex: 0 0 auto;
+}
+
+.map__start-toggle {
+  align-self: flex-start;
+  background: var(--teal-bg);
+  color: var(--teal);
+  border: 1px solid var(--teal-border);
+  border-radius: 6px;
+  padding: 5px 14px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.map__start-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 22px 16px;
+  align-items: flex-start;
+  flex: 0 0 auto;
+}
+
+.map__start-empty-text {
+  margin: 0;
+  font-size: 13px;
+  color: var(--fg-mute);
+}
+
+.map__start-verbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.map__start-verb {
+  background: var(--surface-2);
+  color: var(--fg);
+  border: 1px solid var(--teal-border);
+  border-radius: 6px;
+  padding: 7px 16px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.map__start-verb:hover {
+  border-color: var(--teal);
+}
+
+.map__start-note {
+  margin: 0;
+  width: 100%;
+  font-size: 11px;
+  color: var(--green);
+}
+
 /* ---- Drain bar (issue 06) ---- */
 
 .map__drainbar {
@@ -2039,54 +2105,33 @@ body.is-col-resizing {
   color: var(--fg);
 }
 
-.launcher__subtitle {
-  margin: 18px 0 0;
-  font-size: 13px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--fg-mute);
-}
-
 .launcher__hint {
   margin: 0;
   font-size: 12px;
   color: var(--fg-mute);
 }
 
-.launcher__actions {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 10px;
-}
-
-.launcher__action {
+/* Project-agnostic home affordances (issue 117, ADR-0019): New project (the
+   primary action) and a quiet Just talk link, beneath the project grid. */
+.launcher__home-actions {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 4px;
-  padding: 14px;
-  background: var(--bg1);
-  border: 1px solid var(--border-strong);
-  border-radius: 8px;
-  cursor: pointer;
-  text-align: left;
+  align-items: center;
+  gap: 14px;
+  margin-top: 18px;
 }
 
-.launcher__action:hover {
-  border-color: var(--teal-border);
-  background: var(--bg1);
-}
-
-.launcher__action-name {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--fg);
-}
-
-.launcher__action-hint {
-  font-size: 11px;
+.launcher__talk-link {
+  background: none;
+  border: none;
+  padding: 0;
   color: var(--fg-mute);
+  cursor: pointer;
+  font-size: 12px;
+  text-decoration: underline;
+}
+
+.launcher__talk-link:hover {
+  color: var(--fg-soft);
 }
 
 .launcher__list {
@@ -2132,6 +2177,51 @@ body.is-col-resizing {
   font-size: 12px;
   color: var(--fg-mute);
   margin: 4px 0 0;
+}
+
+/* Project-first home grid (issue 115, ADR-0019) */
+.launcher__grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 10px;
+}
+
+.launcher__card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+  height: 100%;
+  padding: 14px;
+  background: var(--bg1);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.launcher__card:hover {
+  border-color: var(--teal-border);
+}
+
+.launcher__card-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.launcher__card-counts {
+  font-size: 12px;
+  color: var(--fg-soft);
+}
+
+.launcher__card-activity {
+  font-size: 11px;
+  color: var(--fg-mute);
 }
 
 .launcher__form {
@@ -2213,49 +2303,6 @@ body.is-col-resizing {
   margin: 0;
   font-size: 12px;
   color: var(--green);
-}
-
-/* --- Remove project (issue 92) --- */
-
-/* A Continue row with its remove affordance beside the main button. */
-.launcher__removable-row {
-  display: flex;
-  gap: 6px;
-  align-items: stretch;
-}
-
-.launcher__removable-row .launcher__project {
-  flex: 1;
-  min-width: 0;
-}
-
-.launcher__remove {
-  padding: 8px 10px;
-  color: var(--fg-mute);
-  flex: none;
-}
-
-.launcher__remove:hover {
-  border-color: var(--red);
-  color: var(--red-soft);
-}
-
-/* The explicit remove confirmation strip above the Continue list. */
-.launcher__confirm {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
-  margin-bottom: 8px;
-  background: var(--red-bg);
-  border: 1px solid var(--red-border);
-  border-radius: 6px;
-}
-
-.launcher__confirm-text {
-  margin: 0;
-  font-size: 12px;
-  color: var(--fg-soft);
 }
 
 /* --- New project form (issue 82) --- */

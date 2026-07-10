@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Backlog, BacklogIssue } from '../../shared/backlog-model';
 import { deleteRefusal } from '../../shared/issue-file-ops';
-import type { RunLogRecord, RunTarget } from '../../shared/ipc-contract';
+import type { LauncherProject, RunLogRecord, RunTarget } from '../../shared/ipc-contract';
+import { QuickFixForm, type QuickFixIssueRef } from './QuickFixForm';
+import { START_VERB_LABELS, startSomething, type StartVerb } from '../../shared/launcher-model';
 import { runnableNow, type InFlightRuns } from '../../shared/run-eligibility';
 import { drainAvailability } from '../../shared/run-coordinator';
 import {
@@ -148,6 +150,24 @@ interface MapProps {
    * real (leaves this list) once its directory appears and is registered.
    */
   plannedRepos?: { key: string; path: string }[];
+  /**
+   * The current Project as ＋ Start something acts on it (issue 116, ADR-0019):
+   * the open workbench project, shaped as a LauncherProject so the two verbs
+   * reuse `startPlanning` / `createQuickFix` unchanged. Null for a legacy
+   * Project (no workbench machinery) — the verbs are then not offered and the
+   * empty state keeps its passive "No issues found" message.
+   */
+  startProject?: LauncherProject | null;
+  /**
+   * Grill a feature (issue 116): open the Planning view for this Project — the
+   * same `startPlanning` flow the Launcher's "Big feature" used.
+   */
+  onGrillFeature?: (project: LauncherProject) => void;
+  /**
+   * Simple issue → Run now (issue 116): launch a single bare Run on the
+   * freshly created quick-fix issue — the same `runQuickFixNow` the Launcher used.
+   */
+  onQuickFixRunNow?: (project: LauncherProject, issue: QuickFixIssueRef) => void;
 }
 
 /**
@@ -189,6 +209,9 @@ export function Map({
   focusSeq,
   plannedIssueIds,
   plannedRepos,
+  startProject,
+  onGrillFeature,
+  onQuickFixRunNow,
 }: MapProps = {}): JSX.Element {
   const activeRunSet = new Set(activeRunIssueIds ?? []);
   // Merge-preview verdicts keyed by issue id (issues 104 & 105): the
@@ -223,6 +246,9 @@ export function Map({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  // ＋ Start something (issue 116): whether the populated Map's chooser is
+  // expanded. The empty-state chooser is always visible, so it needs no toggle.
+  const [startOpen, setStartOpen] = useState(false);
 
   // Issue-file Edit / Delete (issue 89): the Map's one write exception. The
   // editor seeds from a FRESH disk read (never a possibly-stale push), saves
@@ -452,6 +478,35 @@ export function Map({
         </div>
       )}
 
+      {/* ＋ Start something (issue 116, ADR-0019): on a POPULATED backlog the two
+          per-Project entry verbs live here among the Map controls, behind a
+          disclosure so they never crowd the backlog. On an EMPTY backlog the
+          chooser is the empty state itself (below). Offered only for a workbench
+          Project (startProject present) — the verbs reuse workbench machinery. */}
+      {startProject &&
+        resolvedPath !== null &&
+        backlog &&
+        backlog.issues.length > 0 &&
+        (onGrillFeature || onQuickFixRunNow) && (
+          <div className="map__startbar">
+            <button
+              className="map__start-toggle"
+              onClick={() => setStartOpen((v) => !v)}
+              aria-expanded={startOpen}
+              title="Start something in this project: grill a feature, or add a simple issue"
+            >
+              ＋ Start something
+            </button>
+            {startOpen && (
+              <StartSomething
+                project={startProject}
+                onGrill={(p) => onGrillFeature?.(p)}
+                onRunNow={(p, issue) => onQuickFixRunNow?.(p, issue)}
+              />
+            )}
+          </div>
+        )}
+
       {/* Merge-preview degradation note (issue 104, ADR-0018): when git is below
           the 2.38 floor there are no badges anywhere, just this one passive
           line naming the version floor. No fallback merge machinery. */}
@@ -663,6 +718,25 @@ export function Map({
         <RunLogFeed records={runLog} onSelect={(id) => id !== null && setSelectedId(id)} />
       )}
 
+      {/* Empty state IS the chooser (issue 116, ADR-0019): a workbench Project
+          with an empty backlog leads with the two verbs instead of a passive
+          "nothing here" line. For a legacy Project (no startProject) the list's
+          "No issues found" message stands in below. */}
+      {startProject &&
+        resolvedPath !== null &&
+        backlog &&
+        backlog.issues.length === 0 &&
+        (onGrillFeature || onQuickFixRunNow) && (
+          <div className="map__start-empty">
+            <p className="map__start-empty-text">This backlog is empty — start something:</p>
+            <StartSomething
+              project={startProject}
+              onGrill={(p) => onGrillFeature?.(p)}
+              onRunNow={(p, issue) => onQuickFixRunNow?.(p, issue)}
+            />
+          </div>
+        )}
+
       <div className="map__split">
         <ul className="map__list">
           {displayIssues.map((issue) => (
@@ -699,7 +773,7 @@ export function Map({
               }
             />
           ))}
-          {backlog && backlog.issues.length === 0 && (
+          {backlog && backlog.issues.length === 0 && !startProject && (
             <li className="map__empty">No issues found in this backlog.</li>
           )}
         </ul>
@@ -871,6 +945,83 @@ export function Map({
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * ＋ Start something (issue 116, ADR-0019): the two per-Project entry verbs,
+ * relocated from the Launcher's front door onto the Map. "Grill a feature"
+ * opens the Planning view; "Simple issue" opens the one-sentence quick-fix
+ * form (Run-now / leave-queued). Routing is the pure `startSomething` resolver
+ * — this component only dispatches on its verdict and reuses existing
+ * machinery, building no new planning or run flow.
+ */
+function StartSomething({
+  project,
+  onGrill,
+  onRunNow,
+}: {
+  project: LauncherProject;
+  onGrill: (project: LauncherProject) => void;
+  onRunNow: (project: LauncherProject, issue: QuickFixIssueRef) => void;
+}): JSX.Element {
+  // Whether the "Simple issue" quick-fix form is open (vs. the two-verb picker).
+  const [simple, setSimple] = useState(false);
+  // A quiet "leave it queued" confirmation after the form dismisses.
+  const [queuedNote, setQueuedNote] = useState<string | null>(null);
+
+  const choose = (verb: StartVerb): void => {
+    const target = startSomething(verb, project);
+    if (target.route === 'planning') {
+      onGrill(target.project);
+    } else {
+      setQueuedNote(null);
+      setSimple(true);
+    }
+  };
+
+  if (simple) {
+    return (
+      <QuickFixForm
+        // The Map's project is fixed — no picker, just this one project.
+        projects={[project]}
+        initialDir={project.workbenchDir}
+        pickable={false}
+        onRunNow={(p, issue) => {
+          onRunNow(p, issue);
+          // The Map stays mounted across the view switch to the Run's Pane;
+          // close the form so returning here isn't a stale "Run now" panel.
+          setSimple(false);
+        }}
+        onLeaveQueued={(p, issue) => {
+          setQueuedNote(
+            `Issue ${String(issue.issueId).padStart(2, '0')} is queued in ${p.label} — the next drain (or a manual Run) picks it up.`,
+          );
+          setSimple(false);
+        }}
+        onCancel={() => setSimple(false)}
+      />
+    );
+  }
+
+  return (
+    <div className="map__start-verbs">
+      {queuedNote !== null && <p className="map__start-note">{queuedNote}</p>}
+      <button
+        className="map__start-verb"
+        onClick={() => choose('grill')}
+        title="Plan a feature: a Planning session (grill → PRD → issues) for this project"
+      >
+        {START_VERB_LABELS.grill}
+      </button>
+      <button
+        className="map__start-verb"
+        onClick={() => choose('simple')}
+        title="One sentence becomes a standalone issue in this project's backlog"
+      >
+        {START_VERB_LABELS.simple}
+      </button>
     </div>
   );
 }

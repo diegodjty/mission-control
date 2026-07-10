@@ -1,18 +1,37 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildProjectGrid,
   buildQuickFixIssue,
+  cardCountsLabel,
+  livenessLabel,
   localDateStamp,
   nextIssueNumber,
+  orderProjectCards,
   padIssueNumber,
   projectStateLine,
   quickFixDefaultDir,
   quickFixFileName,
   quickFixRunTarget,
   quickFixSlug,
+  relativeActivityLabel,
   sortLauncherProjects,
+  stageBadgeLabel,
+  STAGE_LABELS,
+  START_VERB_LABELS,
+  startSomething,
   workbenchProjectNames,
+  type ProjectCardSignals,
 } from './launcher-model';
 import { buildBacklog } from './backlog-model';
+import type { LauncherProject } from './ipc-contract';
+
+/** Idle signals (no live Runs, no parks, default stage, repo-backed). */
+const IDLE: ProjectCardSignals = {
+  liveRuns: 0,
+  parkedHitl: 0,
+  stage: 'backlog',
+  repoless: false,
+};
 
 describe('nextIssueNumber', () => {
   it('is 1 for an empty directory', () => {
@@ -132,6 +151,35 @@ describe('quickFixRunTarget', () => {
     expect(target.workbench).toEqual({
       issuesRoot: projectA.issuesRoot,
       completionsRoot: projectA.completionsRoot,
+    });
+  });
+});
+
+// Issue 116 (ADR-0019): ＋ Start something relocates the two per-Project entry
+// verbs onto the Map. The pure resolver routes each verb to the EXISTING
+// machinery and carries the project through — no window-active state, no new
+// flow. The labels must be exactly the ADR's wording.
+describe('startSomething (verb → target routing)', () => {
+  const project = { workbenchDir: '/Users/dev/Workbench/proj', label: 'Proj' };
+
+  it('routes "Grill a feature" to the Planning view', () => {
+    const target = startSomething('grill', project);
+    expect(target.route).toBe('planning');
+    expect(target.label).toBe('Grill a feature');
+    expect(target.project).toBe(project); // carried through, identity preserved
+  });
+
+  it('routes "Simple issue" to the quick-fix form', () => {
+    const target = startSomething('simple', project);
+    expect(target.route).toBe('quick-fix');
+    expect(target.label).toBe('Simple issue');
+    expect(target.project).toBe(project);
+  });
+
+  it('uses the exact ADR-0019 labels for both verbs', () => {
+    expect(START_VERB_LABELS).toEqual({
+      grill: 'Grill a feature',
+      simple: 'Simple issue',
     });
   });
 });
@@ -258,5 +306,138 @@ describe('sortLauncherProjects', () => {
     const copy = [...input];
     sortLauncherProjects(input);
     expect(input).toEqual(copy);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Project grid — the project-first home (issue 115, ADR-0019)
+// ---------------------------------------------------------------------------
+
+describe('cardCountsLabel', () => {
+  it('names ALL THREE counts, even zeros (a card is an at-a-glance tally)', () => {
+    expect(cardCountsLabel({ open: 3, wip: 1, done: 8 })).toBe('3 open · 1 wip · 8 done');
+    // Unlike projectStateLine, a card does NOT hide zeros — "0 open · 0 wip ·
+    // 0 done" is a truthful "nothing here yet", not an omitted fact.
+    expect(cardCountsLabel({ open: 0, wip: 0, done: 0 })).toBe('0 open · 0 wip · 0 done');
+  });
+
+  it('clamps negatives and defaults absent fields to zero (pure, never throws)', () => {
+    expect(cardCountsLabel({ open: -1, wip: 2, done: -3 })).toBe('0 open · 2 wip · 0 done');
+    expect(cardCountsLabel({} as { open: number; wip: number; done: number })).toBe(
+      '0 open · 0 wip · 0 done',
+    );
+  });
+});
+
+describe('relativeActivityLabel', () => {
+  const now = new Date('2026-07-10T12:00:00Z');
+
+  it('degrades a null / empty / unparseable stamp to a quiet fallback', () => {
+    expect(relativeActivityLabel(null, now)).toBe('no activity yet');
+    expect(relativeActivityLabel('', now)).toBe('no activity yet');
+    expect(relativeActivityLabel('not-a-date', now)).toBe('no activity yet');
+  });
+
+  it('reads sub-minute and clock-skewed (future) stamps as "just now"', () => {
+    expect(relativeActivityLabel('2026-07-10T11:59:30Z', now)).toBe('just now');
+    expect(relativeActivityLabel('2026-07-10T12:00:00Z', now)).toBe('just now');
+    expect(relativeActivityLabel('2026-07-10T12:05:00Z', now)).toBe('just now'); // future
+  });
+
+  it('steps through minutes → hours → days → weeks → months → years', () => {
+    expect(relativeActivityLabel('2026-07-10T11:55:00Z', now)).toBe('5m ago');
+    expect(relativeActivityLabel('2026-07-10T10:30:00Z', now)).toBe('1h ago');
+    expect(relativeActivityLabel('2026-07-09T11:00:00Z', now)).toBe('1d ago'); // 25h
+    expect(relativeActivityLabel('2026-07-02T12:00:00Z', now)).toBe('1w ago'); // 8d
+    expect(relativeActivityLabel('2026-05-31T12:00:00Z', now)).toBe('1mo ago'); // 40d
+    expect(relativeActivityLabel('2025-06-05T12:00:00Z', now)).toBe('1y ago'); // ~400d
+  });
+});
+
+describe('orderProjectCards', () => {
+  it('is the grid ordering — most-recently-active first, quiet last alphabetically', () => {
+    const ordered = orderProjectCards([
+      { label: 'b-quiet', lastActivity: null },
+      { label: 'old', lastActivity: '2026-06-01T00:00:00Z' },
+      { label: 'fresh', lastActivity: '2026-07-05T12:00:00Z' },
+      { label: 'a-quiet', lastActivity: null },
+    ]);
+    expect(ordered.map((c) => c.label)).toEqual(['fresh', 'old', 'a-quiet', 'b-quiet']);
+  });
+});
+
+// The aggregator join (issue 115): the portfolio aggregator gathers each
+// project's signals (reusing listLauncherProjects) and delegates ALL shaping +
+// ordering to the pure card model. `buildProjectGrid` IS that delegation — this
+// exercises it against fixture Projects, standing in for the aggregator join.
+describe('buildProjectGrid', () => {
+  const now = new Date('2026-07-10T12:00:00Z');
+  const project = (over: Partial<LauncherProject>): LauncherProject => ({
+    dirName: 'p',
+    label: 'P',
+    workbenchDir: '/Users/dev/Workbench/p',
+    defaultRepoPath: '/Users/dev/Developer/p',
+    issuesRoot: '/Users/dev/Workbench/p/issues',
+    completionsRoot: '/Users/dev/Workbench/p/completions',
+    counts: { open: 0, wip: 0, done: 0 },
+    lastActivity: null,
+    ...over,
+  });
+
+  const fixtures: LauncherProject[] = [
+    project({
+      dirName: 'quiet',
+      label: 'Quiet',
+      workbenchDir: '/w/quiet',
+      counts: { open: 0, wip: 0, done: 0 },
+      lastActivity: null,
+    }),
+    project({
+      dirName: 'billing',
+      label: 'Billing',
+      workbenchDir: '/w/billing',
+      counts: { open: 3, wip: 1, done: 8 },
+      lastActivity: '2026-07-10T11:55:00Z', // 5m ago
+    }),
+    project({
+      dirName: 'atlas',
+      label: 'Atlas',
+      workbenchDir: '/w/atlas',
+      counts: { open: 0, wip: 0, done: 12 },
+      lastActivity: '2026-07-08T12:00:00Z', // 2d ago
+    }),
+  ];
+
+  const cards = buildProjectGrid(fixtures, now);
+
+  it('produces one card per project in grid order (most recently active first)', () => {
+    expect(cards.map((c) => c.label)).toEqual(['Billing', 'Atlas', 'Quiet']);
+  });
+
+  it('shapes each card‑model display label from the gathered signals', () => {
+    const billing = cards[0];
+    expect(billing.countsLabel).toBe('3 open · 1 wip · 8 done');
+    expect(billing.activityLabel).toBe('5m ago');
+
+    const atlas = cards[1];
+    expect(atlas.countsLabel).toBe('0 open · 0 wip · 12 done');
+    expect(atlas.activityLabel).toBe('2d ago');
+
+    const quiet = cards[2];
+    expect(quiet.countsLabel).toBe('0 open · 0 wip · 0 done');
+    expect(quiet.activityLabel).toBe('no activity yet');
+  });
+
+  it('is a superset of LauncherProject — the card carries the raw open handle', () => {
+    // The renderer clicks a card and hands `workbenchDir` to the in-place
+    // switch, so every raw signal must survive the shaping.
+    expect(cards[0].workbenchDir).toBe('/w/billing');
+    expect(cards[0].dirName).toBe('billing');
+    expect(cards[0].defaultRepoPath).toBe('/Users/dev/Developer/p');
+    expect(cards[0].lastActivity).toBe('2026-07-10T11:55:00Z');
+  });
+
+  it('is total — an empty portfolio yields an empty grid, never a throw', () => {
+    expect(buildProjectGrid([], now)).toEqual([]);
   });
 });

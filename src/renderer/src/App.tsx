@@ -15,6 +15,7 @@ import type {
   AttentionSnapshot,
   DispatcherTarget,
   LauncherProject,
+  ProjectCardView,
   ProjectView,
   RunLogRecord,
   RunTarget,
@@ -263,6 +264,12 @@ export function App(): JSX.Element {
   // is the initial view; opening/re-attaching a Project lands on the Map, and
   // the Home tab returns here any time — without closing the open Project.
   const [view, setView] = useState<View>('launcher');
+  // A live mirror of `view` for subscription handlers that must know the
+  // current view without re-subscribing on every navigation (issue 115).
+  const viewRef = useRef<View>('launcher');
+  useEffect(() => {
+    viewRef.current = view;
+  }, [view]);
   const [paneStatus, setPaneStatus] = useState('starting…');
 
   // The UI theme (Atlas design language): dark navy stage by default, with a
@@ -419,6 +426,40 @@ export function App(): JSX.Element {
       disposed = true;
     };
   }, [view]);
+
+  // --- Project-first home grid (issue 115, ADR-0019) -------------------------
+  // The home page is a chooser: every workbench project as a card (name +
+  // open·wip·done + last-activity), clicking one switches this Window in place
+  // to that project's Map. Fetched from the portfolio aggregator when Home is
+  // shown, and kept live off the EXISTING registry + backlog subscriptions (no
+  // new watcher, per the issue) — so a newly registered repo or a status flip
+  // re-shapes the grid with no manual refresh.
+  const [projectCards, setProjectCards] = useState<ProjectCardView[]>([]);
+  const refreshProjectCards = useCallback((): void => {
+    void window.mc
+      .listProjectCards()
+      .then((res) => setProjectCards(res.cards))
+      .catch(() => {
+        // A transient read error keeps the previous grid; the next event retries.
+      });
+  }, []);
+  useEffect(() => {
+    if (view === 'launcher') refreshProjectCards();
+  }, [view, refreshProjectCards]);
+  useEffect(() => {
+    // Only re-shape the grid live while Home is actually showing — off Home,
+    // arriving there re-fetches anyway, so this avoids a disk read per backlog
+    // tick during a drain the user isn't watching.
+    const onChange = (): void => {
+      if (viewRef.current === 'launcher') refreshProjectCards();
+    };
+    const offRegistry = window.mc.onProjectRegistryChanged(onChange);
+    const offBacklog = window.mc.onBacklogChanged(onChange);
+    return () => {
+      offRegistry();
+      offBacklog();
+    };
+  }, [refreshProjectCards]);
   // The "Just talk" Pane (issue 81): one warm bare session — no issue, no
   // tracking. Deliberately NOT per-Project state: it is anchored to the cwd it
   // was started on, so a Project switch does not clear it.
@@ -1048,6 +1089,28 @@ export function App(): JSX.Element {
       })),
     [activeProject],
   );
+
+  // The current Project as the Map's ＋ Start something verbs see it (issue 116,
+  // ADR-0019): a workbench LauncherProject built from the active ProjectView
+  // plus the live backlog counts, so "Grill a feature" (startPlanning) and
+  // "Simple issue" (createQuickFix / runQuickFixNow) reuse their existing
+  // handlers unchanged. Null for a legacy Project — no workbench machinery, so
+  // the Map offers no verbs and keeps its passive empty state.
+  const mapStartProject = useMemo<LauncherProject | null>(() => {
+    if (!activeProject || activeProject.kind !== 'workbench') return null;
+    const counts = { open: 0, wip: 0, done: 0 };
+    for (const issue of backlog?.issues ?? []) counts[issue.status] += 1;
+    return {
+      dirName: activeProject.key.split('/').filter(Boolean).pop() ?? activeProject.key,
+      label: activeProject.label,
+      workbenchDir: activeProject.key,
+      defaultRepoPath: activeProject.defaultRepoPath,
+      issuesRoot: activeProject.issuesRoot,
+      completionsRoot: activeProject.completionsRoot,
+      counts,
+      lastActivity: null,
+    };
+  }, [activeProject, backlog]);
 
   /**
    * The workbench paths a Run target must carry in its spawn prompt (issue
@@ -3307,6 +3370,9 @@ export function App(): JSX.Element {
             focusSeq={inboxFocusSeq}
             plannedIssueIds={plannedIssueIds}
             plannedRepos={plannedRepos}
+            startProject={mapStartProject}
+            onGrillFeature={(p) => void startPlanning(p)}
+            onQuickFixRunNow={(p, issue) => void runQuickFixNow(p, issue)}
           />
           </div>
           {/* The Dispatcher chat panel beside the Map (ADR-0010): present once a
@@ -3554,31 +3620,26 @@ export function App(): JSX.Element {
           <div className="app__slot" style={{ display: 'flex' }}>
             <Launcher
               projects={launcherProjects}
+              cards={projectCards}
               attention={attention}
               activeProjectLabel={
                 projects.find((p) => p.key === activeProjectKey)?.label ?? null
               }
-              activeProjectKey={activeProjectKey}
               onBackToProject={activeProjectKey !== null ? () => setView('map') : null}
-              onContinue={(p) =>
+              onOpenCard={(c) =>
+                // Clicking a card switches this Window in place to the project's
+                // Map (issue 115) — through the SAME interrupt-guarded open flow
+                // Continue used, so switching away from a live drain offers "open
+                // in a new Window" rather than tearing the runner down (issue 114).
                 attemptProjectChange({
-                  path: p.workbenchDir,
-                  label: p.label,
-                  proceed: () => void openProjectHere(p.workbenchDir),
+                  path: c.workbenchDir,
+                  label: c.label,
+                  proceed: () => void openProjectHere(c.workbenchDir),
                 })
               }
               onProjectCreated={(created) => void landOnNewProject(created)}
-              onBigFeatureProject={(p) => void startPlanning(p)}
               onJustTalkProject={talkToProject}
               onJustTalkFolder={() => void talkToFolder()}
-              onQuickFixRunNow={(p, issue) => void runQuickFixNow(p, issue)}
-              onProjectRemoved={(p) =>
-                // The registry entries are already gone (issue 92) — drop the
-                // row; the next Launcher mount re-reads from disk anyway.
-                setLauncherProjects((prev) =>
-                  prev.filter((x) => x.workbenchDir !== p.workbenchDir),
-                )
-              }
             />
           </div>
         )}
