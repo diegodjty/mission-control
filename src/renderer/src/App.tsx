@@ -116,6 +116,12 @@ import {
   scanForProject,
   type ScopedScan,
 } from '../../shared/project-switch';
+import {
+  orphanedClaims,
+  reopenWipToOpen,
+  type ReleasableClaim,
+  type TrackedClaim,
+} from '../../shared/drain-interruption';
 import { branchPreviewsEqual } from '../../shared/merge-preview';
 import { gridShape } from '../../shared/pane-grid';
 import { decideWindowBootstrap } from '../../shared/window-bootstrap';
@@ -681,6 +687,48 @@ export function App(): JSX.Element {
   // lighting up B's issue 05 and offering a bogus Merge). Null = not scanned yet.
   const [afkScan, setAfkScan] = useState<ScopedScan | null>(null);
 
+  // A live snapshot of each tracked Run's orphan-relevant facts (issue 112), so
+  // the project-switch teardown can release the claims it is ABOUT to kill
+  // without widening `resetForProjectSwitch`'s (deliberately []-dep) closure.
+  // Kept current by the effect just after `runStatusOf` exists.
+  const drainClaimsRef = useRef<TrackedClaim[]>([]);
+
+  // Release the in-flight claims a project-switch teardown is about to orphan
+  // (issue 112). `resetForProjectSwitch` clears the tracked Runs, which unmounts
+  // their Panes and kills their PTY sessions — and a Worker killed mid-flight has
+  // already flipped its issue to `wip` (its claim). With no live Worker and the
+  // drain torn down too, that `wip` is stranded: exactly the "came back and the
+  // runner had stopped leaving an issue wip" report. A killed claim is void, so
+  // we reopen it (the afk-issue-runner skill's own "flip it back to open"
+  // recovery) in the project being LEFT, letting a later drain pick it up clean.
+  // Best-effort and race-safe: re-read each file and reopen only while it is
+  // STILL `wip` (a Worker that flipped `done` in the same beat is never
+  // clobbered), targeting the leaving project explicitly so a concurrent switch
+  // can't misroute the write. Never throws into the switch path.
+  const releaseOrphanedClaims = useCallback(
+    (leavingProject: string, claims: ReleasableClaim[]): void => {
+      for (const c of claims) {
+        void window.mc
+          .readIssueFile({ projectPath: leavingProject, fileName: c.fileName })
+          .then((res) => {
+            if (res.content === null) return undefined;
+            const reopened = reopenWipToOpen(res.content);
+            if (reopened === null) return undefined; // no longer wip — leave it
+            return window.mc.editIssueFile({
+              projectPath: leavingProject,
+              fileName: c.fileName,
+              content: reopened,
+            });
+          })
+          .catch(() => {
+            // A transient read/write error leaves the issue `wip`; the user can
+            // reopen it from the Map. The switch itself must never fail on this.
+          });
+      }
+    },
+    [],
+  );
+
   // Reset ALL per-Project run/scan/merge state (issue 26). Switching the active
   // Project used to change only `activeProjectKey`, leaving the previous Project's
   // Runs (and their Panes), on-disk scan, observed worktree statuses, and merge
@@ -691,6 +739,15 @@ export function App(): JSX.Element {
   // scan lands. `backlog`/`projectPath` are cleared too so the Coordinator never
   // plans the new Project against the old one's backlog in the transition.
   const resetForProjectSwitch = useCallback((): void => {
+    // Before killing the tracked Runs (below), release any live claim their
+    // Workers hold in the project we're LEAVING, so a mid-flight `wip` isn't
+    // stranded when its Pane/session dies (issue 112). Reads live refs so this
+    // callback can keep its []-dep identity.
+    const leaving = projectPathRef.current;
+    if (leaving !== null) {
+      const orphaned = orphanedClaims(drainClaimsRef.current);
+      if (orphaned.length > 0) releaseOrphanedClaims(leaving, orphaned);
+    }
     setRuns([]);
     setFocusedId(null);
     setMaximizedId(null);
@@ -746,7 +803,7 @@ export function App(): JSX.Element {
     setView((cur) => (cur === 'planning' ? 'map' : cur));
     setBacklog(null);
     setProjectPath(null);
-  }, []);
+  }, [releaseOrphanedClaims]);
 
   const openProjectHere = useCallback(async (path: string): Promise<void> => {
     // Only open on an explicit path; an empty path is a no-op, never a claim on
@@ -1012,6 +1069,20 @@ export function App(): JSX.Element {
       }),
     [issueStatusOf, isIsolated, committedStatusById, runLog, activeProject],
   );
+
+  // Keep the orphan-claim snapshot current (issue 112): each tracked Run reduced
+  // to whether it is a live claim (`running` on a still-`wip` issue). The
+  // project-switch teardown reads this ref to reopen the claims it kills, so it
+  // must reflect the CURRENT Runs / their derived status at the moment of a
+  // switch — updated whenever the Runs, their status inputs, or the backlog move.
+  useEffect(() => {
+    drainClaimsRef.current = runs.map((r) => ({
+      issueId: r.target.issueId,
+      fileName: r.target.issueFileName,
+      runStatus: runStatusOf(r),
+      issueStatus: issueStatusOf(r.target.issueId),
+    }));
+  }, [runs, runStatusOf, issueStatusOf]);
 
   // Commit a solo Run's finished work on `main` via the adapter, moving its
   // phase (issues 25 + 59). A rejected commit reverts the phase so a later
