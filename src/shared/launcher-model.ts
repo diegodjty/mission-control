@@ -19,6 +19,7 @@
  */
 
 import type { LauncherProject, ProjectCardView, RunTarget } from './ipc-contract';
+import type { PipelineStage } from './project-registry';
 
 /** Matches issue files (`NN-slug.md`); everything else is not an issue. */
 const ISSUE_FILE = /^(\d+)-.+\.md$/;
@@ -334,6 +335,30 @@ export function sortLauncherProjects<T extends RecencySortable>(projects: readon
 // reshaping the aggregator or the renderer.
 
 /**
+ * The home grid's two renderings (issue 119): the default `cards` grid, or a
+ * dense one-row-per-Project `list`. The choice is user-toggled and persisted.
+ */
+export type ProjectViewMode = 'cards' | 'list';
+
+/**
+ * The localStorage key the cards⇄list choice persists under (issue 119) —
+ * mirroring `mc.theme` / `mc.dispatcherWidth`. Cards is the default on first
+ * run.
+ */
+export const PROJECT_VIEW_KEY = 'mc.projectView';
+
+/**
+ * Normalize a persisted (or absent / garbage) `mc.projectView` value to a view
+ * mode. ONLY the exact string `'list'` selects the dense list; everything else
+ * — `null` (never set), `''`, an old or unknown value, wrong case — falls back
+ * to `'cards'`, so cards is the first-run default and a corrupt stored value can
+ * never wedge the grid into an unknown state. Pure and total.
+ */
+export function normalizeProjectView(raw: string | null | undefined): ProjectViewMode {
+  return raw === 'list' ? 'list' : 'cards';
+}
+
+/**
  * The `open · wip · done` tally a project card shows. Unlike `projectStateLine`
  * (which hides zeros for a quiet Continue row), a card names ALL THREE counts
  * even when zero — the grid is an at-a-glance portfolio, so "0 open · 0 wip ·
@@ -372,36 +397,151 @@ export function relativeActivityLabel(iso: string | null, now: Date): string {
   return `${Math.floor(day / 365)}y ago`;
 }
 
+// ---------------------------------------------------------------------------
+// Full card stats — needs-you / liveness / stage / attention-float (issue 118)
+// ---------------------------------------------------------------------------
+//
+// Issue 118 enriches the tracer's minimal card (open·wip·done + last-activity)
+// to the full at-a-glance read, and FLOATS the Projects that want attention to
+// the top. It adds three derived card fields — the needs-you (parked HITL)
+// count, the liveness label, and the pipeline-stage badge — and replaces the
+// recency-only comparator with the attention-float order. Each new field is fed
+// by a signal the aggregator JOINS (parked HITL from the Inbox's attention
+// watch, live-Run count from run-coordinator/Dispatcher state, stage from the
+// registry, repo-less from the project identity); the pure model still owns all
+// shaping and ordering.
+
 /**
- * The grid ordering (issue 115): most-recently-active first, quiet projects
- * last (alphabetical) — this slice's rule IS the recency sort. It is the single
- * seam issue 118 changes to FLOAT projects that need attention (HITL / a live
- * drain) above the recency order; the aggregator and renderer call this and
- * never re-sort, so that later change touches only this function.
+ * The extra per-Project signals the portfolio aggregator joins for issue 118 —
+ * the ones `LauncherProject` (backlog counts + last-activity) does not already
+ * carry. Gathered by the main-process aggregator; shaped here.
  */
-export function orderProjectCards<T extends RecencySortable>(cards: readonly T[]): T[] {
-  return sortLauncherProjects(cards);
+export interface ProjectCardSignals {
+  /** Count of live Runs (run-coordinator / Dispatcher state) — drives "N running" and the float. */
+  liveRuns: number;
+  /** Parked HITL count (the Inbox's attention watch) — the needs-you badge and the float. */
+  parkedHitl: number;
+  /** The Project's pipeline stage (registry / CONFIG) — the stage badge. */
+  stage: PipelineStage;
+  /** True for a repo-less Project (no member repos) — enables the "not started" state. */
+  repoless: boolean;
+}
+
+/**
+ * The pipeline-stage badge labels — the single source of truth for a stage's
+ * display text on a card (the raw stage keys are `planning → backlog →
+ * executing → merge-qa`).
+ */
+export const STAGE_LABELS: Record<PipelineStage, string> = {
+  planning: 'Planning',
+  backlog: 'Backlog',
+  executing: 'Executing',
+  'merge-qa': 'Merge / QA',
+};
+
+/** A stage's badge label; '' for an unknown stage (total, never throws). */
+export function stageBadgeLabel(stage: PipelineStage): string {
+  return STAGE_LABELS[stage] ?? '';
+}
+
+/** The inputs the liveness label is derived from (issue 118). */
+export interface LivenessInput {
+  /** Count of live Runs for this Project. */
+  liveRuns: number;
+  /** The backlog status counts (for the "not started" empty-backlog test). */
+  counts: BacklogCounts;
+  /** ISO-8601 last-activity stamp, or null. */
+  lastActivity: string | null;
+  /** True when this is a repo-less Project (no member repos). */
+  repoless: boolean;
+  /** Reference "now" for the relative label. */
+  now: Date;
+}
+
+/**
+ * A card's liveness label (issue 118), in precedence order:
+ *   1. `"N running"` when at least one Run is live — the strongest signal.
+ *   2. `"not started"` for a repo-less Project whose backlog is still empty (a
+ *      just-created project with no code and no issues yet).
+ *   3. otherwise the relative last-activity label (an idle Project's recency).
+ * Total and pure: a negative/absent live count clamps to zero, and the
+ * relative-label fallback never throws.
+ */
+export function livenessLabel(input: LivenessInput): string {
+  const runs = Math.max(0, input?.liveRuns ?? 0);
+  if (runs >= 1) return `${runs} running`;
+  const open = Math.max(0, input?.counts?.open ?? 0);
+  const wip = Math.max(0, input?.counts?.wip ?? 0);
+  const done = Math.max(0, input?.counts?.done ?? 0);
+  if (input?.repoless && open + wip + done === 0) return 'not started';
+  return relativeActivityLabel(input?.lastActivity ?? null, input.now);
+}
+
+/** The subset of a card the attention-float comparator orders by (issue 118). */
+export interface AttentionFloatSortable extends RecencySortable {
+  /** Live-Run count — the top ordering tier (desc). */
+  liveRuns: number;
+  /** Parked HITL count — the second ordering tier (desc). */
+  parkedHitl: number;
+}
+
+/**
+ * The grid ordering (issue 118): the ATTENTION-FLOAT order — live Runs desc →
+ * parked HITL desc → last-activity desc → label asc — so the Project most
+ * wanting the human's attention is first, and quiet/no-activity projects sink
+ * (alphabetically) to the bottom. This replaces issue 115's recency-only
+ * comparator; the aggregator and renderer call this and never re-sort, so the
+ * whole ordering lives in one place. With no live Runs and no parks it degrades
+ * exactly to the recency sort issue 115 shipped. Stable and pure — returns a
+ * new array, never mutates the input.
+ */
+export function orderProjectCards<T extends AttentionFloatSortable>(cards: readonly T[]): T[] {
+  return [...cards].sort((a, b) => {
+    const aRuns = Math.max(0, a.liveRuns ?? 0);
+    const bRuns = Math.max(0, b.liveRuns ?? 0);
+    if (aRuns !== bRuns) return bRuns - aRuns; // live Runs desc
+    const aParked = Math.max(0, a.parkedHitl ?? 0);
+    const bParked = Math.max(0, b.parkedHitl ?? 0);
+    if (aParked !== bParked) return bParked - aParked; // parked HITL desc
+    const aStamp = a.lastActivity ?? '';
+    const bStamp = b.lastActivity ?? '';
+    if (aStamp !== bStamp) return aStamp < bStamp ? 1 : -1; // recency desc, no-activity last
+    return a.label < b.label ? -1 : a.label > b.label ? 1 : 0; // deterministic tiebreak
+  });
 }
 
 /**
  * Shape the gathered per-Project signals into the home grid's ordered cards —
  * the pure core the portfolio aggregator delegates ALL shaping and ordering to.
- * Given the signals `listLauncherProjects` gathers and a reference `now`, it
- * derives each card's display labels and returns a `ProjectCardView[]` in grid
- * order. A superset mapping: every raw `LauncherProject` field survives (the
- * renderer clicks a card and hands its `workbenchDir` to the in-place switch),
- * with the card-model labels added on top.
+ * Given the `LauncherProject` signals `listLauncherProjects` gathers, a
+ * `signalsFor` lookup of the joined issue-118 signals (live Runs, parked HITL,
+ * stage, repo-less), and a reference `now`, it derives each card's display
+ * fields and returns a `ProjectCardView[]` in attention-float order. A superset
+ * mapping: every raw `LauncherProject` field survives (the renderer clicks a
+ * card and hands its `workbenchDir` to the in-place switch), with the card-model
+ * fields added on top.
  */
 export function buildProjectGrid(
   projects: readonly LauncherProject[],
+  signalsFor: (project: LauncherProject) => ProjectCardSignals,
   now: Date,
 ): ProjectCardView[] {
-  const cards = projects.map(
-    (p): ProjectCardView => ({
+  const cards = projects.map((p): ProjectCardView => {
+    const signals = signalsFor(p);
+    const liveRuns = Math.max(0, signals?.liveRuns ?? 0);
+    const parkedHitl = Math.max(0, signals?.parkedHitl ?? 0);
+    const stage: PipelineStage = signals?.stage ?? 'backlog';
+    const repoless = signals?.repoless ?? false;
+    return {
       ...p,
       countsLabel: cardCountsLabel(p.counts),
       activityLabel: relativeActivityLabel(p.lastActivity, now),
-    }),
-  );
+      liveRuns,
+      parkedHitl,
+      livenessLabel: livenessLabel({ liveRuns, counts: p.counts, lastActivity: p.lastActivity, repoless, now }),
+      stage,
+      stageLabel: stageBadgeLabel(stage),
+    };
+  });
   return orderProjectCards(cards);
 }

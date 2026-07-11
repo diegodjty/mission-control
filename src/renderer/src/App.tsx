@@ -449,15 +449,20 @@ export function App(): JSX.Element {
   useEffect(() => {
     // Only re-shape the grid live while Home is actually showing — off Home,
     // arriving there re-fetches anyway, so this avoids a disk read per backlog
-    // tick during a drain the user isn't watching.
+    // tick during a drain the user isn't watching. Issue 118 adds the attention
+    // subscription so the needs-you badge (parked HITL) also updates live; the
+    // Run-state changes that drive "N running" / the float ride the registry-
+    // changed push the backend fires on Run spawn/exit.
     const onChange = (): void => {
       if (viewRef.current === 'launcher') refreshProjectCards();
     };
     const offRegistry = window.mc.onProjectRegistryChanged(onChange);
     const offBacklog = window.mc.onBacklogChanged(onChange);
+    const offAttention = window.mc.onAttentionChanged(onChange);
     return () => {
       offRegistry();
       offBacklog();
+      offAttention();
     };
   }, [refreshProjectCards]);
   // The "Just talk" Pane (issue 81): one warm bare session — no issue, no

@@ -2224,6 +2224,231 @@ body.is-col-resizing {
   color: var(--fg-mute);
 }
 
+/* Full card stats (issue 118): the header row holds the name plus the
+   pipeline-stage badge and the needs-you (parked HITL) badge, which wrap
+   beneath the name on a narrow card. */
+.launcher__card-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  /* Leave room for the absolutely-positioned ⋯ trigger in the card's
+     top-right corner (issue 119) so the stage / needs-you badges never run
+     under it. */
+  padding-right: 20px;
+}
+
+.launcher__card-header .launcher__card-name {
+  margin-right: auto;
+}
+
+.launcher__card-stage {
+  font-size: 10px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  color: var(--teal);
+  border: 1px solid var(--teal-border);
+  background: var(--teal-bg);
+}
+
+/* Needs-you: amber, the design's "this wants the human" accent (matches the
+   parked-Run styling). Only rendered when the parked-HITL count is non-zero. */
+.launcher__card-needsyou {
+  font-size: 10px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  color: var(--amber-soft);
+  border: 1px solid var(--amber-border);
+  background: var(--amber-bg);
+}
+
+/* Cards ⇄ list toggle + ⋯ overflow menu (issue 119) --------------------- */
+
+/* The Projects heading row carries the density toggle on its right. */
+.launcher__grid-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.launcher__view-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.launcher__view-btn {
+  background: var(--bg1);
+  border: none;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--fg-mute);
+  cursor: pointer;
+}
+
+.launcher__view-btn + .launcher__view-btn {
+  border-left: 1px solid var(--border-strong);
+}
+
+.launcher__view-btn:hover {
+  color: var(--fg-soft);
+}
+
+.launcher__view-btn--on {
+  background: var(--teal-bg);
+  color: var(--teal);
+}
+
+/* A quiet refusal line for Remove from list (e.g. project open in a Window). */
+.launcher__notice {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--red-soft);
+}
+
+/* Dense list view: one row per Project, same fields as the card. */
+.launcher__rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.launcher__row-cell {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+}
+
+.launcher__row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 34px 8px 12px; /* right pad clears the inline ⋯ trigger */
+  background: var(--bg1);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.launcher__row:hover {
+  border-color: var(--teal-border);
+}
+
+.launcher__row-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.launcher__row-counts {
+  font-size: 12px;
+  color: var(--fg-soft);
+}
+
+/* Liveness pushes to the right; the stage badge trails it. */
+.launcher__row-liveness {
+  font-size: 11px;
+  color: var(--fg-mute);
+  margin-left: auto;
+}
+
+/* The card cell anchors the corner ⋯ trigger. */
+.launcher__card-cell {
+  position: relative;
+}
+
+.launcher__menu {
+  position: relative;
+  display: inline-flex;
+}
+
+/* On a card the trigger floats in the top-right corner; on a list row the
+   cell is a flex container and the trigger sits at the row's end. */
+.launcher__card-cell > .launcher__menu {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+}
+
+.launcher__row-cell > .launcher__menu {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+}
+
+.launcher__menu-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--fg-mute);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.launcher__menu-trigger:hover,
+.launcher__menu-trigger[aria-expanded='true'] {
+  color: var(--fg);
+  border-color: var(--border-strong);
+  background: var(--bg0);
+}
+
+.launcher__menu-popup {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  min-width: 168px;
+  padding: 4px;
+  background: var(--bg0);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: var(--shadow-card);
+}
+
+.launcher__menu-item {
+  background: none;
+  border: none;
+  border-radius: 5px;
+  padding: 7px 10px;
+  font-size: 12px;
+  color: var(--fg-soft);
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.launcher__menu-item:hover {
+  background: var(--bg1);
+  color: var(--fg);
+}
+
+.launcher__menu-item--danger {
+  color: var(--red-soft);
+}
+
+.launcher__menu-item--danger:hover {
+  background: var(--red-bg);
+  color: var(--red-soft);
+}
+
 .launcher__form {
   display: flex;
   flex-direction: column;

@@ -6,8 +6,10 @@ import {
   livenessLabel,
   localDateStamp,
   nextIssueNumber,
+  normalizeProjectView,
   orderProjectCards,
   padIssueNumber,
+  PROJECT_VIEW_KEY,
   projectStateLine,
   quickFixDefaultDir,
   quickFixFileName,
@@ -354,22 +356,170 @@ describe('relativeActivityLabel', () => {
   });
 });
 
-describe('orderProjectCards', () => {
-  it('is the grid ordering — most-recently-active first, quiet last alphabetically', () => {
-    const ordered = orderProjectCards([
-      { label: 'b-quiet', lastActivity: null },
-      { label: 'old', lastActivity: '2026-06-01T00:00:00Z' },
-      { label: 'fresh', lastActivity: '2026-07-05T12:00:00Z' },
-      { label: 'a-quiet', lastActivity: null },
-    ]);
-    expect(ordered.map((c) => c.label)).toEqual(['fresh', 'old', 'a-quiet', 'b-quiet']);
+// ---------------------------------------------------------------------------
+// Full card stats — needs-you / liveness / stage / attention-float (issue 118)
+// ---------------------------------------------------------------------------
+
+describe('livenessLabel', () => {
+  const now = new Date('2026-07-10T12:00:00Z');
+  const empty = { open: 0, wip: 0, done: 0 };
+
+  it('reads "N running" the moment there is at least one live Run', () => {
+    expect(
+      livenessLabel({ liveRuns: 1, counts: empty, lastActivity: null, repoless: false, now }),
+    ).toBe('1 running');
+    expect(
+      livenessLabel({
+        liveRuns: 3,
+        counts: { open: 2, wip: 3, done: 5 },
+        lastActivity: '2026-07-10T11:55:00Z',
+        repoless: false,
+        now,
+      }),
+    ).toBe('3 running');
+  });
+
+  it('says "not started" for a repo-less project with an empty backlog (idle)', () => {
+    expect(
+      livenessLabel({ liveRuns: 0, counts: empty, lastActivity: null, repoless: true, now }),
+    ).toBe('not started');
+  });
+
+  it('does NOT say "not started" once a repo-less project has any backlog', () => {
+    expect(
+      livenessLabel({
+        liveRuns: 0,
+        counts: { open: 1, wip: 0, done: 0 },
+        lastActivity: null,
+        repoless: true,
+        now,
+      }),
+    ).toBe('no activity yet');
+  });
+
+  it('shows the relative last-activity for an idle repo-backed project', () => {
+    expect(
+      livenessLabel({
+        liveRuns: 0,
+        counts: { open: 1, wip: 0, done: 4 },
+        lastActivity: '2026-07-10T11:55:00Z',
+        repoless: false,
+        now,
+      }),
+    ).toBe('5m ago');
+    // A repo-backed but empty backlog is idle, not "not started".
+    expect(
+      livenessLabel({ liveRuns: 0, counts: empty, lastActivity: null, repoless: false, now }),
+    ).toBe('no activity yet');
+  });
+
+  it('running beats "not started" even for a repo-less empty project (total, clamps negatives)', () => {
+    expect(
+      livenessLabel({ liveRuns: 2, counts: empty, lastActivity: null, repoless: true, now }),
+    ).toBe('2 running');
+    // A negative/absent live count clamps to zero — never "-1 running".
+    expect(
+      livenessLabel({ liveRuns: -1, counts: empty, lastActivity: null, repoless: true, now }),
+    ).toBe('not started');
   });
 });
 
-// The aggregator join (issue 115): the portfolio aggregator gathers each
-// project's signals (reusing listLauncherProjects) and delegates ALL shaping +
-// ordering to the pure card model. `buildProjectGrid` IS that delegation — this
-// exercises it against fixture Projects, standing in for the aggregator join.
+describe('stageBadgeLabel / STAGE_LABELS', () => {
+  it('labels every pipeline stage', () => {
+    expect(STAGE_LABELS).toEqual({
+      planning: 'Planning',
+      backlog: 'Backlog',
+      executing: 'Executing',
+      'merge-qa': 'Merge / QA',
+    });
+    expect(stageBadgeLabel('planning')).toBe('Planning');
+    expect(stageBadgeLabel('executing')).toBe('Executing');
+  });
+
+  it('degrades an unknown stage to an empty label (pure, never throws)', () => {
+    expect(stageBadgeLabel('nonsense' as never)).toBe('');
+  });
+});
+
+describe('normalizeProjectView / PROJECT_VIEW_KEY (issue 119 — persisted view mode)', () => {
+  it("selects 'list' only for the exact 'list' value", () => {
+    expect(normalizeProjectView('list')).toBe('list');
+  });
+
+  it("keeps the explicit 'cards' value", () => {
+    expect(normalizeProjectView('cards')).toBe('cards');
+  });
+
+  it("defaults to 'cards' when unset (null) — cards is the first-run default", () => {
+    expect(normalizeProjectView(null)).toBe('cards');
+  });
+
+  it("defaults to 'cards' for empty / unknown / legacy / mis-cased values", () => {
+    expect(normalizeProjectView('')).toBe('cards');
+    expect(normalizeProjectView('grid')).toBe('cards');
+    expect(normalizeProjectView('LIST')).toBe('cards');
+    expect(normalizeProjectView(undefined)).toBe('cards');
+  });
+
+  it('persists under the mc.theme-style key', () => {
+    expect(PROJECT_VIEW_KEY).toBe('mc.projectView');
+  });
+});
+
+describe('orderProjectCards (attention-float, issue 118)', () => {
+  const card = (over: Partial<Parameters<typeof orderProjectCards>[0][number]>) => ({
+    label: 'x',
+    lastActivity: null,
+    liveRuns: 0,
+    parkedHitl: 0,
+    ...over,
+  });
+
+  it('floats live Runs to the very top, above parks and recency', () => {
+    const ordered = orderProjectCards([
+      card({ label: 'freshest', lastActivity: '2026-07-10T12:00:00Z' }),
+      card({ label: 'parked', parkedHitl: 4, lastActivity: '2026-01-01T00:00:00Z' }),
+      card({ label: 'running', liveRuns: 1, lastActivity: '2020-01-01T00:00:00Z' }),
+    ]);
+    expect(ordered.map((c) => c.label)).toEqual(['running', 'parked', 'freshest']);
+  });
+
+  it('orders by live Runs desc, then parked HITL desc', () => {
+    const ordered = orderProjectCards([
+      card({ label: 'run1', liveRuns: 1 }),
+      card({ label: 'run3', liveRuns: 3 }),
+      card({ label: 'park2', parkedHitl: 2 }),
+      card({ label: 'park5', parkedHitl: 5 }),
+    ]);
+    expect(ordered.map((c) => c.label)).toEqual(['run3', 'run1', 'park5', 'park2']);
+  });
+
+  it('breaks live/park ties by recency desc, then label asc (nulls last)', () => {
+    const ordered = orderProjectCards([
+      card({ label: 'b-quiet', lastActivity: null }),
+      card({ label: 'old', lastActivity: '2026-06-01T00:00:00Z' }),
+      card({ label: 'fresh', lastActivity: '2026-07-05T12:00:00Z' }),
+      card({ label: 'a-quiet', lastActivity: null }),
+    ]);
+    // With no live Runs and no parks, the float order degrades to the recency
+    // sort — the exact behavior issue 115 shipped.
+    expect(ordered.map((c) => c.label)).toEqual(['fresh', 'old', 'a-quiet', 'b-quiet']);
+  });
+
+  it('does not mutate its input', () => {
+    const input = [card({ label: 'x', liveRuns: 1 }), card({ label: 'y' })];
+    const copy = [...input];
+    orderProjectCards(input);
+    expect(input).toEqual(copy);
+  });
+});
+
+// The aggregator join (issue 118): the portfolio aggregator gathers each
+// project's signals (backlog counts + last-activity from listLauncherProjects,
+// PLUS the joined live-Run / parked-HITL / stage / repoless signals) and
+// delegates ALL shaping + ordering to the pure card model. `buildProjectGrid`
+// IS that delegation — this exercises it across a mid-drain Project, an idle
+// Project, and a repo-less/empty Project, standing in for the aggregator join.
 describe('buildProjectGrid', () => {
   const now = new Date('2026-07-10T12:00:00Z');
   const project = (over: Partial<LauncherProject>): LauncherProject => ({
@@ -384,14 +534,9 @@ describe('buildProjectGrid', () => {
     ...over,
   });
 
+  // idle billing (repo-backed, 5m ago), a mid-drain project (2 live Runs, 1
+  // parked HITL), and a brand-new repo-less project with an empty backlog.
   const fixtures: LauncherProject[] = [
-    project({
-      dirName: 'quiet',
-      label: 'Quiet',
-      workbenchDir: '/w/quiet',
-      counts: { open: 0, wip: 0, done: 0 },
-      lastActivity: null,
-    }),
     project({
       dirName: 'billing',
       label: 'Billing',
@@ -403,41 +548,65 @@ describe('buildProjectGrid', () => {
       dirName: 'atlas',
       label: 'Atlas',
       workbenchDir: '/w/atlas',
-      counts: { open: 0, wip: 0, done: 12 },
-      lastActivity: '2026-07-08T12:00:00Z', // 2d ago
+      counts: { open: 2, wip: 2, done: 12 },
+      lastActivity: '2026-07-10T09:00:00Z', // 3h ago
+    }),
+    project({
+      dirName: 'newthing',
+      label: 'Newthing',
+      workbenchDir: '/w/newthing',
+      counts: { open: 0, wip: 0, done: 0 },
+      lastActivity: null,
     }),
   ];
 
-  const cards = buildProjectGrid(fixtures, now);
+  const signals: Record<string, ProjectCardSignals> = {
+    '/w/billing': { liveRuns: 0, parkedHitl: 1, stage: 'backlog', repoless: false },
+    '/w/atlas': { liveRuns: 2, parkedHitl: 0, stage: 'executing', repoless: false },
+    '/w/newthing': { liveRuns: 0, parkedHitl: 0, stage: 'planning', repoless: true },
+  };
+  const signalsFor = (p: LauncherProject): ProjectCardSignals => signals[p.workbenchDir] ?? IDLE;
 
-  it('produces one card per project in grid order (most recently active first)', () => {
-    expect(cards.map((c) => c.label)).toEqual(['Billing', 'Atlas', 'Quiet']);
+  const cards = buildProjectGrid(fixtures, signalsFor, now);
+
+  it('floats the mid-drain Project first (live Runs), then the parked one, then idle', () => {
+    // atlas: 2 running → top. billing: 1 parked → next. newthing: idle → last.
+    expect(cards.map((c) => c.label)).toEqual(['Atlas', 'Billing', 'Newthing']);
   });
 
-  it('shapes each card‑model display label from the gathered signals', () => {
-    const billing = cards[0];
+  it('shapes the liveness label per project (running / relative / not started)', () => {
+    const [atlas, billing, newthing] = cards;
+    expect(atlas.livenessLabel).toBe('2 running');
+    expect(billing.livenessLabel).toBe('5m ago');
+    expect(newthing.livenessLabel).toBe('not started');
+  });
+
+  it('carries the needs-you (parked HITL) count and the stage badge', () => {
+    const [atlas, billing, newthing] = cards;
+    expect(billing.parkedHitl).toBe(1);
+    expect(atlas.parkedHitl).toBe(0);
+    expect(atlas.liveRuns).toBe(2);
+    expect(atlas.stage).toBe('executing');
+    expect(atlas.stageLabel).toBe('Executing');
+    expect(billing.stageLabel).toBe('Backlog');
+    expect(newthing.stageLabel).toBe('Planning');
+  });
+
+  it('still shapes the open·wip·done tally and keeps activityLabel (issue 115)', () => {
+    const billing = cards.find((c) => c.label === 'Billing')!;
     expect(billing.countsLabel).toBe('3 open · 1 wip · 8 done');
     expect(billing.activityLabel).toBe('5m ago');
-
-    const atlas = cards[1];
-    expect(atlas.countsLabel).toBe('0 open · 0 wip · 12 done');
-    expect(atlas.activityLabel).toBe('2d ago');
-
-    const quiet = cards[2];
-    expect(quiet.countsLabel).toBe('0 open · 0 wip · 0 done');
-    expect(quiet.activityLabel).toBe('no activity yet');
   });
 
   it('is a superset of LauncherProject — the card carries the raw open handle', () => {
-    // The renderer clicks a card and hands `workbenchDir` to the in-place
-    // switch, so every raw signal must survive the shaping.
-    expect(cards[0].workbenchDir).toBe('/w/billing');
-    expect(cards[0].dirName).toBe('billing');
-    expect(cards[0].defaultRepoPath).toBe('/Users/dev/Developer/p');
-    expect(cards[0].lastActivity).toBe('2026-07-10T11:55:00Z');
+    // The renderer clicks a card and hands `workbenchDir` to the in-place switch.
+    const atlas = cards[0];
+    expect(atlas.workbenchDir).toBe('/w/atlas');
+    expect(atlas.dirName).toBe('atlas');
+    expect(atlas.lastActivity).toBe('2026-07-10T09:00:00Z');
   });
 
   it('is total — an empty portfolio yields an empty grid, never a throw', () => {
-    expect(buildProjectGrid([], now)).toEqual([]);
+    expect(buildProjectGrid([], signalsFor, now)).toEqual([]);
   });
 });

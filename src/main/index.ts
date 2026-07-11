@@ -9,7 +9,7 @@ import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent } from 'el
 import { existsSync } from 'node:fs';
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { PtySessionManager } from './pty-session-manager';
 import { AttentionLastSeenStore } from './attention-last-seen';
 import { AttentionWatcher } from './attention-watcher';
@@ -54,6 +54,7 @@ import {
   padIssueNumber,
   quickFixFileName,
   sortLauncherProjects,
+  type ProjectCardSignals,
 } from '../shared/launcher-model';
 import { removeRegistryProject } from '../shared/workbench-model';
 import { isAllowedPlanningDoc } from '../shared/planning-model';
@@ -431,12 +432,38 @@ function broadcast<T>(channel: string, payload: T): void {
   }
 }
 
+// Live Run sessions per workbench project (issue 118). The single backend
+// spawns every Run PTY, so it is the ONE place with the global "how many Runs
+// are live in each Project" picture the run-coordinator / Dispatcher drive —
+// the home grid's "N running" liveness and its attention-float ordering read
+// from here. Keyed sessionId → workbench project dir name (matching the
+// attention watch's `project` and the launcher gather's `dirName`); a Run maps
+// to its project via the workbench issues root its target carries. Non-Run and
+// legacy spawns never enter, so they contribute zero to every card.
+const runSessionProject = new Map<string, string>();
+
+/** Live-Run count per workbench project dir name, tallied from the session map. */
+function liveRunsByProject(): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const dirName of runSessionProject.values()) {
+    counts.set(dirName, (counts.get(dirName) ?? 0) + 1);
+  }
+  return counts;
+}
+
 // One PTY Session Manager for the app. With many Windows on one backend, PTY
 // output is broadcast to every Window and each Pane reacts only to its own
 // sessionId — so a session started in one Window still round-trips correctly.
 const ptyManager = new PtySessionManager({
   onData: (msg) => broadcast(IpcChannel.PtyData, msg),
-  onExit: (msg) => broadcast(IpcChannel.PtyExit, msg),
+  onExit: (msg) => {
+    broadcast(IpcChannel.PtyExit, msg);
+    // A finished Run frees a live slot — re-shape the home grid (issue 118) via
+    // the EXISTING registry-changed subscription, so "N running" and the
+    // attention-float update live even when the exit isn't accompanied by a
+    // backlog flip (e.g. a Run the user stopped, leaving its issue `wip`).
+    if (runSessionProject.delete(msg.sessionId)) broadcastRegistryChanged();
+  },
 });
 
 // One Backlog Watcher for the app; keyed per renderer WebContents so a Window
@@ -907,7 +934,17 @@ function registerIpc(): void {
         talkDest = { issuesRoot: join(projectRoot, 'issues'), projectRoot };
       }
     }
-    return ptyManager.spawn(req, { memoryCore, talkDest });
+    const result = ptyManager.spawn(req, { memoryCore, talkDest });
+    // Track a Run's live session per workbench project (issue 118) so the home
+    // grid's "N running" liveness and attention-float reflect it immediately.
+    // Only a Run with an explicit workbench (ADR-0015) maps to a card; the dir
+    // name is the issues root's parent (`~/Workbench/<dir>/issues` → `<dir>`).
+    // The registry-changed broadcast re-shapes any open home grid live.
+    if (req.run?.workbench) {
+      runSessionProject.set(result.sessionId, basename(dirname(req.run.workbench.issuesRoot)));
+      broadcastRegistryChanged();
+    }
+    return result;
   });
 
   ipcMain.on(IpcChannel.PtyWrite, (_event, msg: PtyWriteMessage) => {
@@ -1244,14 +1281,48 @@ function registerIpc(): void {
     return { projects: await gatherLauncherProjects() };
   });
 
-  // The project-first home grid (issue 115, ADR-0019): the portfolio aggregator
-  // — a thin adapter. It gathers the same per-Project signals and delegates ALL
-  // shaping and ordering to the pure card model (`buildProjectGrid`), returning
-  // a `ProjectCardView[]` the renderer draws as cards. Read-only, parallel to
-  // LauncherList; the renderer keeps it live off the existing registry + backlog
+  // The project-first home grid (issue 115/118, ADR-0019): the portfolio
+  // aggregator — a thin adapter. It gathers each Project's `LauncherProject`
+  // signals (backlog counts + last-activity) and JOINS the full-card signals
+  // issue 118 adds — parked HITL from the SAME watch that feeds the Inbox, the
+  // live-Run count from the run-session tally, and per-Project stage (registry)
+  // + repo-less (identity) — then delegates ALL shaping and ordering to the pure
+  // card model (`buildProjectGrid`). Read-only, parallel to LauncherList; the
+  // renderer keeps it live off the existing registry + backlog + attention
   // subscriptions (no new watcher here).
   ipcMain.handle(IpcChannel.ProjectGrid, async (): Promise<ProjectGridResult> => {
-    return { cards: buildProjectGrid(await gatherLauncherProjects(), new Date()) };
+    const projects = await gatherLauncherProjects();
+    // Parked HITL per project — count `hitl-park` items (grouped by their
+    // workbench project dir name) from the background attention watch's snapshot,
+    // the same source the Inbox reads. No snapshot yet ⇒ zero everywhere.
+    const parked = new Map<string, number>();
+    for (const item of attentionWatcher?.snapshot.items ?? []) {
+      if (item.kind === 'hitl-park') parked.set(item.project, (parked.get(item.project) ?? 0) + 1);
+    }
+    const live = liveRunsByProject();
+    // Repo-less per project — a repo-less Project (ADR-0017) has no member repos.
+    // Resolved once here (the same resolution the gather uses) so `signalsFor`
+    // stays synchronous for the pure model.
+    const repoless = new Map<string, boolean>();
+    await Promise.all(
+      projects.map(async (p) => {
+        try {
+          const identity = await resolveProjectIdentity(p.workbenchDir);
+          repoless.set(p.workbenchDir, identity.repoPaths.length === 0);
+        } catch {
+          repoless.set(p.workbenchDir, false);
+        }
+      }),
+    );
+    const signalsFor = (p: LauncherProject): ProjectCardSignals => ({
+      liveRuns: live.get(p.dirName) ?? 0,
+      parkedHitl: parked.get(p.dirName) ?? 0,
+      // Stage lives in the in-memory registry (ADR-0004), populated for Projects
+      // opened in a Window; an unopened card shows the app's default stage.
+      stage: findProject(registry, p.workbenchDir)?.stage ?? 'backlog',
+      repoless: repoless.get(p.workbenchDir) ?? false,
+    });
+    return { cards: buildProjectGrid(projects, signalsFor, new Date()) };
   });
 
   // Quick fix (issue 81): one sentence → a well-formed standalone issue in the

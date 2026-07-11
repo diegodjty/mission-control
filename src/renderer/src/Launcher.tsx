@@ -1,11 +1,16 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type {
   AttentionSnapshot,
   LauncherProject,
   OnboardingCreateResult,
   ProjectCardView,
 } from '../../shared/ipc-contract';
-import { projectStateLine } from '../../shared/launcher-model';
+import {
+  normalizeProjectView,
+  projectStateLine,
+  PROJECT_VIEW_KEY,
+  type ProjectViewMode,
+} from '../../shared/launcher-model';
 import { defaultWorkspaceRoot, repoKeyFor } from '../../shared/onboarding-model';
 import type { QuickFixIssueRef } from './QuickFixForm';
 
@@ -58,6 +63,19 @@ interface RepoRow {
 const EMPTY_ROW: RepoRow = { key: '', path: '', keyTouched: false };
 
 /**
+ * Read the persisted cards⇄list choice (issue 119), mirroring `loadTheme` in
+ * App: cards is the default on first run and whenever storage is unavailable
+ * (private mode) or holds a stale/unknown value.
+ */
+function loadProjectView(): ProjectViewMode {
+  try {
+    return normalizeProjectView(window.localStorage.getItem(PROJECT_VIEW_KEY));
+  } catch {
+    return 'cards';
+  }
+}
+
+/**
  * The Launcher (issue 81, ADR-0016; project-first per issue 115/117, ADR-0019):
  * every empty Window IS this surface, and the home affordance returns any Window
  * to it without closing its project. Since issue 117 the home page is noun-first:
@@ -80,6 +98,80 @@ export function Launcher({
   onJustTalkFolder,
 }: LauncherProps): JSX.Element {
   const [mode, setMode] = useState<LauncherMode>('menu');
+
+  // --- Cards ⇄ list toggle (issue 119) ---------------------------------------
+  // The home grid's density: cards (default) or a dense list. Seeded from
+  // localStorage (`mc.projectView`) on mount and written back on every change,
+  // mirroring App's `mc.theme` — so the choice survives app restarts. The
+  // Launcher re-mounts each time Home is shown, so a fresh mount re-reads the
+  // persisted value.
+  const [projectView, setProjectView] = useState<ProjectViewMode>(loadProjectView);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(PROJECT_VIEW_KEY, projectView);
+    } catch {
+      /* private mode / storage disabled — the choice still applies this session */
+    }
+  }, [projectView]);
+
+  // The per-card ⋯ overflow menu (issue 119): at most one open at a time, keyed
+  // by the card's `workbenchDir`. Secondary to the card body — a single click
+  // on the card still switches in place (issue 115). Any click elsewhere or
+  // Escape closes it; the trigger and menu items stopPropagation so their own
+  // clicks don't immediately re-close it.
+  const [openMenuKey, setOpenMenuKey] = useState<string | null>(null);
+  useEffect(() => {
+    if (openMenuKey === null) return;
+    const close = (): void => setOpenMenuKey(null);
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setOpenMenuKey(null);
+    };
+    document.addEventListener('click', close);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('click', close);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [openMenuKey]);
+
+  // A refusal from Remove from list (issue 119) — e.g. the project is open in a
+  // Window, which `removeProject` (issue 92) rejects. Shown as a quiet line;
+  // cleared on the next menu open. Success needs no notice: the registry-changed
+  // broadcast re-shapes the grid and the card simply drops out.
+  const [removeNotice, setRemoveNotice] = useState<string | null>(null);
+
+  /**
+   * Open a card's Project in a NEW Window (issue 119) — the same `openWindow`
+   * the interrupt overlay uses, handed the project's workbench dir. Leaves this
+   * Window (and any live runner) untouched.
+   */
+  const openCardInNewWindow = (card: ProjectCardView): void => {
+    void window.mc.openWindow({ path: card.workbenchDir });
+  };
+
+  /**
+   * Remove a card's Project from the list (issue 119) — the existing
+   * `removeProject` handler (issue 92): drop its registry entries (the workbench
+   * dir and repos stay on disk, reversible via git). Non-destructive, so no
+   * confirm; a refusal (open in a Window) surfaces as the quiet notice.
+   */
+  const removeCard = (card: ProjectCardView): void => {
+    void window.mc
+      .removeProject({ dirName: card.dirName })
+      .then((res) => {
+        if (!res.ok) setRemoveNotice(res.error ?? `Could not remove ${card.label}.`);
+        else if (res.warning) setRemoveNotice(res.warning);
+      })
+      .catch((err: unknown) => {
+        setRemoveNotice(err instanceof Error ? err.message : String(err));
+      });
+  };
+
+  /** Toggle the ⋯ menu for a card, closing any other and clearing the notice. */
+  const toggleMenu = (key: string): void => {
+    setRemoveNotice(null);
+    setOpenMenuKey((cur) => (cur === key ? null : key));
+  };
 
   // --- New project state (issue 82; repo-less projects issue 93/ADR-0017) ----
   const [projName, setProjName] = useState('');
@@ -211,6 +303,58 @@ export function Launcher({
       </ul>
     );
 
+  // The per-card/row ⋯ overflow menu (issue 119). Rendered as a sibling of the
+  // clickable card/row (never nested — a <button> can't contain a <button>), so
+  // its own clicks stopPropagation to avoid switching the Window or re-closing
+  // via the document listener. Shared by cards and list rows so the two never
+  // drift.
+  const cardMenu = (c: ProjectCardView): JSX.Element => {
+    const open = openMenuKey === c.workbenchDir;
+    return (
+      <span className="launcher__menu">
+        <button
+          className="launcher__menu-trigger"
+          aria-haspopup="menu"
+          aria-expanded={open}
+          aria-label={`More actions for ${c.label}`}
+          title={`More actions for ${c.label}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            toggleMenu(c.workbenchDir);
+          }}
+        >
+          ⋯
+        </button>
+        {open && (
+          <span className="launcher__menu-popup" role="menu">
+            <button
+              className="launcher__menu-item"
+              role="menuitem"
+              onClick={(e) => {
+                e.stopPropagation();
+                setOpenMenuKey(null);
+                openCardInNewWindow(c);
+              }}
+            >
+              Open in new Window
+            </button>
+            <button
+              className="launcher__menu-item launcher__menu-item--danger"
+              role="menuitem"
+              onClick={(e) => {
+                e.stopPropagation();
+                setOpenMenuKey(null);
+                removeCard(c);
+              }}
+            >
+              Remove from list
+            </button>
+          </span>
+        )}
+      </span>
+    );
+  };
+
   return (
     <div className="launcher">
       <div className="launcher__body">
@@ -230,22 +374,95 @@ export function Launcher({
                 Everything per-Project now lives on the Map's ＋ Start something
                 (issue 116). With no projects registered, the empty line still
                 leads with New project, not a blank grid. */}
-            <h1 className="launcher__title">Projects</h1>
+            {/* The title carries the cards⇄list toggle (issue 119). The toggle
+                only appears once there's a grid to reshape; the choice persists
+                in localStorage (cards is the default on first run). */}
+            <div className="launcher__grid-head">
+              <h1 className="launcher__title">Projects</h1>
+              {cards.length > 0 && (
+                <div className="launcher__view-toggle" role="group" aria-label="Project view">
+                  <button
+                    className={`launcher__view-btn${projectView === 'cards' ? ' launcher__view-btn--on' : ''}`}
+                    aria-pressed={projectView === 'cards'}
+                    onClick={() => setProjectView('cards')}
+                    title="Show projects as cards"
+                  >
+                    Cards
+                  </button>
+                  <button
+                    className={`launcher__view-btn${projectView === 'list' ? ' launcher__view-btn--on' : ''}`}
+                    aria-pressed={projectView === 'list'}
+                    onClick={() => setProjectView('list')}
+                    title="Show projects as a dense list"
+                  >
+                    List
+                  </button>
+                </div>
+              )}
+            </div>
+            {removeNotice !== null && <p className="launcher__notice">{removeNotice}</p>}
             {cards.length === 0 ? (
               <p className="launcher__empty">No projects yet — set one up to get started.</p>
+            ) : projectView === 'list' ? (
+              /* Dense list view (issue 119): one row per Project carrying the
+                 SAME fields the card shows — name, open·wip·done, needs-you,
+                 liveness, stage. A single click on the row switches in place
+                 (issue 115); the ⋯ menu is the secondary affordance. */
+              <ul className="launcher__rows">
+                {cards.map((c) => (
+                  <li key={c.workbenchDir} className="launcher__row-cell">
+                    <button
+                      className="launcher__row"
+                      onClick={() => onOpenCard(c)}
+                      title={`Open ${c.label}`}
+                    >
+                      <span className="launcher__row-name">{c.label}</span>
+                      <span className="launcher__row-counts">{c.countsLabel}</span>
+                      {c.parkedHitl > 0 && (
+                        <span
+                          className="launcher__card-needsyou"
+                          title={`${c.parkedHitl} parked awaiting you`}
+                        >
+                          {c.parkedHitl} needs you
+                        </span>
+                      )}
+                      <span className="launcher__row-liveness">{c.livenessLabel}</span>
+                      {c.stageLabel && <span className="launcher__card-stage">{c.stageLabel}</span>}
+                    </button>
+                    {cardMenu(c)}
+                  </li>
+                ))}
+              </ul>
             ) : (
               <ul className="launcher__grid">
                 {cards.map((c) => (
-                  <li key={c.workbenchDir}>
+                  <li key={c.workbenchDir} className="launcher__card-cell">
                     <button
                       className="launcher__card"
                       onClick={() => onOpenCard(c)}
                       title={`Open ${c.label}`}
                     >
-                      <span className="launcher__card-name">{c.label}</span>
+                      {/* Full card stats (issue 118): the header carries the
+                          name, the pipeline-stage badge, and — when the Project
+                          is parked awaiting the human — the needs-you badge (no
+                          badge at zero). The liveness line reads "N running" /
+                          a relative last-activity / "not started". */}
+                      <span className="launcher__card-header">
+                        <span className="launcher__card-name">{c.label}</span>
+                        {c.stageLabel && <span className="launcher__card-stage">{c.stageLabel}</span>}
+                        {c.parkedHitl > 0 && (
+                          <span
+                            className="launcher__card-needsyou"
+                            title={`${c.parkedHitl} parked awaiting you`}
+                          >
+                            {c.parkedHitl} needs you
+                          </span>
+                        )}
+                      </span>
                       <span className="launcher__card-counts">{c.countsLabel}</span>
-                      <span className="launcher__card-activity">{c.activityLabel}</span>
+                      <span className="launcher__card-activity">{c.livenessLabel}</span>
                     </button>
+                    {cardMenu(c)}
                   </li>
                 ))}
               </ul>

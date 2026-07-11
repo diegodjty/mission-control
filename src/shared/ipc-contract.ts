@@ -1008,6 +1008,26 @@ export interface ProjectCardView extends LauncherProject {
   countsLabel: string;
   /** A relative last-activity label, e.g. "5m ago" / "no activity yet". */
   activityLabel: string;
+  /**
+   * Live-Run count (issue 118) — powers the "N running" liveness and the
+   * attention-float ordering's top tier.
+   */
+  liveRuns: number;
+  /**
+   * Parked HITL count (issue 118) — the needs-you badge (no badge at zero) and
+   * the attention-float ordering's second tier.
+   */
+  parkedHitl: number;
+  /**
+   * The liveness label (issue 118): `"N running"` when a Run is live, else a
+   * relative last-activity time, or `"not started"` for a repo-less Project
+   * with an empty backlog.
+   */
+  livenessLabel: string;
+  /** The pipeline stage (issue 118) — raw, for any consumer that needs it. */
+  stage: PipelineStage;
+  /** The pipeline-stage badge label (issue 118), e.g. "Planning" / "Executing". */
+  stageLabel: string;
 }
 
 export interface ProjectGridResult {
