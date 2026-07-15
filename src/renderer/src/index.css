@@ -3052,6 +3052,23 @@ body.is-col-resizing {
   border-color: var(--red);
 }
 
+/* A neutral, non-destructive secondary action sitting beside the primary
+   (issue 121's "Open in new window"): same bordered look as Cancel but no
+   margin-left:auto, so it groups with the primary rather than floating right. */
+.app__interrupt-secondary {
+  background: none;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  color: var(--fg);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 8px 14px;
+}
+
+.app__interrupt-secondary:hover {
+  border-color: var(--teal);
+}
+
 .app__interrupt-cancel {
   background: none;
   border: 1px solid var(--border-strong);

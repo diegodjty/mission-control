@@ -123,6 +123,7 @@ import {
   type ScopedScan,
 } from '../../shared/project-switch';
 import { shouldConfirmInterrupt } from '../../shared/interrupt-guard';
+import { decideCardOpen } from '../../shared/open-card-decision';
 import {
   orphanedClaims,
   reopenWipToOpen,
@@ -310,6 +311,18 @@ export function App(): JSX.Element {
     path: string;
     label: string;
     proceed: () => void;
+  } | null>(null);
+  // A home-card open paused to ask "here or a new Window?" (issue 121). Set when
+  // this Window already has a Project open and the user picks a DIFFERENT one
+  // from the Launcher grid with no runner live — the choice the project bar's
+  // Open here / Open in new Window buttons give, brought to the home grid so two
+  // Projects can run side by side without touching the top bar. `path` is the
+  // clicked project's workbench dir (a valid `openProject`/`openWindow` handle).
+  // Null when nothing is pending. Distinct from `pendingProjectChange`, which is
+  // the stronger live-runner interrupt (issue 114).
+  const [pendingOpenChoice, setPendingOpenChoice] = useState<{
+    path: string;
+    label: string;
   } | null>(null);
   // Mirrors `activeProjectKey` for the callbacks/effects that need the CURRENT
   // active Project without re-subscribing (issue 26): they compare it against
@@ -1463,6 +1476,37 @@ export function App(): JSX.Element {
       }
     },
     [liveRunIssueIds],
+  );
+
+  // A Launcher home-grid card was clicked (issue 121). The pure `decideCardOpen`
+  // picks one of three outcomes so this stays a thin dispatcher: open in place
+  // (empty Window, or the card is the Project already open here), defer to the
+  // live-runner interrupt overlay (issue 114), or — the new case — ask whether
+  // to open the picked Project here or in a new Window. That choice used to live
+  // only on the top project bar; bringing it to the home grid lets the user run
+  // two Projects side by side without reaching for the bar.
+  const openCard = useCallback(
+    (card: ProjectCardView): void => {
+      const decision = decideCardOpen({
+        currentKey: activeProjectKeyRef.current,
+        cardKey: card.workbenchDir,
+        hasLiveRunner: liveRunIssueIds.length > 0,
+      });
+      if (decision.kind === 'confirm-interrupt') {
+        setPendingProjectChange({
+          path: card.workbenchDir,
+          label: card.label,
+          proceed: () => void openProjectHere(card.workbenchDir),
+        });
+      } else if (decision.kind === 'choose-window') {
+        setPendingOpenChoice({ path: card.workbenchDir, label: card.label });
+      } else {
+        // open-here: switch this Window in place (a no-op re-open when the card
+        // is already the active Project — openProjectHere lands back on the Map).
+        void openProjectHere(card.workbenchDir);
+      }
+    },
+    [openProjectHere, liveRunIssueIds],
   );
 
   // Pure derivations from the on-disk scan + the live-Run set: which issues show
@@ -3631,17 +3675,7 @@ export function App(): JSX.Element {
                 projects.find((p) => p.key === activeProjectKey)?.label ?? null
               }
               onBackToProject={activeProjectKey !== null ? () => setView('map') : null}
-              onOpenCard={(c) =>
-                // Clicking a card switches this Window in place to the project's
-                // Map (issue 115) — through the SAME interrupt-guarded open flow
-                // Continue used, so switching away from a live drain offers "open
-                // in a new Window" rather than tearing the runner down (issue 114).
-                attemptProjectChange({
-                  path: c.workbenchDir,
-                  label: c.label,
-                  proceed: () => void openProjectHere(c.workbenchDir),
-                })
-              }
+              onOpenCard={openCard}
               onProjectCreated={(created) => void landOnNewProject(created)}
               onJustTalkProject={talkToProject}
               onJustTalkFolder={() => void talkToFolder()}
@@ -3716,6 +3750,64 @@ export function App(): JSX.Element {
               <button
                 className="app__interrupt-cancel"
                 onClick={() => setPendingProjectChange(null)}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Open-here-or-new-Window choice (issue 121): this Window already has a
+          Project open and the user picked a DIFFERENT one from the home grid
+          (with nothing running — a live runner takes the stronger interrupt
+          overlay above instead). Rather than silently switching this Window,
+          offer the same choice the project bar's buttons give — so the user can
+          open the other Project alongside this one without touching the top bar.
+          Open here switches this Window; Open in new Window leaves it untouched;
+          Cancel stays put. */}
+      {pendingOpenChoice !== null && (
+        <div
+          className="app__interrupt-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="open-choice-title"
+        >
+          <div className="app__interrupt">
+            <h2 className="app__interrupt-title" id="open-choice-title">
+              Open {pendingOpenChoice.label}
+            </h2>
+            <p className="app__interrupt-text">
+              <strong>
+                {projects.find((p) => p.key === activeProjectKey)?.label ?? 'This project'}
+              </strong>{' '}
+              is open in this window. Open <strong>{pendingOpenChoice.label}</strong> here instead,
+              or in a new window so you can work on both at once?
+            </p>
+            <div className="app__interrupt-actions">
+              <button
+                className="app__interrupt-primary"
+                onClick={() => {
+                  void openProjectHere(pendingOpenChoice.path);
+                  setPendingOpenChoice(null);
+                }}
+                title="Switch this window to the picked project"
+              >
+                Open here
+              </button>
+              <button
+                className="app__interrupt-secondary"
+                onClick={() => {
+                  void window.mc.openWindow({ path: pendingOpenChoice.path });
+                  setPendingOpenChoice(null);
+                }}
+                title="Open the picked project in a new window; this window stays put"
+              >
+                Open in new window
+              </button>
+              <button
+                className="app__interrupt-cancel"
+                onClick={() => setPendingOpenChoice(null)}
               >
                 Cancel
               </button>
