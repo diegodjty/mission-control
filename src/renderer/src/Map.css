@@ -1,0 +1,1043 @@
+/* =====================================================================
+   Map view — per-view stylesheet (issue 127, PRD-ui-redesign)
+
+   Rebuilt on the approved Atlas mock (issue 122: scenes `map` / `map-narrow`)
+   and the primitives layer (issue 123). Every colour/shadow/easing is an Atlas
+   design token declared in index.css `:root` (+ its `[data-theme="light"]`
+   overrides), so BOTH themes render correctly by construction — this file adds
+   no raw colours. Status / dependency / merge-preview / run-log SIGNALS render
+   on the shared Badge primitive (`.ui-badge`, styled in index.css); this file
+   only lays out the view and adds the leading status dot.
+
+   Extracted out of the one shared stylesheet so the parallel view rebuilds
+   (127–130) don't collide in it (per the issue's first task). Narrow-width
+   reflow keys off the shell root's `data-narrow` / `data-compact` attributes
+   (issue 126, src/shared/breakpoints.ts) — the same mechanism the shell uses.
+   ===================================================================== */
+
+/* The view is the single scrolling column (the shell owns the rail + header).
+   min-width/height:0 so it shrinks inside the flex map-col without forcing the
+   app frame to scroll horizontally; overflow-x hidden is the belt-and-braces
+   guarantee of the "no horizontal scroll at narrow width" acceptance criterion. */
+.map {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px 24px 28px;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+/* ---- Uncontrolled path bar (legacy / no Project Registry) ------------------
+   Hidden whenever the shell header owns the Project + breadcrumb (the mock's
+   top row is shell chrome); shown only for a self-driven Map. */
+.map__pathbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.map__pathinput {
+  flex: 1 1 240px;
+  min-width: 0;
+  background: var(--bg1);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 13px;
+}
+
+.map__load {
+  background: var(--surface-2);
+  color: var(--fg);
+  border: 1px solid var(--teal-border);
+  border-radius: 8px;
+  padding: 7px 16px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.map__load:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.map__meta {
+  font-size: 11px;
+  color: var(--fg-mute);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+/* ---- Primary controls row (mock: one prominent row) ------------------------
+   ＋ Start something on the left; the run controls (cap, Drain, Merge) grouped
+   on the right so the highest-consequence actions read the easiest (story 36).
+   Wraps gracefully at narrow width. */
+.map__controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.map__controls-run {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+/* Start something — a secondary, outlined action (the mock's glass pill). */
+.map__start-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--surface-2);
+  color: var(--teal);
+  border: 1px solid var(--teal-border);
+  border-radius: 10px;
+  padding: 9px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 140ms var(--ease-out), background 140ms var(--ease-out);
+}
+
+.map__start-toggle:hover {
+  border-color: var(--teal);
+}
+
+.map__start-toggle--open {
+  background: var(--teal-bg);
+  border-color: var(--teal);
+}
+
+.map__cap {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--fg-mute);
+  white-space: nowrap;
+}
+
+.map__cap-input {
+  width: 52px;
+  background: var(--bg1);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 13px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.map__cap-input:disabled {
+  opacity: 0.6;
+}
+
+/* Drain + Merge — the highest-consequence actions: filled accents (dark/white
+   CTA text via --cta-fg) so they read the easiest, and their state is never
+   ambiguous — green Drain ⇄ red Stop, violet Merge, dimmed when unavailable. */
+.map__drain {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: var(--green);
+  color: var(--cta-fg);
+  border: 1px solid transparent;
+  border-radius: 10px;
+  padding: 9px 18px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 140ms var(--ease-out), box-shadow 140ms var(--ease-out),
+    opacity 140ms var(--ease-out);
+}
+
+.map__drain:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 10px 26px var(--glow);
+}
+
+.map__drain:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.map__drain--stop {
+  background: var(--red);
+  color: var(--cta-fg);
+}
+
+.map__merge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: var(--violet);
+  color: var(--cta-fg);
+  border: 1px solid transparent;
+  border-radius: 10px;
+  padding: 9px 18px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 140ms var(--ease-out), box-shadow 140ms var(--ease-out),
+    opacity 140ms var(--ease-out);
+}
+
+.map__merge:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.28);
+}
+
+.map__merge:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ---- ＋ Start something disclosure / empty-state chooser (issue 116) ------- */
+.map__startpanel,
+.map__start-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.map__start-empty {
+  align-items: flex-start;
+}
+
+.map__start-empty-text {
+  margin: 0;
+  font-size: 13px;
+  color: var(--fg-mute);
+}
+
+.map__start-verbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.map__start-verb {
+  background: var(--surface-2);
+  color: var(--fg);
+  border: 1px solid var(--teal-border);
+  border-radius: 8px;
+  padding: 8px 16px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 140ms var(--ease-out);
+}
+
+.map__start-verb:hover {
+  border-color: var(--teal);
+}
+
+.map__start-note {
+  margin: 0;
+  width: 100%;
+  font-size: 12px;
+  color: var(--green);
+}
+
+/* ---- Drain status notes (issue 90): what it's doing, or the truthful reason
+   the control is disabled — never a dead click. */
+.map__notes {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.map__note {
+  font-size: 12px;
+  color: var(--amber-soft);
+}
+
+.map__note--muted {
+  color: var(--fg-mute);
+}
+
+/* ---- Mid-merge alert (issue 24): the most consequential state — main is left
+   mid-merge; new Runs/Drain are paused. Reads as a prominent red alert. */
+.map__alert {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--red-border);
+  border-radius: 12px;
+  background: var(--red-bg);
+}
+
+.map__alert-text {
+  flex: 1 1 260px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--red-soft);
+}
+
+.map__alert-action {
+  background: var(--red);
+  color: var(--cta-fg);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.map__alert-action:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* ---- Merge outcome (issue 17): tone-coded headline + collapsible verbatim
+   script output for a failed/conflicted Merge. */
+.map__mergeout {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.map__merge-state {
+  font-size: 12px;
+  color: var(--fg-mute);
+  white-space: pre-wrap;
+}
+
+.map__merge-state--success {
+  color: var(--green);
+}
+
+.map__merge-state--empty,
+.map__merge-state--pending {
+  color: var(--fg-mute);
+}
+
+.map__merge-state--conflict {
+  color: var(--amber);
+}
+
+.map__merge-state--error {
+  color: var(--red);
+}
+
+.map__merge-details {
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg0);
+}
+
+.map__merge-details-summary {
+  cursor: pointer;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--fg-mute);
+  user-select: none;
+}
+
+.map__merge-output {
+  margin: 0;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  max-height: 220px;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-soft);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---- Planned repos (issue 96, ADR-0017): declared-but-absent repos, muted so
+   they read as "intended, not yet real". */
+.map__plannedbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+}
+
+.map__planned-label {
+  font-size: 12px;
+  color: var(--fg-mute);
+}
+
+.map__planned-repo {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--fg-mute);
+  border: 1px dashed var(--border-strong);
+  border-radius: 999px;
+  padding: 2px 10px;
+}
+
+.map__planned-repo-path {
+  color: var(--fg-faint);
+}
+
+/* ---- Stranded-Runs cleanup bar (issue 22): can't merge; each offers Discard. */
+.map__strandedbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--amber-border);
+  border-radius: 12px;
+  background: var(--amber-bg);
+}
+
+.map__stranded-label {
+  font-size: 12px;
+  color: var(--amber);
+}
+
+.map__stranded-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.map__discard {
+  background: var(--amber-bg);
+  color: var(--amber);
+  border: 1px solid var(--amber-border);
+  border-radius: 8px;
+  padding: 3px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.map__discard:hover {
+  border-color: var(--amber);
+}
+
+/* ---- Merge-preview degradation note (issue 104): git < 2.38. */
+.map__preview-note {
+  font-size: 11px;
+  color: var(--fg-mute);
+  padding: 6px 12px;
+  border: 1px dashed var(--border-teal);
+  border-radius: 8px;
+  background: var(--teal-bg);
+}
+
+/* ---- Empty / error states ------------------------------------------------- */
+.map__no-project {
+  margin: 8px 0;
+  padding: 20px 22px;
+  color: var(--fg-soft);
+  font-size: 14px;
+  line-height: 1.5;
+  background: var(--surface);
+  border: 1px dashed var(--border-strong);
+  border-radius: 12px;
+}
+
+.map__error {
+  padding: 10px 14px;
+  color: var(--red-soft);
+  background: var(--red-bg);
+  border: 1px solid var(--red-border);
+  border-radius: 12px;
+  font-size: 12px;
+}
+
+/* ---- Eligibility banner (issue 11) — the mock's "● You can Run N right now"
+   line: a teal-accented strip with a leading readiness dot and clickable ready
+   chips; amber when nothing is runnable. */
+.map__guidance {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  font-size: 13px;
+}
+
+.map__guidance::before {
+  content: '';
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--fg-mute);
+}
+
+.map__guidance--eligible {
+  border-color: var(--teal-border);
+  background: var(--teal-bg);
+}
+
+.map__guidance--eligible::before {
+  background: var(--teal);
+  box-shadow: 0 0 8px var(--glow);
+}
+
+.map__guidance--none {
+  border-color: var(--amber-border);
+  background: var(--amber-bg);
+}
+
+.map__guidance--none::before {
+  background: var(--amber);
+}
+
+.map__guidance-text {
+  color: var(--fg-soft);
+}
+
+.map__guidance-text strong {
+  color: var(--teal);
+  font-weight: 700;
+}
+
+.map__guidance-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.map__guidance-chip {
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--teal);
+  background: var(--teal-bg);
+  border: 1px solid var(--teal-border);
+  border-radius: 999px;
+  padding: 3px 10px;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+  transition: border-color 120ms var(--ease-out), background 120ms var(--ease-out);
+}
+
+.map__guidance-chip:hover {
+  border-color: var(--teal);
+  background: var(--teal-soft);
+}
+
+/* ---- Backlog section (collapsible) ---------------------------------------- */
+.map__section {
+  display: flex;
+  flex-direction: column;
+}
+
+.map__section-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  padding: 4px 2px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+  user-select: none;
+  list-style: none;
+}
+
+.map__section-summary::-webkit-details-marker {
+  display: none;
+}
+
+.map__section-summary::before {
+  content: '▸';
+  font-size: 10px;
+  color: var(--fg-faint);
+  transition: transform 120ms var(--ease-out);
+}
+
+.map__section[open] > .map__section-summary::before {
+  transform: rotate(90deg);
+}
+
+.map__section-count::before {
+  content: '· ';
+  color: var(--fg-faint);
+}
+
+.map__section-count {
+  color: var(--fg-faint);
+  font-weight: 600;
+}
+
+/* ---- Issue rows (mock: single column of glass cards) ---------------------- */
+.map__list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.map__empty {
+  color: var(--fg-mute);
+  font-size: 13px;
+  padding: 16px 4px;
+}
+
+.issue {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  cursor: pointer;
+  font-size: 14px;
+  overflow: hidden;
+  transition: border-color 140ms var(--ease-out), background 140ms var(--ease-out);
+}
+
+.issue:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-2);
+}
+
+.issue--selected {
+  border-color: var(--teal-border);
+  background: var(--teal-bg);
+}
+
+/* Planned issue (issue 96): its repo isn't created yet — grayed as "intended,
+   not yet runnable"; ungrays the instant the repo appears. */
+.issue--planned {
+  opacity: 0.55;
+}
+
+.issue--planned .issue__title {
+  color: var(--fg-mute);
+}
+
+/* Leading status dot — the at-a-glance readiness signal (mock). */
+.issue__dot {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--fg-mute);
+}
+
+.issue__dot--teal {
+  background: var(--teal);
+  box-shadow: 0 0 8px var(--glow);
+}
+
+.issue__dot--red {
+  background: var(--red);
+}
+
+.issue__dot--amber {
+  background: var(--amber);
+}
+
+.issue__dot--green {
+  background: var(--green);
+}
+
+.issue__dot--violet {
+  background: var(--violet);
+}
+
+.issue__dot--neutral {
+  background: var(--fg-faint);
+}
+
+.issue__id {
+  flex: 0 0 auto;
+  color: var(--fg-mute);
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+}
+
+.issue__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.issue__tags {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Row signals are uppercased to match the mock — scoped to the row/run-log so
+   the shared Badge primitive keeps its normal case everywhere else. */
+.issue__tags .ui-badge,
+.runlog-card__head .ui-badge {
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+/* Compact dependency signal (mock: "✕ 122") — the unmet blockers, muted. */
+.issue__deps {
+  font-size: 11px;
+  color: var(--fg-mute);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Row Run button — an eligible row's start affordance. */
+.run-btn {
+  background: var(--green-bg);
+  color: var(--green);
+  border: 1px solid var(--green-border);
+  border-radius: 8px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 120ms var(--ease-out);
+}
+
+.run-btn:hover {
+  border-color: var(--green);
+}
+
+.run-btn--row {
+  padding: 3px 10px;
+  font-size: 11px;
+}
+
+/* ---- Inline detail (the selected row expands in place) -------------------- */
+.map__detail {
+  list-style: none;
+  margin: -2px 0 4px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--teal-border);
+  background: var(--bg1);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.map__detail-deps {
+  font-size: 12px;
+  color: var(--fg-mute);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.map__blocked {
+  color: var(--red-soft);
+  background: var(--red-bg);
+  border: 1px solid var(--red-border);
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+
+.map__eligible {
+  color: var(--green);
+  background: var(--green-bg);
+  border: 1px solid var(--green-border);
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+
+.map__edges {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.map__edges-label {
+  color: var(--fg-mute);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+.issue__body {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg-soft);
+  margin: 0;
+}
+
+/* ---- Issue-file Edit / Delete (issue 89): the Map's one write exception. */
+.map__issue-ops {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.map__issue-op {
+  background: var(--teal-bg);
+  color: var(--teal);
+  border: 1px solid var(--teal-border);
+  border-radius: 8px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.map__issue-op:hover {
+  border-color: var(--teal);
+}
+
+.map__issue-op:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.map__issue-op--delete {
+  background: var(--red-bg);
+  color: var(--red-soft);
+  border-color: var(--red-border);
+}
+
+.map__issue-op--save {
+  background: var(--green-bg);
+  color: var(--green);
+  border-color: var(--green-border);
+}
+
+.map__delete-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--red-border);
+  border-radius: 8px;
+  background: var(--red-bg);
+}
+
+.map__delete-confirm-text {
+  font-size: 12px;
+  color: var(--red-soft);
+  flex: 1 1 260px;
+}
+
+.map__delete-confirm-text code {
+  color: var(--amber-soft);
+}
+
+.map__issue-op-error {
+  padding: 7px 10px;
+  border: 1px solid var(--red-border);
+  border-radius: 8px;
+  background: var(--red-bg);
+  color: var(--red-soft);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.issue-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.issue-editor__textarea {
+  width: 100%;
+  min-height: 320px;
+  resize: vertical;
+  box-sizing: border-box;
+  background: var(--bg0);
+  color: var(--fg-soft);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.issue-editor__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.issue-editor__hint {
+  font-size: 11px;
+  color: var(--fg-mute);
+}
+
+/* ---- Run-log feed (issue 34): the durable per-Project history of finished
+   Runs, one card each, below the backlog per the mock. Collapsible. */
+.map__runlog {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.map__runlog-summary {
+  cursor: pointer;
+  padding: 10px 14px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+  user-select: none;
+  list-style: none;
+}
+
+.map__runlog-summary::-webkit-details-marker {
+  display: none;
+}
+
+.map__runlog-summary::before {
+  content: '▸ ';
+  color: var(--fg-faint);
+  display: inline-block;
+  transition: transform 120ms var(--ease-out);
+}
+
+.map__runlog[open] > .map__runlog-summary::before {
+  transform: rotate(90deg);
+}
+
+.map__runlog-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.runlog-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg1);
+  padding: 8px 12px;
+  cursor: pointer;
+  transition: border-color 120ms var(--ease-out);
+}
+
+.runlog-card:hover {
+  border-color: var(--teal-border);
+}
+
+.runlog-card__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.runlog-card__id {
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-mute);
+  font-size: 12px;
+}
+
+.runlog-card__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+  font-size: 13px;
+}
+
+.runlog-card__time {
+  color: var(--fg-mute);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.runlog-card__fields {
+  margin: 8px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.runlog-card__field {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.runlog-card__label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-mute);
+}
+
+.runlog-card__value {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--fg-soft);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.runlog-card__empty {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--fg-mute);
+  font-style: italic;
+}
+
+/* =====================================================================
+   Narrow-width reflow (issue 126 breakpoints; mock scene `map-narrow`).
+   `data-compact` (≤640px) / `data-narrow` (≤900px) are set on the shell root
+   by the AppShell — no @media here so the one breakpoint source of truth stays
+   the `--bp-*` tokens.
+   ===================================================================== */
+
+/* At compact width the run controls stop hugging the right edge and flow left
+   under ＋ Start something (mock: Merge wraps to its own line), and the whole
+   view tightens its padding — everything still fits with no horizontal scroll. */
+.app[data-compact='true'] .map {
+  padding: 14px 14px 24px;
+  gap: 12px;
+}
+
+.app[data-compact='true'] .map__controls-run {
+  margin-left: 0;
+}
+
+.app[data-compact='true'] .issue {
+  gap: 10px;
+  padding: 11px 13px;
+}

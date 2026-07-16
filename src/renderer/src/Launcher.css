@@ -1,0 +1,671 @@
+/* =====================================================================
+   Launcher (home) — per-view stylesheet (issue 128, PRD-ui-redesign)
+
+   Rebuilt on the approved Atlas mock (issue 122: scenes `launcher-cards` /
+   `launcher-list` / `launcher-narrow`) and the primitives layer (issue 123:
+   Card/Badge). Every colour/shadow/easing is an Atlas design token declared in
+   index.css `:root` (+ its `[data-theme="light"]` overrides), so BOTH themes
+   render correctly by construction — this file adds no raw colours.
+
+   Extracted out of the one shared stylesheet so the parallel view rebuilds
+   (127–130) don't collide in it (the issue's first task). Card stage / needs-you
+   SIGNALS render on the shared Badge primitive (`.ui-badge`, styled in
+   index.css); the card surface is the Card primitive's `.ui-card` glass. Narrow-
+   width reflow keys off the shell root's `data-narrow` / `data-compact`
+   attributes (issue 126, src/shared/breakpoints.ts) — no @media here, so the one
+   breakpoint source of truth (the `--bp-*` tokens the AppShell reads) stays
+   authoritative. ADR-0019 project-first semantics are unchanged — this is how
+   the front door LOOKS, not what it MEANS.
+   ===================================================================== */
+
+/* The view is the single scrolling column (the shell owns the rail + header).
+   min-width/height:0 so it shrinks inside the flex main col without forcing the
+   app frame to scroll horizontally; overflow-x hidden is the belt-and-braces
+   guarantee of the "no horizontal scroll at narrow width" acceptance criterion. */
+.launcher {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.launcher__body {
+  width: 100%;
+  max-width: 1180px;
+  padding: 28px 32px 44px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.app[data-compact='true'] .launcher__body {
+  padding: 20px 16px 32px;
+}
+
+/* The "← Back to <project>" affordance a Window with a project open still shows
+   (the shell header owns switching; this is the quiet in-view return). */
+.launcher__back {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  color: var(--fg-mute);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 0;
+}
+
+.launcher__back:hover {
+  color: var(--fg-soft);
+}
+
+/* ---- Heading row: title + subtitle on the left, density toggle on the right */
+.launcher__grid-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.launcher__heading {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.launcher__title {
+  margin: 0;
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--fg);
+}
+
+.launcher__subtitle {
+  margin: 0;
+  font-size: 13px;
+  color: var(--fg-mute);
+}
+
+.launcher__hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-mute);
+}
+
+/* Cards ⇄ list density toggle (issue 119): a segmented control, the active
+   segment filled teal — the mock's top-right control. */
+.launcher__view-toggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.launcher__view-btn {
+  background: none;
+  border: none;
+  padding: 6px 16px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-mute);
+  cursor: pointer;
+}
+
+.launcher__view-btn + .launcher__view-btn {
+  border-left: 1px solid var(--border-strong);
+}
+
+.launcher__view-btn:hover {
+  color: var(--fg-soft);
+}
+
+.launcher__view-btn--on {
+  background: var(--teal-bg);
+  color: var(--teal);
+}
+
+/* A quiet refusal line for Remove from list (e.g. project open in a Window). */
+.launcher__notice {
+  margin: 0;
+  font-size: 12px;
+  color: var(--red-soft);
+}
+
+/* Empty states get the prototype's breathing diamond, centered (the Atlas
+   identity pass — `mcBreathe` keyframes are shared, declared in index.css). */
+.launcher__empty {
+  font-size: 13px;
+  color: var(--fg-mute);
+  margin: 4px 0 0;
+  text-align: center;
+}
+
+.launcher__empty::before {
+  content: '';
+  display: block;
+  width: 46px;
+  height: 46px;
+  margin: 0 auto 20px;
+  transform: rotate(45deg);
+  border: 1.4px solid var(--teal);
+  border-radius: 9px;
+  box-shadow: 0 0 26px var(--glow), inset 0 0 18px var(--teal-soft);
+  animation: mcBreathe 7s ease-in-out infinite;
+}
+
+/* ---- Project-first card grid (issue 115, ADR-0019) ------------------------
+   Fluid, no fixed column count: auto-fill tracks reflow with the available
+   width (3 up wide → 2 up narrow), and the compact tier drops to one column —
+   the mock's `launcher-narrow`. */
+.launcher__grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 14px;
+}
+
+.app[data-compact='true'] .launcher__grid {
+  grid-template-columns: 1fr;
+}
+
+/* The cell anchors the corner ⋯ trigger (a button can't nest a button, so the
+   menu is a sibling of the clickable card). */
+.launcher__card-cell {
+  position: relative;
+  min-width: 0;
+}
+
+/* The card body is a real <button> wearing the Card primitive's glass
+   (`.ui-card`) so it's keyboard-accessible; a single click switches this Window
+   to the Project's Map (ADR-0019 unchanged). */
+.launcher__card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  width: 100%;
+  height: 100%;
+  padding: 16px 16px 0;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.15s var(--ease-out),
+    background 0.15s var(--ease-out),
+    transform 0.15s var(--ease-out);
+}
+
+.launcher__card:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-2);
+  transform: translateY(-1px);
+}
+
+.launcher__card:focus-visible {
+  outline: none;
+  border-color: var(--teal-border);
+  box-shadow: 0 0 0 3px var(--teal-soft);
+}
+
+/* Header: name (left, grows) + optional needs-you badge, clearing the corner
+   ⋯ trigger on the right. */
+.launcher__card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding-right: 26px;
+}
+
+.launcher__card-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--fg);
+}
+
+/* Meta row: the pipeline-stage badge + the liveness indicator. */
+.launcher__card-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* Stage badge rides the Badge primitive; the launcher wants it uppercase. */
+.launcher__stage-badge {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 10px;
+}
+
+/* Needs-you: the amber "this wants the human" accent, the SAME count the rail
+   badge and attention surface show (issue 125). Rendered only when non-zero. */
+.launcher__needsyou {
+  font-size: 10px;
+}
+
+/* Liveness (issue 118): a live dot + "N running" when a Run is live — the
+   mock's "● live". Absent when nothing is running (the footer then carries the
+   last-activity time). */
+.launcher__card-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--green-soft);
+}
+
+.launcher__card-live::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 6px var(--green);
+}
+
+.launcher__card-counts {
+  font-size: 12px;
+  color: var(--fg-soft);
+}
+
+/* Footer: a divided row carrying the relative last-activity time on the right
+   (the ADR-0019 last-activity signal). */
+.launcher__card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: auto;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+
+.launcher__card-activity {
+  font-size: 11px;
+  color: var(--fg-mute);
+}
+
+/* ---- Dense list view (issue 119): one row per Project, same signals -------
+   A single bordered container with divided rows — the mock's `launcher-list`. */
+.launcher__rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+
+.launcher__row-cell {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+}
+
+.launcher__row-cell + .launcher__row-cell {
+  border-top: 1px solid var(--border);
+}
+
+.launcher__row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  padding: 12px 42px 12px 16px; /* right pad clears the inline ⋯ trigger */
+  background: none;
+  border: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.launcher__row:hover {
+  background: var(--surface-2);
+}
+
+.launcher__row:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--teal-border);
+}
+
+/* Leading liveness dot: bright green when a Run is live, quiet otherwise. */
+.launcher__row-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--fg-faint);
+}
+
+.launcher__row-dot--live {
+  background: var(--green);
+  box-shadow: 0 0 6px var(--green);
+}
+
+.launcher__row-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--fg);
+}
+
+.launcher__row-stage {
+  flex: 0 0 auto;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 10px;
+}
+
+.launcher__row-counts {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--fg-soft);
+}
+
+.launcher__row-needsyou {
+  flex: 0 0 auto;
+  min-width: 20px;
+  justify-content: center;
+  font-size: 10px;
+}
+
+.launcher__row-activity {
+  flex: 0 0 auto;
+  width: 74px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--fg-mute);
+}
+
+/* ---- The per-card/row ⋯ overflow menu (issue 119) ------------------------ */
+.launcher__menu {
+  position: relative;
+  display: inline-flex;
+}
+
+/* On a card the trigger floats top-right; on a list row it sits at the row end. */
+.launcher__card-cell > .launcher__menu {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+}
+
+.launcher__row-cell > .launcher__menu {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+}
+
+.launcher__menu-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--fg-mute);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.launcher__menu-trigger:hover,
+.launcher__menu-trigger[aria-expanded='true'] {
+  color: var(--fg);
+  border-color: var(--border-strong);
+  background: var(--bg0);
+}
+
+.launcher__menu-popup {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  min-width: 168px;
+  padding: 4px;
+  background: var(--bg0);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: var(--shadow-card);
+}
+
+.launcher__menu-item {
+  background: none;
+  border: none;
+  border-radius: 5px;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--fg-soft);
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.launcher__menu-item:hover {
+  background: var(--bg1);
+  color: var(--fg);
+}
+
+.launcher__menu-item--danger {
+  color: var(--red-soft);
+}
+
+.launcher__menu-item--danger:hover {
+  background: var(--red-bg);
+  color: var(--red-soft);
+}
+
+/* ---- Home actions: New project + Just talk (issue 117) — the ONLY two ----- */
+.launcher__home-actions {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  margin-top: 6px;
+}
+
+/* The one primary action: a solid teal CTA (the mock's "＋ New project"). */
+.launcher__primary {
+  background: var(--teal);
+  border: 1px solid var(--teal);
+  border-radius: 8px;
+  color: var(--cta-fg);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  padding: 9px 18px;
+  box-shadow: 0 8px 22px -12px var(--glow);
+}
+
+.launcher__primary:hover {
+  filter: brightness(1.06);
+}
+
+.launcher__primary:disabled {
+  opacity: 0.5;
+  cursor: default;
+  filter: none;
+}
+
+.launcher__talk-link {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--fg-mute);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  text-decoration: underline;
+}
+
+.launcher__talk-link:hover {
+  color: var(--fg-soft);
+}
+
+/* ---- New project + Just talk sub-forms (issues 82 / 81) ------------------- */
+.launcher__form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 640px;
+}
+
+.launcher__label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--fg-mute);
+}
+
+.launcher__select,
+.launcher__input {
+  background: var(--bg0);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  padding: 8px 10px;
+}
+
+.launcher__input:focus,
+.launcher__select:focus {
+  outline: none;
+  border-color: var(--teal-border);
+}
+
+.launcher__repo-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.launcher__input--path {
+  flex: 1;
+  min-width: 0;
+}
+
+.launcher__input--key {
+  width: 110px;
+  flex: 0 0 auto;
+}
+
+/* Form button rows (Add another repo / Create / Cancel / talk actions). Named
+   distinctly from the dense-list `.launcher__row` so the two never collide in
+   the shared cascade (they did in the old single stylesheet). */
+.launcher__form-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.launcher__secondary {
+  background: none;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  color: var(--fg-soft);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  padding: 8px 14px;
+}
+
+.launcher__secondary:hover {
+  border-color: var(--border-strong);
+  color: var(--fg);
+}
+
+.launcher__error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--red-soft);
+}
+
+.launcher__warning {
+  margin: 0;
+  font-size: 12px;
+  color: var(--amber-soft);
+}
+
+.launcher__note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--green-soft);
+}
+
+/* The Just talk project picker: a quiet list of Projects to warm a bare Pane in. */
+.launcher__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 640px;
+}
+
+/* The Just-talk picker rows read as glass over the stage and lift on hover —
+   the Atlas identity pass, now owned by this per-view file. */
+.launcher__project {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--bg1);
+  border: 1px solid var(--border-strong);
+  border-radius: 15px;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: var(--shadow-card);
+  transition:
+    transform 160ms var(--ease-out),
+    border-color 160ms var(--ease-out),
+    box-shadow 160ms var(--ease-out);
+}
+
+.launcher__project:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-teal);
+  box-shadow: var(--shadow-card), 0 0 0 1px var(--teal-soft);
+}
+
+.launcher__project-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg-soft);
+}
+
+.launcher__project-state {
+  font-size: 12px;
+  color: var(--fg-mute);
+  margin-left: auto;
+}

@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
+import './Map.css';
+import { Badge, type BadgeTone } from './components';
 import type { Backlog, BacklogIssue } from '../../shared/backlog-model';
 import { deleteRefusal } from '../../shared/issue-file-ops';
 import type { LauncherProject, RunLogRecord, RunTarget } from '../../shared/ipc-contract';
 import { QuickFixForm, type QuickFixIssueRef } from './QuickFixForm';
 import { START_VERB_LABELS, startSomething, type StartVerb } from '../../shared/launcher-model';
-import { runnableNow, type InFlightRuns } from '../../shared/run-eligibility';
+import { type InFlightRuns } from '../../shared/run-eligibility';
 import { drainAvailability } from '../../shared/run-coordinator';
 import {
   deriveIssueState,
@@ -442,22 +444,14 @@ export function Map({
 
   return (
     <div className="map">
-      {/* When the Project Registry drives the active repo (issue 09), the
-          ProjectBar owns Project choice, so the Map's own path input is hidden;
-          we still show the resolved path + PRD meta line for context. */}
-      {controlled ? (
-        resolvedPath && (
-          <div className="map__bar">
-            <span className="map__meta">
-              {resolvedPath}
-              {backlog?.activePrd ? ` · PRD: ${backlog.activePrd}` : ' · no active PRD'}
-            </span>
-          </div>
-        )
-      ) : (
-        <div className="map__bar">
+      {/* Controlled by the Project Registry (issue 09): the shell header owns the
+          Project name + path breadcrumb, so the Map draws no path bar of its own —
+          matching the approved mock, whose top row is shell chrome. Uncontrolled
+          (legacy / no Registry) keeps the Map's own path input + Load. */}
+      {!controlled && (
+        <div className="map__pathbar">
           <input
-            className="map__input"
+            className="map__pathinput"
             type="text"
             placeholder="Project repo path (blank = this repo)"
             value={path}
@@ -478,59 +472,140 @@ export function Map({
         </div>
       )}
 
-      {/* ＋ Start something (issue 116, ADR-0019): on a POPULATED backlog the two
-          per-Project entry verbs live here among the Map controls, behind a
-          disclosure so they never crowd the backlog. On an EMPTY backlog the
-          chooser is the empty state itself (below). Offered only for a workbench
-          Project (startProject present) — the verbs reuse workbench machinery. */}
-      {startProject &&
+      {/* Primary controls (mock: one prominent row) — ＋ Start something on the
+          left; the run controls (max-concurrent cap, Drain, Merge) grouped on the
+          right so the highest-consequence actions read the easiest (story 36).
+          Each piece keeps its own guard, so a legacy Project (no startProject)
+          shows just the run controls, and an uncontrolled Map shows none. */}
+      {resolvedPath !== null &&
+        (onDrain ||
+          onMerge ||
+          (startProject && backlog && backlog.issues.length > 0)) && (
+          <div className="map__controls">
+            {/* ＋ Start something (issue 116, ADR-0019): the two per-Project entry
+                verbs behind a disclosure so they never crowd the backlog. Only
+                for a workbench Project with a populated backlog — the empty case
+                is the chooser-as-empty-state below. */}
+            {startProject &&
+              backlog &&
+              backlog.issues.length > 0 &&
+              (onGrillFeature || onQuickFixRunNow) && (
+                <button
+                  className={`map__start-toggle${startOpen ? ' map__start-toggle--open' : ''}`}
+                  onClick={() => setStartOpen((v) => !v)}
+                  aria-expanded={startOpen}
+                  title="Start something in this project: grill a feature, or add a simple issue"
+                >
+                  ＋ Start something
+                </button>
+              )}
+
+            <div className="map__controls-run">
+              {onDrain && (
+                <label className="map__cap">
+                  max concurrent
+                  <input
+                    className="map__cap-input"
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={cap ?? 2}
+                    disabled={draining}
+                    onChange={(e) =>
+                      onCapChange?.(Math.max(1, Math.floor(Number(e.target.value) || 1)))
+                    }
+                  />
+                </label>
+              )}
+              {onDrain &&
+                (draining ? (
+                  <button
+                    className="map__drain map__drain--stop"
+                    onClick={() => onStopDrain?.()}
+                  >
+                    ■ Stop drain
+                  </button>
+                ) : (
+                  <button
+                    className="map__drain"
+                    onClick={() => onDrain(cap ?? 2)}
+                    disabled={midMerge || !drainGate.available}
+                    title={
+                      midMerge
+                        ? 'Blocked: main is mid-merge — resolve or abort the merge first'
+                        : (drainGate.reason ??
+                          'Drain the backlog, starting eligible Runs up to the cap')
+                    }
+                  >
+                    ▶▶ Drain backlog
+                  </button>
+                ))}
+              {onMerge && (mergeReady || merging) && (
+                <button
+                  className="map__merge"
+                  onClick={() => onMerge()}
+                  disabled={merging || !mergeReady}
+                  title="Merge finished parallel Runs into main"
+                >
+                  {merging ? 'Merging…' : `↕ Merge ready · ${mergeCount ?? 0}`}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+      {/* ＋ Start something expansion (issue 116): the grill / simple-issue verbs
+          (or the quick-fix form) drop below the controls when opened. */}
+      {startOpen &&
+        startProject &&
         resolvedPath !== null &&
         backlog &&
         backlog.issues.length > 0 &&
         (onGrillFeature || onQuickFixRunNow) && (
-          <div className="map__startbar">
-            <button
-              className="map__start-toggle"
-              onClick={() => setStartOpen((v) => !v)}
-              aria-expanded={startOpen}
-              title="Start something in this project: grill a feature, or add a simple issue"
-            >
-              ＋ Start something
-            </button>
-            {startOpen && (
-              <StartSomething
-                project={startProject}
-                onGrill={(p) => onGrillFeature?.(p)}
-                onRunNow={(p, issue) => onQuickFixRunNow?.(p, issue)}
-              />
+          <div className="map__startpanel">
+            <StartSomething
+              project={startProject}
+              onGrill={(p) => onGrillFeature?.(p)}
+              onRunNow={(p, issue) => onQuickFixRunNow?.(p, issue)}
+            />
+          </div>
+        )}
+
+      {/* Drain status (issue 90): while draining, what it's doing; when idle, the
+          truthful reason the control is disabled — never a dead click. */}
+      {onDrain &&
+        resolvedPath !== null &&
+        (draining ||
+          (!midMerge && drainGate.reason) ||
+          (drainMessage && drainMessage !== drainGate.reason)) && (
+          <div className="map__notes">
+            {draining && (
+              <span className="map__note">
+                draining… starting eligible Runs up to {cap ?? 2}
+              </span>
+            )}
+            {!draining && !midMerge && drainGate.reason && (
+              <span className="map__note map__note--muted">{drainGate.reason}</span>
+            )}
+            {!draining && drainMessage && drainMessage !== drainGate.reason && (
+              <span className="map__note map__note--muted">{drainMessage}</span>
             )}
           </div>
         )}
 
-      {/* Merge-preview degradation note (issue 104, ADR-0018): when git is below
-          the 2.38 floor there are no badges anywhere, just this one passive
-          line naming the version floor. No fallback merge machinery. */}
-      {previewNote && resolvedPath !== null && (
-        <div className="map__preview-note" title={previewNote}>
-          {previewNote}
-        </div>
-      )}
-
-      {/* Mid-merge banner (issue 24): a partial afk-merge.sh conflict left `main`
-          with earlier slugs merged and a later one conflicted, so `main` is
-          mid-merge. New Runs/Drain are blocked until this clears; Abort runs
-          `git merge --abort` to return `main` to a clean state (no manual git),
-          keeping the already-merged slugs. */}
+      {/* Mid-merge banner (issue 24): main is mid-merge; new Runs/Drain are paused
+          until the human resolves or aborts. The most consequential state, so it
+          reads as a prominent alert (story 36). */}
       {midMerge && resolvedPath !== null && (
-        <div className="map__midmerge">
-          <span className="map__midmerge-text">
+        <div className="map__alert">
+          <span className="map__alert-text">
             main is mid-merge — a merge stopped on a conflict with some branches
             already integrated. Resolve the conflict and commit, or abort to return
             main to a clean state. New Runs and Drain are paused until then.
           </span>
           {onAbortMerge && (
             <button
-              className="map__midmerge-abort"
+              className="map__alert-action"
               onClick={() => onAbortMerge()}
               disabled={aborting}
               title="Run git merge --abort to return main to a clean state (already-merged branches stay merged)"
@@ -541,57 +616,25 @@ export function Map({
         </div>
       )}
 
-      {onDrain && resolvedPath !== null && (
-        <div className="map__drainbar">
-          <label className="map__cap">
-            max concurrent
-            <input
-              className="map__cap-input"
-              type="number"
-              min={1}
-              step={1}
-              value={cap ?? 2}
-              disabled={draining}
-              onChange={(e) => onCapChange?.(Math.max(1, Math.floor(Number(e.target.value) || 1)))}
-            />
-          </label>
-          {draining ? (
-            <button className="map__drain map__drain--stop" onClick={() => onStopDrain?.()}>
-              ■ Stop drain
-            </button>
-          ) : (
-            <button
-              className="map__drain"
-              onClick={() => onDrain(cap ?? 2)}
-              disabled={midMerge || !drainGate.available}
-              title={
-                midMerge
-                  ? 'Blocked: main is mid-merge — resolve or abort the merge first'
-                  : (drainGate.reason ??
-                    'Drain the backlog, starting eligible Runs up to the cap')
-              }
-            >
-              ▶▶ Drain backlog
-            </button>
-          )}
-          {draining && <span className="map__drain-state">draining… starting eligible Runs up to {cap ?? 2}</span>}
-          {/* The truthful reason the Drain control is disabled (issue 90):
-              empty backlog / nothing the drain could start or unblock. Shown
-              inline so it's never a dead click. */}
-          {!draining && !midMerge && drainGate.reason && (
-            <span className="map__drain-state map__drain-state--stopped">{drainGate.reason}</span>
-          )}
-          {!draining && drainMessage && drainMessage !== drainGate.reason && (
-            <span className="map__drain-state map__drain-state--stopped">{drainMessage}</span>
+      {/* Merge outcome (issue 17): the tone-coded headline plus, on a
+          failure/conflict, the script's verbatim output in a collapsible panel. */}
+      {onMerge && resolvedPath !== null && mergeDisplay && (
+        <div className="map__mergeout">
+          <span className={`map__merge-state map__merge-state--${mergeDisplay.tone}`}>
+            {mergeDisplay.headline}
+          </span>
+          {mergeDisplay.showOutput && mergeDisplay.output && (
+            <details className="map__merge-details" open>
+              <summary className="map__merge-details-summary">Merge output</summary>
+              <pre className="map__merge-output">{mergeDisplay.output}</pre>
+            </details>
           )}
         </div>
       )}
 
-      {/* Planned repos (issue 96, ADR-0017): repos declared in the CONFIG whose
-          directory doesn't exist yet (planning-first). Shown grayed so the
-          intended codebase shape is visible before any code exists; each turns
-          real (leaves this bar, ungrays its issues) once its directory appears
-          and is registered (issue 95). */}
+      {/* Planned repos (issue 96, ADR-0017): declared-but-absent repos, grayed to
+          read as intended-not-yet-real; each leaves this bar once its directory
+          appears and is registered. */}
       {resolvedPath !== null && plannedRepos && plannedRepos.length > 0 && (
         <div className="map__plannedbar">
           <span className="map__planned-label">
@@ -610,49 +653,9 @@ export function Map({
         </div>
       )}
 
-      {/* Merge (issue 08, ADR-0002): appears once the parallel Runs have
-          finished, integrates their branches into main, and is ALWAYS
-          human-triggered — clicking it is the only thing that starts a merge. */}
-      {onMerge && resolvedPath !== null && (mergeReady || merging || mergeDisplay) && (
-        <div className="map__mergebar">
-          <div className="map__mergebar-row">
-            {(mergeReady || merging) && (
-              <button
-                className="map__merge"
-                onClick={() => onMerge()}
-                disabled={merging || !mergeReady}
-                title="Merge finished parallel Runs into main"
-              >
-                {merging
-                  ? 'Merging…'
-                  : `⤵ Merge ${mergeCount ?? 0} finished Run${mergeCount === 1 ? '' : 's'} into main`}
-              </button>
-            )}
-            {mergeDisplay && (
-              <span className={`map__merge-state map__merge-state--${mergeDisplay.tone}`}>
-                {mergeDisplay.headline}
-              </span>
-            )}
-          </div>
-          {/* The "see details below" below (issue 17): the script's verbatim
-              output on a failure/conflict, in a scrollable, collapsible panel.
-              Open by default so the detail is visible without a click; the user
-              can fold it away once read. */}
-          {mergeDisplay?.showOutput && mergeDisplay.output && (
-            <details className="map__merge-details" open>
-              <summary className="map__merge-details-summary">Merge output</summary>
-              <pre className="map__merge-output">{mergeDisplay.output}</pre>
-            </details>
-          )}
-        </div>
-      )}
-
-      {/* Stranded / commit-failed Runs (issue 22): a blocked/stopped/commit-failed
-          isolated Run can never merge as-is and, before this, its worktree read
-          `running` forever and suppressed the batch Merge. This bar is derived
-          from the on-disk scan (so it survives closing every Pane) and offers a
-          Discard — force-remove the worktree + delete the branch — so the batch
-          can proceed. */}
+      {/* Stranded / commit-failed Runs (issue 22): can never merge as-is; each
+          offers a Discard so the batch can proceed. Derived from the on-disk scan
+          so it survives closing every Pane. */}
       {onDiscard &&
         resolvedPath !== null &&
         backlog &&
@@ -667,11 +670,9 @@ export function Map({
                 const failed = commitFailedSet.has(i.id);
                 return (
                   <span key={i.id} className="map__stranded-item">
-                    <span
-                      className={`run-badge run-badge--${failed ? 'commit-failed' : 'stranded'}`}
-                    >
+                    <Badge tone="red">
                       {String(i.id).padStart(2, '0')} {failed ? 'commit failed' : 'stranded'}
-                    </span>
+                    </Badge>
                     <button
                       className="map__discard"
                       title="Force-remove this Run's worktree and afk/ branch"
@@ -685,24 +686,28 @@ export function Map({
           </div>
         )}
 
-      {/* Empty state (issue 14): a Window driven by the Project Registry with no
-          active Project opens NOTHING — it does not silently claim the backend
-          cwd. Prompt the user to open or choose a Project via the ProjectBar. */}
+      {/* Merge-preview degradation note (issue 104, ADR-0018): git < 2.38 — one
+          passive line naming the version floor, no fallback merge machinery. */}
+      {previewNote && resolvedPath !== null && (
+        <div className="map__preview-note" title={previewNote}>
+          {previewNote}
+        </div>
+      )}
+
+      {/* Empty state (issue 14): a Registry-driven Window with no active Project
+          opens NOTHING — prompt the user to open or choose one. */}
       {controlled && controlledPath == null && (
         <div className="map__no-project">
-          No Project open. Enter a repo path in the bar above and click{' '}
-          <strong>Open here</strong>, choose one from the Project switcher, or
+          No Project open. Choose one from the Project switcher in the header, or
           open a repo in a new Window.
         </div>
       )}
 
       {error && <div className="map__error">Could not read backlog: {error}</div>}
 
-      {/* Live "what can I Run right now" guidance (issue 11): derived every
-          render from the current backlog via the same eligibility source of
-          truth the rows use, so it never points at a stale issue number. When
-          nothing is eligible it states why (blocked-on / all done-wip) instead
-          of implying a Run action that isn't there. */}
+      {/* Live "what can I Run right now" guidance (issue 11): the eligibility
+          banner, derived every render from the same source of truth the rows use,
+          so it never points at a stale issue number. */}
       {backlog && (
         <RunGuidanceBanner
           issues={backlog.issues}
@@ -711,17 +716,8 @@ export function Map({
         />
       )}
 
-      {/* Run-log feed (issue 34): a scannable card per finished Run, parsed from
-          its Completion block and loaded from the per-Project on-disk Run log —
-          so it survives closing the Run's Pane, and persists across restarts. */}
-      {resolvedPath !== null && runLog && runLog.length > 0 && (
-        <RunLogFeed records={runLog} onSelect={(id) => id !== null && setSelectedId(id)} />
-      )}
-
-      {/* Empty state IS the chooser (issue 116, ADR-0019): a workbench Project
-          with an empty backlog leads with the two verbs instead of a passive
-          "nothing here" line. For a legacy Project (no startProject) the list's
-          "No issues found" message stands in below. */}
+      {/* Empty-backlog chooser (issue 116, ADR-0019): a workbench Project with an
+          empty backlog leads with the two verbs instead of a passive line. */}
       {startProject &&
         resolvedPath !== null &&
         backlog &&
@@ -737,214 +733,177 @@ export function Map({
           </div>
         )}
 
-      <div className="map__split">
-        <ul className="map__list">
-          {displayIssues.map((issue) => (
-            <IssueRow
-              key={issue.id}
-              issue={issue}
-              selected={issue.id === selectedId}
-              planned={plannedIssueSet.has(issue.id)}
-              running={activeRunSet.has(issue.id)}
-              previewVerdict={previewByIssueId[issue.id] ?? null}
-              worktreeRun={
-                finishedUnmergedSet.has(issue.id)
-                  ? 'finished-unmerged'
-                  : commitFailedSet.has(issue.id)
-                    ? 'commit-failed'
-                    : strandedSet.has(issue.id)
-                      ? 'stranded'
-                      : worktreeRunningSet.has(issue.id)
-                        ? 'running'
-                        : null
-              }
-              state={deriveIssueState(issue, backlog!.issues)}
-              onSelect={() => setSelectedId(issue.id)}
-              onRun={
-                onRun && resolvedPath !== null && !midMerge
-                  ? () =>
-                      onRun({
-                        issueId: issue.id,
-                        issueFileName: issue.fileName,
-                        issueTitle: issue.title,
-                        projectPath: resolvedPath,
-                      })
-                  : undefined
-              }
-            />
-          ))}
-          {backlog && backlog.issues.length === 0 && !startProject && (
-            <li className="map__empty">No issues found in this backlog.</li>
+      {/* Backlog (mock: single column, collapsible) — clear status/dependency/
+          blocker hierarchy per row (story 34); the selected row expands in place
+          to its full detail. */}
+      <details className="map__section" open>
+        <summary className="map__section-summary">
+          <span className="map__section-title">Backlog</span>
+          {backlog && (
+            <span className="map__section-count">
+              {backlog.issues.length} issue{backlog.issues.length === 1 ? '' : 's'}
+            </span>
           )}
-        </ul>
-
-        <div className="map__detail">
-          {selected ? (
-            <>
-              <div className="map__detail-head">
-                <StatusBadge status={selected.status} />
-                <span className="issue__title">{selected.title}</span>
-                {selected.hitl && <span className="badge badge--hitl">HITL</span>}
-                <span className={`badge badge--${classKind(selected)}`}>
-                  {kindLabel(selected)}
-                </span>
-                {activeRunSet.has(selected.id) ? (
-                  <span className="run-badge run-badge--active">Run in progress</span>
-                ) : worktreeRunningSet.has(selected.id) ? (
-                  <span className="run-badge run-badge--active">Run in progress</span>
-                ) : finishedUnmergedSet.has(selected.id) ? (
-                  <span className="run-badge run-badge--finished-unmerged">
-                    finished (unmerged)
-                  </span>
-                ) : commitFailedSet.has(selected.id) ? (
-                  <span className="run-badge run-badge--commit-failed">commit failed</span>
-                ) : strandedSet.has(selected.id) ? (
-                  <span className="run-badge run-badge--stranded">stranded</span>
-                ) : plannedIssueSet.has(selected.id) ? (
-                  <span
-                    className="run-badge run-badge--planned"
-                    title="Targets a planned repo — declared but not yet created; can't run until it exists"
-                  >
-                    planned
-                  </span>
-                ) : (
-                  backlog &&
-                  onRun &&
-                  !midMerge &&
-                  runnableNow(selected, backlog.issues, inFlight) && (
-                    <button
-                      className="run-btn"
-                      onClick={() =>
+        </summary>
+        <ul className="map__list">
+          {displayIssues.flatMap((issue) => {
+            const row = (
+              <IssueRow
+                key={issue.id}
+                issue={issue}
+                selected={issue.id === selectedId}
+                planned={plannedIssueSet.has(issue.id)}
+                running={activeRunSet.has(issue.id)}
+                previewVerdict={previewByIssueId[issue.id] ?? null}
+                worktreeRun={
+                  finishedUnmergedSet.has(issue.id)
+                    ? 'finished-unmerged'
+                    : commitFailedSet.has(issue.id)
+                      ? 'commit-failed'
+                      : strandedSet.has(issue.id)
+                        ? 'stranded'
+                        : worktreeRunningSet.has(issue.id)
+                          ? 'running'
+                          : null
+                }
+                state={deriveIssueState(issue, backlog!.issues)}
+                onSelect={() =>
+                  setSelectedId((cur) => (cur === issue.id ? null : issue.id))
+                }
+                onRun={
+                  onRun && resolvedPath !== null && !midMerge
+                    ? () =>
                         onRun({
-                          issueId: selected.id,
-                          issueFileName: selected.fileName,
-                          issueTitle: selected.title,
-                          projectPath: resolvedPath ?? '',
+                          issueId: issue.id,
+                          issueFileName: issue.fileName,
+                          issueTitle: issue.title,
+                          projectPath: resolvedPath,
                         })
-                      }
+                    : undefined
+                }
+              />
+            );
+            if (issue.id !== selectedId || !backlog) return [row];
+            // Inline detail: the selected row expands in place (single-column
+            // mock) to its dependency detail, the issue-file Edit/Delete ops, and
+            // the full body/editor. Actions operate on `selected` (=== this row).
+            return [
+              row,
+              <li key={`${issue.id}-detail`} className="map__detail">
+                <DependencySection issue={issue} issues={backlog.issues} />
+
+                {/* Edit / Delete (issue 89): the Map's one write exception —
+                    issue FILES only. Edit is a raw editor over the whole file
+                    (frontmatter + body), saved verbatim once the real backlog
+                    parser accepts it; Delete is refused for wip (the flip is a
+                    claim) and puts done behind an explicit "delete anyway". */}
+                {resolvedPath !== null && !editing && (
+                  <div className="map__issue-ops">
+                    <button
+                      className="map__issue-op"
+                      onClick={() => void startEdit()}
+                      disabled={issueOpBusy}
+                      title="Edit this issue file (raw text: frontmatter + body)"
                     >
-                      ▶ Run
+                      ✎ Edit
                     </button>
-                  )
+                    {(() => {
+                      const refusal = deleteRefusal(issue.status);
+                      return (
+                        <button
+                          className="map__issue-op map__issue-op--delete"
+                          onClick={() => {
+                            setIssueOpError(null);
+                            setConfirmingDelete(true);
+                          }}
+                          disabled={issueOpBusy || confirmingDelete || refusal !== null}
+                          title={refusal ?? `Delete ${issue.fileName}`}
+                        >
+                          🗑 Delete
+                        </button>
+                      );
+                    })()}
+                  </div>
                 )}
-                {(strandedSet.has(selected.id) || commitFailedSet.has(selected.id)) &&
-                  onDiscard && (
+
+                {confirmingDelete && !editing && (
+                  <div className="map__delete-confirm">
+                    <span className="map__delete-confirm-text">
+                      Delete <code>{issue.fileName}</code>?
+                      {issue.status === 'done'
+                        ? ' This issue is done — its Receipt and history survive in git, but the file goes.'
+                        : ' This removes the issue from the backlog.'}
+                    </span>
                     <button
-                      className="map__discard map__discard--detail"
-                      title="Force-remove this Run's worktree and afk/ branch"
-                      onClick={() => onDiscard(selected.fileName.replace(/\.md$/, ''), selected.id)}
-                    >
-                      Discard
-                    </button>
-                  )}
-              </div>
-              {backlog && (
-                <DependencySection issue={selected} issues={backlog.issues} />
-              )}
-
-              {/* Edit / Delete (issue 89): the Map's one write exception —
-                  issue FILES only. Edit is a raw editor over the whole file
-                  (frontmatter + body), saved back verbatim after the real
-                  backlog parser accepts it; Delete is refused for wip (the
-                  flip is a claim — someone owns it) and puts done behind an
-                  explicit "delete anyway". */}
-              {resolvedPath !== null && !editing && (
-                <div className="map__issue-ops">
-                  <button
-                    className="map__issue-op"
-                    onClick={() => void startEdit()}
-                    disabled={issueOpBusy}
-                    title="Edit this issue file (raw text: frontmatter + body)"
-                  >
-                    ✎ Edit
-                  </button>
-                  {(() => {
-                    const refusal = deleteRefusal(selected.status);
-                    return (
-                      <button
-                        className="map__issue-op map__issue-op--delete"
-                        onClick={() => {
-                          setIssueOpError(null);
-                          setConfirmingDelete(true);
-                        }}
-                        disabled={issueOpBusy || confirmingDelete || refusal !== null}
-                        title={refusal ?? `Delete ${selected.fileName}`}
-                      >
-                        🗑 Delete
-                      </button>
-                    );
-                  })()}
-                </div>
-              )}
-
-              {confirmingDelete && !editing && (
-                <div className="map__delete-confirm">
-                  <span className="map__delete-confirm-text">
-                    Delete <code>{selected.fileName}</code>?
-                    {selected.status === 'done'
-                      ? ' This issue is done — its Receipt and history survive in git, but the file goes.'
-                      : ' This removes the issue from the backlog.'}
-                  </span>
-                  <button
-                    className="map__issue-op map__issue-op--delete"
-                    onClick={() => void confirmDelete()}
-                    disabled={issueOpBusy}
-                  >
-                    {selected.status === 'done' ? 'Delete anyway' : 'Delete file'}
-                  </button>
-                  <button
-                    className="map__issue-op"
-                    onClick={() => setConfirmingDelete(false)}
-                    disabled={issueOpBusy}
-                  >
-                    Cancel
-                  </button>
-                </div>
-              )}
-
-              {issueOpError && <div className="map__issue-op-error">{issueOpError}</div>}
-
-              {editing ? (
-                <div className="issue-editor">
-                  <textarea
-                    className="issue-editor__textarea"
-                    value={draft}
-                    onChange={(e) => setDraft(e.target.value)}
-                    spellCheck={false}
-                  />
-                  <div className="issue-editor__row">
-                    <button
-                      className="map__issue-op map__issue-op--save"
-                      onClick={() => void saveEdit()}
+                      className="map__issue-op map__issue-op--delete"
+                      onClick={() => void confirmDelete()}
                       disabled={issueOpBusy}
                     >
-                      {issueOpBusy ? 'Saving…' : 'Save'}
+                      {issue.status === 'done' ? 'Delete anyway' : 'Delete file'}
                     </button>
                     <button
                       className="map__issue-op"
-                      onClick={() => {
-                        setEditing(false);
-                        setDraft('');
-                        setIssueOpError(null);
-                      }}
+                      onClick={() => setConfirmingDelete(false)}
                       disabled={issueOpBusy}
                     >
                       Cancel
                     </button>
-                    <span className="issue-editor__hint">
-                      Saved verbatim once it parses (status: open | wip | done).
-                    </span>
                   </div>
-                </div>
-              ) : (
-                <pre className="issue__body">{selected.body}</pre>
-              )}
-            </>
-          ) : (
-            <div className="map__detail-empty">Select an issue to see its full body.</div>
+                )}
+
+                {issueOpError && <div className="map__issue-op-error">{issueOpError}</div>}
+
+                {editing ? (
+                  <div className="issue-editor">
+                    <textarea
+                      className="issue-editor__textarea"
+                      value={draft}
+                      onChange={(e) => setDraft(e.target.value)}
+                      spellCheck={false}
+                    />
+                    <div className="issue-editor__row">
+                      <button
+                        className="map__issue-op map__issue-op--save"
+                        onClick={() => void saveEdit()}
+                        disabled={issueOpBusy}
+                      >
+                        {issueOpBusy ? 'Saving…' : 'Save'}
+                      </button>
+                      <button
+                        className="map__issue-op"
+                        onClick={() => {
+                          setEditing(false);
+                          setDraft('');
+                          setIssueOpError(null);
+                        }}
+                        disabled={issueOpBusy}
+                      >
+                        Cancel
+                      </button>
+                      <span className="issue-editor__hint">
+                        Saved verbatim once it parses (status: open | wip | done).
+                      </span>
+                    </div>
+                  </div>
+                ) : (
+                  <pre className="issue__body">{issue.body}</pre>
+                )}
+              </li>,
+            ];
+          })}
+          {backlog && backlog.issues.length === 0 && !startProject && (
+            <li className="map__empty">No issues found in this backlog.</li>
           )}
-        </div>
-      </div>
+        </ul>
+      </details>
+
+      {/* Run-log feed (issue 34): a scannable entry per finished Run, parsed from
+          its Completion block, loaded from the per-Project on-disk Run log — so
+          it survives closing the Run's Pane and persists across restarts. Below
+          the backlog, per the approved mock. */}
+      {resolvedPath !== null && runLog && runLog.length > 0 && (
+        <RunLogFeed records={runLog} onSelect={(id) => id !== null && setSelectedId(id)} />
+      )}
     </div>
   );
 }
@@ -1066,6 +1025,21 @@ function outcomeLabel(outcome: RunLogRecord['outcome']): string {
   }
 }
 
+/** The shared-Badge tone for a Run outcome (issue 127: run-log on the Badge
+ *  primitive) — completed reads green, needs-verification amber, blocked red. */
+function outcomeTone(outcome: RunLogRecord['outcome']): BadgeTone {
+  switch (outcome) {
+    case 'completed':
+      return 'green';
+    case 'needs-verification':
+      return 'amber';
+    case 'blocked':
+      return 'red';
+    default:
+      return 'neutral';
+  }
+}
+
 /** One captured Completion block as a card, showing only its present fields. */
 function RunLogCard({
   record,
@@ -1094,9 +1068,7 @@ function RunLogCard({
   return (
     <li className="runlog-card" onClick={onSelect} title="Show this issue in the backlog">
       <div className="runlog-card__head">
-        <span className={`runlog-badge runlog-badge--${record.outcome}`}>
-          {outcomeLabel(record.outcome)}
-        </span>
+        <Badge tone={outcomeTone(record.outcome)}>{outcomeLabel(record.outcome)}</Badge>
         <span className="runlog-card__id">{idLabel}</span>
         <span className="runlog-card__title">{heading}</span>
         <span className="runlog-card__time">
@@ -1142,20 +1114,31 @@ function RunGuidanceBanner({
   const eligible = guidance.kind === 'eligible';
   return (
     <div className={`map__guidance map__guidance--${eligible ? 'eligible' : 'none'}`}>
-      <span className="map__guidance-text">{describeRunGuidance(guidance)}</span>
-      {guidance.kind === 'eligible' && (
-        <span className="map__guidance-chips">
-          {guidance.runnable.map((r) => (
-            <button
-              key={r.id}
-              className="map__guidance-chip"
-              title={`Show ${stripId(r.title)}`}
-              onClick={() => onSelect(r.id)}
-            >
-              {String(r.id).padStart(2, '0')}
-            </button>
-          ))}
-        </span>
+      {guidance.kind === 'eligible' ? (
+        <>
+          {/* Mock: "● You can Run 1 issue right now  #123 ready". The runnable
+              ids ride as clickable ready-chips (they select the row where the
+              Run button lives), so the sentence stays short — describeRunGuidance
+              still owns the blocked/settled/empty phrasings below. */}
+          <span className="map__guidance-text">
+            You can Run <strong>{guidance.runnable.length}</strong>{' '}
+            {guidance.runnable.length === 1 ? 'issue' : 'issues'} right now
+          </span>
+          <span className="map__guidance-chips">
+            {guidance.runnable.map((r) => (
+              <button
+                key={r.id}
+                className="map__guidance-chip"
+                title={`Show ${stripId(r.title)}`}
+                onClick={() => onSelect(r.id)}
+              >
+                #{String(r.id).padStart(2, '0')} ready
+              </button>
+            ))}
+          </span>
+        </>
+      ) : (
+        <span className="map__guidance-text">{describeRunGuidance(guidance)}</span>
       )}
     </div>
   );
@@ -1207,66 +1190,85 @@ function IssueRow({
   // A planned-repo issue can never start until its repo is created — treat it
   // like a worked row for Run-affordance purposes so no Run button shows.
   const worked = worktreeRun !== null || running || planned;
+  const unmet = state.kind === 'blocked' ? state.unmet : [];
   return (
     <li
       className={`issue${selected ? ' issue--selected' : ''}${planned ? ' issue--planned' : ''}`}
       onClick={onSelect}
     >
-      <StatusBadge status={issue.status} />
+      {/* Leading status dot (approved mock): the at-a-glance readiness signal —
+          red blocked, teal ready, green done, amber wip, violet awaiting-merge —
+          so the backlog's state reads down the left edge without parsing badges. */}
+      <StatusDot
+        tone={rowDotTone(state, worktreeRun, running, planned)}
+        label={rowDotLabel(state, worktreeRun, running, planned)}
+      />
       <span className="issue__id">{String(issue.id).padStart(2, '0')}</span>
       <span className="issue__title">{stripId(issue.title)}</span>
       <span className="issue__tags">
-        {issue.hitl && <span className="badge badge--hitl">HITL</span>}
-        <span className={`badge badge--${classKind(issue)}`}>{kindLabel(issue)}</span>
+        {/* Every signal on the shared Badge primitive (issue 127, ADR-0020) so
+            the Map reads consistently with the rest of the app in both themes. */}
+        {issue.hitl && <Badge tone="amber">HITL</Badge>}
+        <Badge tone={kindTone(issue)}>{kindLabel(issue)}</Badge>
         {planned && (
-          <span
-            className="badge badge--planned"
+          <Badge
+            tone="neutral"
             title="Targets a planned repo — declared but not yet created; can't run until it exists"
           >
             planned
+          </Badge>
+        )}
+        {/* Compact dependency signal (mock: "✕ 122"): the unmet blockers, so
+            "what is this waiting on" is answerable without opening the row. */}
+        {unmet.length > 0 && (
+          <span
+            className="issue__deps"
+            title={`Blocked: waiting on ${unmet.map((d) => depLabel(d)).join(', ')}`}
+          >
+            ✕ {unmet.map((d) => String(d.id).padStart(2, '0')).join(', ')}
           </span>
         )}
+        {state.kind === 'done' && <Badge tone="green">done</Badge>}
+        {state.kind === 'wip' && <Badge tone="amber">wip</Badge>}
         {state.kind === 'blocked' && (
-          <span
-            className="badge badge--blocked"
+          <Badge
+            tone="red"
             title={`Blocked: waiting on ${state.unmet.map((d) => depLabel(d)).join(', ')}`}
           >
             blocked
-          </span>
+          </Badge>
         )}
-        {state.kind === 'eligible' && !worked && (
-          <span className="badge badge--eligible">eligible</span>
-        )}
+        {state.kind === 'eligible' && !worked && <Badge tone="teal">ready</Badge>}
         {worktreeRun === 'finished-unmerged' ? (
           <>
-            <span
-              className="run-badge run-badge--finished-unmerged"
+            <Badge
+              tone="violet"
               title="This Run's work is committed on its afk/ branch but not yet merged into main"
             >
               finished (unmerged)
-            </span>
+            </Badge>
             {/* Merge preview (issues 104 & 105): advisory — the branch's verdict
                 in the full sequential merge (clean / conflicts / blocked behind
                 NN), without pressing Merge. */}
             {previewVerdict && <MergePreviewBadge verdict={previewVerdict} />}
           </>
         ) : worktreeRun === 'commit-failed' ? (
-          <span
-            className="run-badge run-badge--commit-failed"
+          <Badge
+            tone="red"
             title="This Run finished but its work could not be committed to the afk/ branch — discard it from the bar above"
           >
             commit failed
-          </span>
+          </Badge>
         ) : worktreeRun === 'stranded' ? (
-          <span
-            className="run-badge run-badge--stranded"
+          <Badge
+            tone="amber"
             title="This Run ended without committing done; its worktree is stranded — discard it from the bar above"
           >
             stranded
-          </span>
+          </Badge>
         ) : worktreeRun === 'running' || running ? (
-          <span
-            className="run-badge run-badge--active"
+          <Badge
+            tone="teal"
             title={
               worktreeRun === 'running'
                 ? 'A Run is live in this issue’s worktree'
@@ -1274,7 +1276,7 @@ function IssueRow({
             }
           >
             running{worktreeRun === 'running' ? ' (in-worktree)' : ''}
-          </span>
+          </Badge>
         ) : (
           state.kind === 'eligible' &&
           !planned &&
@@ -1326,14 +1328,14 @@ function DependencySection({
             const dep = issues.find((i) => i.id === depId);
             const met = dep?.status === 'done';
             return (
-              <span
+              <Badge
                 key={depId}
-                className={`dep-chip ${met ? 'dep-chip--met' : 'dep-chip--unmet'}`}
+                tone={met ? 'green' : 'amber'}
                 title={dep ? dep.title : 'missing from backlog'}
               >
                 {met ? '✓' : '○'} {String(depId).padStart(2, '0')}
                 {dep ? ` (${dep.status})` : ' (missing)'}
-              </span>
+              </Badge>
             );
           })}
         </div>
@@ -1342,9 +1344,9 @@ function DependencySection({
         <div className="map__edges">
           <span className="map__edges-label">blocks</span>
           {downstream.map((id) => (
-            <span key={id} className="dep-chip dep-chip--down">
+            <Badge key={id} tone="teal">
               {String(id).padStart(2, '0')}
-            </span>
+            </Badge>
           ))}
         </div>
       )}
@@ -1359,8 +1361,65 @@ function depLabel(dep: UnmetDependency): string {
   return `${id}${title} (${dep.status})`;
 }
 
-function StatusBadge({ status }: { status: BacklogIssue['status'] }): JSX.Element {
-  return <span className={`status status--${status}`}>{status}</span>;
+type WorktreeRunState = 'running' | 'stranded' | 'commit-failed' | 'finished-unmerged' | null;
+
+/**
+ * The leading status dot (issue 127, approved mock): a small filled circle whose
+ * tone is the row's derived readiness — so the backlog's shape reads down the
+ * left edge at a glance. The textual state still rides a Badge to its right.
+ */
+function StatusDot({ tone, label }: { tone: BadgeTone; label: string }): JSX.Element {
+  return <span className={`issue__dot issue__dot--${tone}`} title={label} aria-label={label} />;
+}
+
+/** The dot tone for a row: worktree-Run state wins over the main-checkout state
+ *  (a live / awaiting-merge Run never reads as plain open), else the derived
+ *  state — red blocked, teal ready, green done, amber wip, violet unmerged. */
+function rowDotTone(
+  state: IssueMapState,
+  worktreeRun: WorktreeRunState,
+  running: boolean,
+  planned: boolean,
+): BadgeTone {
+  if (planned) return 'neutral';
+  if (worktreeRun === 'stranded') return 'amber';
+  if (worktreeRun === 'commit-failed') return 'red';
+  if (worktreeRun === 'finished-unmerged') return 'violet';
+  if (worktreeRun === 'running' || running) return 'teal';
+  switch (state.kind) {
+    case 'done':
+      return 'green';
+    case 'wip':
+      return 'amber';
+    case 'eligible':
+      return 'teal';
+    case 'blocked':
+      return 'red';
+  }
+}
+
+/** A short human label for the dot's tooltip, mirroring its tone. */
+function rowDotLabel(
+  state: IssueMapState,
+  worktreeRun: WorktreeRunState,
+  running: boolean,
+  planned: boolean,
+): string {
+  if (planned) return 'planned repo — not yet runnable';
+  if (worktreeRun === 'stranded') return 'stranded Run';
+  if (worktreeRun === 'commit-failed') return 'commit failed';
+  if (worktreeRun === 'finished-unmerged') return 'finished (unmerged)';
+  if (worktreeRun === 'running' || running) return 'running';
+  switch (state.kind) {
+    case 'done':
+      return 'done';
+    case 'wip':
+      return 'wip';
+    case 'eligible':
+      return 'ready to Run';
+    case 'blocked':
+      return 'blocked';
+  }
 }
 
 /**
@@ -1375,17 +1434,35 @@ function StatusBadge({ status }: { status: BacklogIssue['status'] }): JSX.Elemen
 function MergePreviewBadge({ verdict }: { verdict: MergePreviewVerdict }): JSX.Element {
   const badge = previewBadge(verdict);
   return (
-    <span className={`run-badge run-badge--preview-${badge.tone}`} title={badge.title}>
+    <Badge tone={previewTone(badge.tone)} title={badge.title}>
       {badge.label}
-    </span>
+    </Badge>
   );
 }
 
-/** in-batch | standalone | out-of-batch — for the tag class + label. */
-function classKind(issue: BacklogIssue): 'inbatch' | 'standalone' | 'other' {
-  if (issue.inBatch) return 'inbatch';
-  if (issue.standalone) return 'standalone';
-  return 'other';
+/** Map a merge-preview verdict tone onto a shared-Badge tone (issue 127): clean
+ *  lands green, conflicts/artifact red, blocked-behind amber (downstream), and
+ *  recalculating/suspended neutral (no live verdict). */
+function previewTone(tone: ReturnType<typeof previewBadge>['tone']): BadgeTone {
+  switch (tone) {
+    case 'clean':
+      return 'green';
+    case 'conflicts':
+    case 'artifact':
+      return 'red';
+    case 'blocked':
+      return 'amber';
+    default:
+      return 'neutral';
+  }
+}
+
+/** The shared-Badge tone for an issue's batch classification: in-batch reads
+ *  teal (part of the active feature), standalone violet, out-of-batch neutral. */
+function kindTone(issue: BacklogIssue): BadgeTone {
+  if (issue.inBatch) return 'teal';
+  if (issue.standalone) return 'violet';
+  return 'neutral';
 }
 
 function kindLabel(issue: BacklogIssue): string {

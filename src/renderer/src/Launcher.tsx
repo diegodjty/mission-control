@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import './Launcher.css';
 import type {
   AttentionSnapshot,
   LauncherProject,
@@ -12,7 +13,28 @@ import {
   type ProjectViewMode,
 } from '../../shared/launcher-model';
 import { defaultWorkspaceRoot, repoKeyFor } from '../../shared/onboarding-model';
+import { Badge, type BadgeTone, TruncatedText } from './components';
 import type { QuickFixIssueRef } from './QuickFixForm';
+
+/**
+ * The pipeline-stage badge tone (issue 128) — each stage on the shared Badge
+ * primitive, mapped to the Atlas semantic tones the approved mock uses:
+ * planning = violet, executing = amber, merge/QA = green, backlog (and any
+ * unknown) = the quiet teal default. Total: never throws on an odd stage.
+ */
+function stageTone(stage: ProjectCardView['stage']): BadgeTone {
+  switch (stage) {
+    case 'planning':
+      return 'violet';
+    case 'executing':
+      return 'amber';
+    case 'merge-qa':
+      return 'green';
+    case 'backlog':
+    default:
+      return 'teal';
+  }
+}
 
 // Re-exported so existing importers (App) keep their `./Launcher` import path.
 export type { QuickFixIssueRef };
@@ -272,6 +294,22 @@ export function Launcher({
     return map;
   }, [attention.items]);
 
+  // The grid's subtitle (issue 128, mock `launcher-cards`): the ordering is the
+  // attention-float `orderProjectCards` produces (main-process), and the total
+  // needs-you is the sum of the per-card counts — both derived here, no new
+  // signal. Named exactly what the grid does so the line can never lie about it.
+  const totalNeedsYou = useMemo(
+    () => cards.reduce((sum, c) => sum + Math.max(0, c.needsYou), 0),
+    [cards],
+  );
+  const gridSubtitle = ((): string => {
+    const projectWord = cards.length === 1 ? 'project' : 'projects';
+    const base = `Sorted by attention · ${cards.length} ${projectWord}`;
+    return totalNeedsYou > 0
+      ? `Sorted by attention · ${totalNeedsYou} need you across ${cards.length} ${projectWord}`
+      : base;
+  })();
+
   const backToMenu = (): void => {
     setMode('menu');
     setOnboardErrors([]);
@@ -374,11 +412,15 @@ export function Launcher({
                 Everything per-Project now lives on the Map's ＋ Start something
                 (issue 116). With no projects registered, the empty line still
                 leads with New project, not a blank grid. */}
-            {/* The title carries the cards⇄list toggle (issue 119). The toggle
-                only appears once there's a grid to reshape; the choice persists
-                in localStorage (cards is the default on first run). */}
+            {/* The heading carries the grid subtitle and the cards⇄list toggle
+                (issue 119). The toggle only appears once there's a grid to
+                reshape; the choice persists in localStorage (cards is the
+                default on first run). */}
             <div className="launcher__grid-head">
-              <h1 className="launcher__title">Projects</h1>
+              <div className="launcher__heading">
+                <h1 className="launcher__title">Projects</h1>
+                {cards.length > 0 && <p className="launcher__subtitle">{gridSubtitle}</p>}
+              </div>
               {cards.length > 0 && (
                 <div className="launcher__view-toggle" role="group" aria-label="Project view">
                   <button
@@ -404,10 +446,14 @@ export function Launcher({
             {cards.length === 0 ? (
               <p className="launcher__empty">No projects yet — set one up to get started.</p>
             ) : projectView === 'list' ? (
-              /* Dense list view (issue 119): one row per Project carrying the
-                 SAME fields the card shows — name, open·wip·done, needs-you,
-                 liveness, stage. A single click on the row switches in place
-                 (issue 115); the ⋯ menu is the secondary affordance. */
+              /* Dense list view (issue 119, mock `launcher-list`): one row per
+                 Project carrying the SAME signals the card shows — a leading
+                 liveness dot, the name (truncating with a tooltip when clipped),
+                 the pipeline-stage badge, open·wip·done, the needs-you badge, and
+                 the relative last-activity time. Stage / needs-you render on the
+                 shared Badge primitive (issue 123). A single click switches this
+                 Window to the Project's Map (issue 115, unchanged); the ⋯ menu is
+                 the secondary affordance. */
               <ul className="launcher__rows">
                 {cards.map((c) => (
                   <li key={c.workbenchDir} className="launcher__row-cell">
@@ -416,53 +462,76 @@ export function Launcher({
                       onClick={() => onOpenCard(c)}
                       title={`Open ${c.label}`}
                     >
-                      <span className="launcher__row-name">{c.label}</span>
+                      <span
+                        className={`launcher__row-dot${c.liveRuns > 0 ? ' launcher__row-dot--live' : ''}`}
+                        aria-hidden="true"
+                        title={c.liveRuns > 0 ? c.livenessLabel : undefined}
+                      />
+                      <TruncatedText className="launcher__row-name" text={c.label} />
+                      {c.stageLabel && (
+                        <Badge tone={stageTone(c.stage)} className="launcher__row-stage">
+                          {c.stageLabel}
+                        </Badge>
+                      )}
                       <span className="launcher__row-counts">{c.countsLabel}</span>
                       {c.needsYou > 0 && (
-                        <span
-                          className="launcher__card-needsyou"
+                        <Badge
+                          tone="amber"
+                          className="launcher__row-needsyou"
                           title={`${c.needsYou} attention item${c.needsYou === 1 ? '' : 's'} awaiting you`}
                         >
-                          {c.needsYou} needs you
-                        </span>
+                          {c.needsYou}
+                        </Badge>
                       )}
-                      <span className="launcher__row-liveness">{c.livenessLabel}</span>
-                      {c.stageLabel && <span className="launcher__card-stage">{c.stageLabel}</span>}
+                      <span className="launcher__row-activity">{c.activityLabel}</span>
                     </button>
                     {cardMenu(c)}
                   </li>
                 ))}
               </ul>
             ) : (
+              /* Card grid (issue 115/118, mock `launcher-cards`): every card on
+                 the Card primitive's glass (`.ui-card`). The header carries the
+                 name (truncating with a tooltip when clipped, issue 126) and the
+                 needs-you badge (the same count the rail + attention surface show,
+                 issue 125); the meta row the pipeline-stage badge and a live dot
+                 reading "N running" while a Run is live; the footer the relative
+                 last-activity time. Every ADR-0019 signal preserved; a single
+                 click switches this Window to the Project's Map. */
               <ul className="launcher__grid">
                 {cards.map((c) => (
                   <li key={c.workbenchDir} className="launcher__card-cell">
                     <button
-                      className="launcher__card"
+                      className="launcher__card ui-card"
                       onClick={() => onOpenCard(c)}
                       title={`Open ${c.label}`}
                     >
-                      {/* Full card stats (issue 118): the header carries the
-                          name, the pipeline-stage badge, and — when the Project
-                          has attention awaiting the human — the needs-you badge
-                          (no badge at zero; the same count the rail and the
-                          attention surface show, issue 125). The liveness line
-                          reads "N running" / a relative last-activity /
-                          "not started". */}
                       <span className="launcher__card-header">
-                        <span className="launcher__card-name">{c.label}</span>
-                        {c.stageLabel && <span className="launcher__card-stage">{c.stageLabel}</span>}
+                        <TruncatedText className="launcher__card-name" text={c.label} />
                         {c.needsYou > 0 && (
-                          <span
-                            className="launcher__card-needsyou"
+                          <Badge
+                            tone="amber"
+                            className="launcher__needsyou"
                             title={`${c.needsYou} attention item${c.needsYou === 1 ? '' : 's'} awaiting you`}
                           >
                             {c.needsYou} needs you
-                          </span>
+                          </Badge>
+                        )}
+                      </span>
+                      <span className="launcher__card-meta">
+                        {c.stageLabel && (
+                          <Badge tone={stageTone(c.stage)} className="launcher__stage-badge">
+                            {c.stageLabel}
+                          </Badge>
+                        )}
+                        {c.liveRuns > 0 && (
+                          <span className="launcher__card-live">{c.livenessLabel}</span>
                         )}
                       </span>
                       <span className="launcher__card-counts">{c.countsLabel}</span>
-                      <span className="launcher__card-activity">{c.livenessLabel}</span>
+                      <span className="launcher__card-foot">
+                        <span className="launcher__card-activity">{c.activityLabel}</span>
+                      </span>
                     </button>
                     {cardMenu(c)}
                   </li>
@@ -476,7 +545,7 @@ export function Launcher({
                 onClick={() => setMode('newproject')}
                 title="Set up a new workbench project (or register an existing repo): name + repo paths → CONFIG, registry entries, one commit"
               >
-                New project
+                <span aria-hidden="true">＋ </span>New project
               </button>
               <button
                 className="launcher__talk-link"
@@ -585,7 +654,7 @@ export function Launcher({
                     )}
                   </span>
                 ))}
-                <span className="launcher__row">
+                <span className="launcher__form-row">
                   <button
                     className="launcher__secondary"
                     onClick={() => setRepoRows((rows) => [...rows, EMPTY_ROW])}
@@ -615,7 +684,7 @@ export function Launcher({
                   ))}
                 </span>
               )}
-              <div className="launcher__row">
+              <div className="launcher__form-row">
                 <button
                   className="launcher__primary"
                   onClick={() => createProject(onboardWarnings.length > 0)}
@@ -648,7 +717,7 @@ export function Launcher({
               claimed, nothing is tracked.
             </p>
             {projectRows(onJustTalkProject, 'Talk in')}
-            <div className="launcher__row">
+            <div className="launcher__form-row">
               <button className="launcher__secondary" onClick={onJustTalkFolder}>
                 Pick a bare folder…
               </button>
