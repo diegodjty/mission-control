@@ -4,6 +4,7 @@ import {
   decideIsolationByRepo,
   decideIsolationWith,
   isolationRunSetWith,
+  runNeedsIsolation,
   reconcile,
   canFallBackToMain,
   branchFor,
@@ -177,6 +178,31 @@ describe('decideIsolationWith — the manual "▶ Run" path (issue 20)', () => {
       run(2, 'b'),
       run(4, 'd'),
     ]);
+  });
+});
+
+describe('runNeedsIsolation — the isolation-set membership rule (issue 134)', () => {
+  it('a live Run on main belongs in the set', () => {
+    // Solo but running: it is competing for the working tree right now.
+    expect(runNeedsIsolation({ live: true, isolated: false })).toBe(true);
+  });
+
+  it('a live Run in a worktree belongs in the set', () => {
+    expect(runNeedsIsolation({ live: true, isolated: true })).toBe(true);
+  });
+
+  it('a finished-unmerged Run (in a worktree) belongs in the set', () => {
+    // The documented exception: its work still lives on an unmerged afk/ branch,
+    // so its worktree must survive for the pending Merge — it stays in the set.
+    expect(runNeedsIsolation({ live: false, isolated: true })).toBe(true);
+  });
+
+  it('a terminal SOLO Run (finished/blocked/parked/stopped on main) is OUT of the set', () => {
+    // The bug this closes (issue 134): a terminal Run on `main` is done competing
+    // for the working tree and has no worktree to preserve. Feeding it in inflates
+    // concurrency and lets a finished chained Run get a spurious worktree cut that
+    // keeps `.afk-parallel` stuck on across drain rounds.
+    expect(runNeedsIsolation({ live: false, isolated: false })).toBe(false);
   });
 });
 

@@ -102,7 +102,12 @@ import { readCoreMemory, writeDrainJournal } from '../src/main/memory-files';
 import { buildRunPrompt } from '../src/main/resolve-run-command';
 import { buildDispatcherPrompt } from '../src/main/dispatcher-session';
 import { CORE_MEMORY_LABEL } from '../src/shared/workbench-memory';
-import { branchFor, decideIsolation, type IsolationRun } from '../src/shared/isolation-policy';
+import {
+  branchFor,
+  decideIsolation,
+  runNeedsIsolation,
+  type IsolationRun,
+} from '../src/shared/isolation-policy';
 import { eligibleForRun } from '../src/shared/run-eligibility';
 import {
   planDrain,
@@ -1582,6 +1587,80 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
       activeRuns: trackedRuns.map((r) => ({ issueId: r.issueId, status: r.status })),
     });
     expect(regressed.startable).toHaveLength(1);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Scenario 12 — issue 134: the drive loop must scope its isolation set to
+  // LIVE + FINISHED-UNMERGED Runs. The reported bug: it fed EVERY tracked Run in,
+  // including terminal ones lingering on screen. Once a finished CHAINED Run's
+  // dependency edge resolved (so it stops counting as chained), the unscoped set
+  // handed it a spurious worktree cut and kept `.afk-parallel` enabled round
+  // after round. This drives the SAME composition App.tsx wires — the drive
+  // loop's `needsIsolation` scoping (`runNeedsIsolation`) → soloChainedIssueIds →
+  // decideIsolation → the real applyIsolation adapter — proving the fix on disk.
+  // ---------------------------------------------------------------------------
+  it('Scenario 12 (issue 134): a finished chained Run whose edge resolved is scoped out — no spurious worktree, no .afk-parallel stuck on across rounds', async () => {
+    ingestFrom(sandbox.issuesDir);
+
+    // The 02→03 chain from a PRIOR drain round: 02 (the root) ran SOLO on main
+    // (chained) and finished. Flip it `done` on disk so its edge to 03 has now
+    // resolved — the exact state that used to un-chain 02 and expose the bug.
+    const A = sandboxIssue(2); // 02-second-step — finished, terminal, on main
+    const B = sandboxIssue(3); // 03-blocked-on-02 — now unblocked and live
+    await writeFile(join(repo, 'issues', `${A.slug}.md`), issueFileContent(A, 'done'));
+    const backlog = await readBacklog(repo);
+    const solo = soloChainedIssueIds(backlog.issues);
+    // 02 is done and 03's only dependency is satisfied → NEITHER is chained now.
+    expect(solo.has(2)).toBe(false);
+    expect(solo.has(3)).toBe(false);
+
+    // The drive loop's tracked Runs this round, reduced to the two membership
+    // facts App.tsx derives per Run (`runStatusOf === 'running'` → live, and
+    // `isIsolated` → in a worktree): 02 lingers TERMINAL (finished, solo on main)
+    // while 03 is LIVE (running, solo on main). Neither is in a worktree.
+    const trackedRuns = [
+      { issueId: 2, slug: A.slug, live: false, isolated: false }, // finished on main
+      { issueId: 3, slug: B.slug, live: true, isolated: false }, // running on main
+    ];
+
+    // --- The fix: scope the tracked Runs through `runNeedsIsolation` (exactly
+    // what App.tsx's `needsIsolation` does in the drive loop) ---
+    const scoped: IsolationRun[] = trackedRuns
+      .filter((r) => runNeedsIsolation(r))
+      .map((r) => ({ issueId: r.issueId, slug: r.slug, chained: solo.has(r.issueId) }));
+    // The terminal solo Run 02 drops out; only the live 03 survives.
+    expect(scoped.map((r) => r.issueId)).toEqual([3]);
+    const fixed = decideIsolation(scoped);
+    expect(fixed.parallel).toBe(false);
+    expect(fixed.placements).toEqual([
+      { issueId: 3, slug: B.slug, placement: { kind: 'main' } },
+    ]);
+
+    // Drive TWO rounds through the REAL adapter on a clean tree: no worktree is
+    // ever cut (not for the finished 02, not for the solo 03) and `.afk-parallel`
+    // never turns on — nothing accumulates across drain rounds (AC2).
+    for (let round = 0; round < 2; round++) {
+      const applied = await applyIsolation(repo, scoped);
+      expect(applied.parallel).toBe(false);
+      expect(existsSync(worktreePathFor(repo, A.slug))).toBe(false);
+      expect(existsSync(worktreePathFor(repo, B.slug))).toBe(false);
+      expect(isParallel(repo)).toBe(false);
+    }
+
+    // --- Control (the reported bug): feed EVERY tracked Run in, unscoped ---
+    // 02 (now un-chained) joins 03 → two independent Runs → parallel flips ON and
+    // the FINISHED Run 02 is handed a worktree it should never get. This is the
+    // exact regression the scoping above prevents.
+    const unscoped: IsolationRun[] = trackedRuns.map((r) => ({
+      issueId: r.issueId,
+      slug: r.slug,
+      chained: solo.has(r.issueId),
+    }));
+    const regressedDecision = decideIsolation(unscoped);
+    expect(regressedDecision.parallel).toBe(true);
+    expect(regressedDecision.placements.find((p) => p.issueId === 2)?.placement.kind).toBe(
+      'worktree',
+    );
   });
 });
 
