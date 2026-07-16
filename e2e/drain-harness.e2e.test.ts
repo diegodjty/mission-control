@@ -102,7 +102,8 @@ import { readCoreMemory, writeDrainJournal } from '../src/main/memory-files';
 import { buildRunPrompt } from '../src/main/resolve-run-command';
 import { buildDispatcherPrompt } from '../src/main/dispatcher-session';
 import { CORE_MEMORY_LABEL } from '../src/shared/workbench-memory';
-import { branchFor } from '../src/shared/isolation-policy';
+import { branchFor, decideIsolation, type IsolationRun } from '../src/shared/isolation-policy';
+import { eligibleForRun } from '../src/shared/run-eligibility';
 import {
   planDrain,
   soloChainedIssueIds,
@@ -1514,6 +1515,73 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
     expect(confirmed.merged).toEqual([six.slug]);
     expect(confirmed.protectedBranch ?? null).toBeNull();
     expect(await git(repo, 'ls-files')).toContain(`work/${six.slug}.txt`);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Scenario 11 — issue 132: a leftover Pane from a PRIOR drain must not wedge a
+  // fresh drain. The reported bug: two `claude` Panes from yesterday's drain
+  // lingered alive at their prompt having neither flipped `done` nor written a
+  // Receipt, so run-state read them `running` forever. A fresh cap-3 drain over
+  // three eligible issues then computed one free slot, started ONE Run,
+  // never toggled `.afk-parallel`, cut no worktrees, and the queue starved. This
+  // drives the SAME composition App.tsx wires (the drive-loop's leftover
+  // derivation → planDrain → decideIsolation), proving the fix end-to-end.
+  // ---------------------------------------------------------------------------
+  it('Scenario 11 (issue 132): two leftover phantom Panes from a prior drain do not shrink a fresh drain — all three eligible issues start in parallel', async () => {
+    const backlog = await readBacklog(repo);
+    // The real sandbox has ≥3 eligible issues (open, deps met), enough to fill
+    // a cap-3 drain. (Some are chain roots — the sandbox's 02/05 — so isolation
+    // places those solo; the point here is the SLOT budget, proven below.)
+    const eligibleCount = backlog.issues.filter((i) => eligibleForRun(i, backlog.issues)).length;
+    expect(eligibleCount).toBeGreaterThanOrEqual(3);
+
+    // The drive-loop's activeRuns derivation (App.tsx), verbatim: a Run started
+    // by an EARLIER drain generation (99/105, generation 1) is `leftover`; the
+    // fresh drain runs under generation 2. Both phantoms still read `running`.
+    const priorGeneration = 1;
+    const currentGeneration = 2;
+    const trackedRuns = [
+      { issueId: 99, status: 'running' as const, drainGeneration: priorGeneration },
+      { issueId: 105, status: 'running' as const, drainGeneration: priorGeneration },
+    ];
+    const activeRuns: ActiveRun[] = trackedRuns.map((r) => ({
+      issueId: r.issueId,
+      status: r.status,
+      leftover: r.drainGeneration !== null && r.drainGeneration < currentGeneration,
+    }));
+
+    // The fix: with the two phantoms marked leftover, a cap-3 drain uses its FULL
+    // budget (three Runs start), and no lingering leftover halts it.
+    const plan = planDrain({ issues: backlog.issues, maxConcurrent: 3, activeRuns });
+    expect(plan.drain.stop).toBe(false); // a lingering leftover never halts it
+    expect(plan.startable).toHaveLength(3);
+
+    // And the isolation decision the drive loop feeds the adapter flips parallel
+    // ON and cuts a worktree for each genuinely-independent startable Run — the
+    // ".afk-parallel toggled, worktrees created" the report said never happened.
+    const solo = soloChainedIssueIds(backlog.issues);
+    const isolationRuns: IsolationRun[] = plan.startable.map((id) => {
+      const issue = backlog.issues.find((i) => i.id === id)!;
+      return { issueId: id, slug: issue.slug, chained: solo.has(id) };
+    });
+    const decision = decideIsolation(isolationRuns);
+    expect(decision.parallel).toBe(true);
+    // Every independent (non-chained) startable Run lands in its own worktree.
+    for (const placed of decision.placements) {
+      const expectWorktree = !solo.has(placed.issueId);
+      expect(placed.placement.kind).toBe(expectWorktree ? 'worktree' : 'main');
+    }
+    expect(decision.placements.some((p) => p.placement.kind === 'worktree')).toBe(true);
+
+    // Control: WITHOUT the leftover marking the two phantoms eat two of three
+    // slots and only ONE Run starts — the exact reported failure, proving the
+    // leftover flag is what fixes it (not some incidental change).
+    const regressed = planDrain({
+      issues: backlog.issues,
+      maxConcurrent: 3,
+      activeRuns: trackedRuns.map((r) => ({ issueId: r.issueId, status: r.status })),
+    });
+    expect(regressed.startable).toHaveLength(1);
   });
 });
 

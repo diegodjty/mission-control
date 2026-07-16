@@ -41,6 +41,25 @@ export interface ActiveRun {
    * blocked one (issue 64). Declared state only — never prose heuristics.
    */
   receiptOutcome?: RunOutcome | null;
+  /**
+   * This Run is a LEFTOVER from a PRIOR drain generation, not the current one
+   * (issue 132). A real `claude` Pane never exits — it finishes its message and
+   * lingers at its prompt — so a Run from yesterday's drain that neither flipped
+   * its issue `done` nor wrote a Receipt keeps reading `running` (run-state) for
+   * as long as the app stays open. Counting such a phantom against a FRESH
+   * drain's cap is the reported bug: a cap-3 drain over three eligible issues
+   * saw two lingering phantoms, computed one free slot, started a single Run,
+   * and the rest starved because those slots never freed.
+   *
+   * A leftover Run therefore does NOT occupy a slot in — nor halt — the current
+   * drain: it is not this drain's responsibility, and the user starting a new
+   * drain is the signal to schedule fresh work up to the cap regardless of it.
+   * Its issue is STILL excluded from re-start (it has a Run — see `activeIds`),
+   * and it is left alive and untouched (never killed). The caller marks this by
+   * comparing the Run's drain generation to the current one; a current-drain Run
+   * or a manual (non-drain) Run leaves this false and counts exactly as before.
+   */
+  leftover?: boolean;
 }
 
 /**
@@ -160,9 +179,15 @@ export interface DrainInput {
   midMerge?: boolean;
 }
 
-/** A Run still occupies a slot only while it is `running`. */
+/**
+ * A Run occupies a slot only while it is `running` AND it belongs to the
+ * current drain. A leftover Run from a prior drain generation (issue 132) —
+ * a Pane lingering alive at its prompt from yesterday's drain — is never this
+ * drain's slot to spend, so it is excluded here; otherwise those phantom slots
+ * would permanently shrink a fresh drain's effective cap.
+ */
 function isOccupyingSlot(run: ActiveRun): boolean {
-  return run.status === 'running';
+  return run.status === 'running' && !run.leftover;
 }
 
 /**
@@ -288,11 +313,17 @@ export function planDrain(input: DrainInput): DrainPlan {
   // Only a GENUINELY blocked Run halts the drain. A parked HITL Run — its
   // Receipt declares `needs-verification` (or its HITL-marked issue ended `wip`
   // with a Receipt) — is a success state (issue 64): the drain skips its issue
-  // (it stays in `activeIds`) and keeps scheduling everything else.
+  // (it stays in `activeIds`) and keeps scheduling everything else. A LEFTOVER
+  // blocked Run from a prior drain (issue 132) likewise never halts THIS drain —
+  // a stale Pane from yesterday is not the current drain's concern, and letting
+  // it stop a freshly-started drain was part of the phantom-slot bug.
   const issueById = new Map(input.issues.map((i) => [i.id, i]));
   const blocked =
     input.activeRuns.find(
-      (r) => r.status === 'blocked' && !isParkedHitl(r, issueById.get(r.issueId)),
+      (r) =>
+        r.status === 'blocked' &&
+        !r.leftover &&
+        !isParkedHitl(r, issueById.get(r.issueId)),
     ) ?? null;
 
   let drain: DrainDecision;

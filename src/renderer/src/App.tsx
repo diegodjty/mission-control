@@ -266,10 +266,19 @@ interface TrackedRun {
   sessionAlive: boolean;
   stoppedByUser: boolean;
   stopSignal: number;
+  /**
+   * The drain generation (`drainSeq`) that started this Run, or null for a
+   * manual "▶ Run" that no drain owns (issue 132). It's how the drain re-plan
+   * tells a Run it started this generation (counts against the cap) from a
+   * LEFTOVER Pane carried over from a PRIOR drain — a `claude` session lingering
+   * alive at its prompt from yesterday, which run-state still reads `running`.
+   * Such a phantom must not silently shrink a fresh drain's effective cap.
+   */
+  drainGeneration: number | null;
 }
 
-function newRun(target: RunTarget): TrackedRun {
-  return { target, sessionAlive: true, stoppedByUser: false, stopSignal: 0 };
+function newRun(target: RunTarget, drainGeneration: number | null = null): TrackedRun {
+  return { target, sessionAlive: true, stoppedByUser: false, stopSignal: 0, drainGeneration };
 }
 
 /**
@@ -2938,6 +2947,13 @@ export function App(): JSX.Element {
       issueId: r.target.issueId,
       status: runStatusOf(r),
       receiptOutcome: latestReceiptOutcomeFor(runLog, r.target.issueId),
+      // A Run started by an EARLIER drain generation is a leftover phantom
+      // (issue 132): a `claude` Pane still lingering alive from yesterday's
+      // drain that never flipped `done` or wrote a Receipt, so run-state reads
+      // it `running` forever. It must not occupy a slot in — nor halt — this
+      // fresh drain (its issue is still guarded against re-start). A manual Run
+      // (drainGeneration null) or one this drain started counts as before.
+      leftover: r.drainGeneration !== null && r.drainGeneration < drainSeq.current,
     }));
     const plan = planDrain({ issues: plannable, maxConcurrent: cap, activeRuns, midMerge });
 
@@ -2991,15 +3007,20 @@ export function App(): JSX.Element {
 
     const addRuns = (cwdOf: (issueId: number) => string): void => {
       const additions = startableIssues.map((issue) =>
-        newRun({
-          issueId: issue.id,
-          issueFileName: issue.fileName,
-          issueTitle: issue.title,
-          projectPath: cwdOf(issue.id),
-          // Workbench Runs carry the explicit workbench paths in the spawn
-          // prompt (issue 72); null for a legacy Project.
-          workbench: workbenchPathsForRun,
-        }),
+        newRun(
+          {
+            issueId: issue.id,
+            issueFileName: issue.fileName,
+            issueTitle: issue.title,
+            projectPath: cwdOf(issue.id),
+            // Workbench Runs carry the explicit workbench paths in the spawn
+            // prompt (issue 72); null for a legacy Project.
+            workbench: workbenchPathsForRun,
+          },
+          // Stamp the Run with THIS drain's generation (issue 132) so a later
+          // drain can tell it apart from a leftover Pane it should not count.
+          drainSeq.current,
+        ),
       );
       setRuns((prev) => {
         const present = new Set(prev.map((r) => r.target.issueId));
