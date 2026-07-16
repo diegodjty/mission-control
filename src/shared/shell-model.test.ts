@@ -9,9 +9,9 @@ import {
   type ViewId,
 } from './shell-model';
 
-const idle: ShellContext = { hasPlanning: false, runCount: 0, hasTalk: false };
-const withRun: ShellContext = { hasPlanning: false, runCount: 1, hasTalk: false };
-const withPlanning: ShellContext = { hasPlanning: true, runCount: 0, hasTalk: false };
+const idle: ShellContext = { hasPlanning: false, runCount: 0, hasTalk: false, attentionNeedsYou: 0 };
+const withRun: ShellContext = { hasPlanning: false, runCount: 1, hasTalk: false, attentionNeedsYou: 0 };
+const withPlanning: ShellContext = { hasPlanning: true, runCount: 0, hasTalk: false, attentionNeedsYou: 0 };
 
 describe('DEFAULT_VIEW', () => {
   it('is the Launcher — every empty Window is the front door (issue 81, ADR-0016)', () => {
@@ -37,16 +37,17 @@ describe('mountPolicy', () => {
 });
 
 describe('shellTabs', () => {
-  it('lists Home, Map, Pane, Inbox in order when no planning session exists', () => {
+  it('lists Home, Map, Pane, Attention in order when no planning session exists', () => {
     expect(shellTabs(idle).map((t) => t.id)).toEqual(['launcher', 'map', 'pane', 'inbox']);
   });
 
-  it('labels the tabs as the header shows them', () => {
+  it('labels the entries as the rail shows them (the inbox entry reads "Attention")', () => {
     const labels = new globalThis.Map(shellTabs(idle).map((t) => [t.id, t.label]));
     expect(labels.get('launcher')).toBe('Home');
     expect(labels.get('map')).toBe('Map');
     expect(labels.get('pane')).toBe('Pane');
-    expect(labels.get('inbox')).toBe('Inbox');
+    // The Atlas rail names it 'Attention' (issue 124); the ViewId stays `inbox`.
+    expect(labels.get('inbox')).toBe('Attention');
   });
 
   it('shows the Plan tab only while a planning session exists (issue 83)', () => {
@@ -60,9 +61,25 @@ describe('shellTabs', () => {
     expect(shellTabs({ ...idle, runCount: 3 }).find((t) => t.id === 'pane')?.badge).toBe(3);
   });
 
-  it('never badges the Inbox — a place you look, not a pusher (ADR-0012)', () => {
-    const ctx: ShellContext = { hasPlanning: true, runCount: 5, hasTalk: true };
-    expect(shellTabs(ctx).find((t) => t.id === 'inbox')?.badge).toBeNull();
+  it('badges the Attention entry with the needs-you count, absent at zero (issue 124)', () => {
+    expect(shellTabs(idle).find((t) => t.id === 'inbox')?.badge).toBeNull();
+    expect(shellTabs({ ...idle, attentionNeedsYou: 4 }).find((t) => t.id === 'inbox')?.badge).toBe(
+      4,
+    );
+  });
+
+  it('badges Pane and Attention independently from the same context', () => {
+    const ctx: ShellContext = {
+      hasPlanning: true,
+      runCount: 5,
+      hasTalk: true,
+      attentionNeedsYou: 2,
+    };
+    const tabs = shellTabs(ctx);
+    expect(tabs.find((t) => t.id === 'pane')?.badge).toBe(5);
+    expect(tabs.find((t) => t.id === 'inbox')?.badge).toBe(2);
+    // Planning carries no numeric badge — its presence is the signal.
+    expect(tabs.find((t) => t.id === 'planning')?.badge).toBeNull();
   });
 });
 

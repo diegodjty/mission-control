@@ -54,7 +54,7 @@ describe('shell keep-mounted invariant (issue 123)', () => {
     // stands in for the Run's `claude` process (scripted/no-LLM rule); the
     // spawn/kill seam is identical.
     const { sessionId } = manager.spawn({ cols: 80, rows: 24 });
-    const ctx: ShellContext = { hasPlanning: false, runCount: 1, hasTalk: false };
+    const ctx: ShellContext = { hasPlanning: false, runCount: 1, hasTalk: false, attentionNeedsYou: 0 };
 
     // Prove the terminal is live before the trip.
     manager.write(sessionId, 'echo __MC_BEFORE_TRIP__\r');
@@ -104,7 +104,7 @@ describe('shell keep-mounted invariant (issue 123)', () => {
     // With NOTHING live (no Run, no talk), the pane host is remount-on-visit:
     // navigating away unmounts it, and the unmount kills the session. This is
     // exactly why the keep-mounted policy above is load-bearing.
-    const ctx: ShellContext = { hasPlanning: false, runCount: 0, hasTalk: false };
+    const ctx: ShellContext = { hasPlanning: false, runCount: 0, hasTalk: false, attentionNeedsYou: 0 };
     expect(isSlotMounted('pane', 'pane', ctx)).toBe(true);
     expect(isSlotMounted('pane', 'map', ctx)).toBe(false);
     manager.kill(sessionId); // the AppShell contract: unmount = kill

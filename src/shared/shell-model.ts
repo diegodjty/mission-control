@@ -35,6 +35,14 @@ export interface ShellContext {
   runCount: number;
   /** A Just-talk session's Pane is open (issue 81). */
   hasTalk: boolean;
+  /**
+   * Cross-project needs-you count for the Attention rail badge (issue 124):
+   * how many attention items across every project want the human right now.
+   * Fed for now by the existing attention snapshot (the same non-briefing
+   * item count the Inbox shows); issue 125 swaps the source to
+   * `attention-hub-model` without changing this field.
+   */
+  attentionNeedsYou: number;
 }
 
 /**
@@ -69,7 +77,10 @@ const REGISTRY: ReadonlyArray<{ id: ViewId; label: string; policy: MountPolicy }
   { id: 'map', label: 'Map', policy: 'keep-mounted' },
   { id: 'pane', label: 'Pane', policy: 'keep-mounted' },
   { id: 'planning', label: 'Plan', policy: 'keep-mounted' },
-  { id: 'inbox', label: 'Inbox', policy: 'remount-on-visit' },
+  // The Atlas rail names this entry 'Attention' (issue 124, per the approved
+  // shell mock); the ViewId stays `inbox` — issue 125 rebuilds the surface it
+  // hosts into the unified attention view.
+  { id: 'inbox', label: 'Attention', policy: 'remount-on-visit' },
 ];
 
 /** A view's mount policy (see MountPolicy). */
@@ -80,15 +91,28 @@ export function mountPolicy(id: ViewId): MountPolicy {
 }
 
 /**
- * The tabs the header shows for this context, in order. The Plan tab exists
- * only while a planning session does (issue 83 — the rail never advertises a
- * dead end); the Pane tab carries its tracked-Run count once nonzero.
+ * Which live count a rail entry carries for this context, or null for none.
+ * The Pane entry shows its tracked-Run count; the Attention entry shows the
+ * cross-project needs-you count (issue 124). Both vanish at zero — a badge is
+ * a call to look, never decoration.
+ */
+function badgeFor(id: ViewId, ctx: ShellContext): number | null {
+  if (id === 'pane') return ctx.runCount > 0 ? ctx.runCount : null;
+  if (id === 'inbox') return ctx.attentionNeedsYou > 0 ? ctx.attentionNeedsYou : null;
+  return null;
+}
+
+/**
+ * The rail entries the shell shows for this context, in order. The Plan entry
+ * exists only while a planning session does (issue 83 — the rail never
+ * advertises a dead end); the Pane and Attention entries carry live badges
+ * (see `badgeFor`).
  */
 export function shellTabs(ctx: ShellContext): ShellTab[] {
   return REGISTRY.filter((v) => v.id !== 'planning' || ctx.hasPlanning).map((v) => ({
     id: v.id,
     label: v.label,
-    badge: v.id === 'pane' && ctx.runCount > 0 ? ctx.runCount : null,
+    badge: badgeFor(v.id, ctx),
     ...(v.id === 'launcher' ? { title: 'Home — the Launcher' } : {}),
   }));
 }

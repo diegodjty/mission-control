@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Pane } from './Pane';
 import { Map } from './Map';
-import { ProjectBar } from './ProjectBar';
+import { ProjectSwitcher } from './ProjectSwitcher';
+import { CommandPalette } from './CommandPalette';
 import { DispatcherPanel } from './DispatcherPanel';
 import { Inbox } from './Inbox';
 import { Launcher, type QuickFixIssueRef } from './Launcher';
@@ -18,7 +19,7 @@ import {
 import { stageInvocation, type PlanningStage } from '../../shared/planning-model';
 import { quickFixRunTarget } from '../../shared/launcher-model';
 import type { AttentionItem } from '../../shared/attention-model';
-import { workbenchProjectPath } from '../../shared/inbox-model';
+import { workbenchProjectPath, splitInbox } from '../../shared/inbox-model';
 import type { Backlog, IssueStatus } from '../../shared/backlog-model';
 import type {
   AttentionSnapshot,
@@ -135,11 +136,13 @@ import { shouldConfirmInterrupt } from '../../shared/interrupt-guard';
 import {
   DEFAULT_VIEW,
   isSlotMounted,
+  shellTabs,
   viewAfterEvent,
   type ShellContext,
   type ShellEvent,
   type ViewId,
 } from '../../shared/shell-model';
+import { mergeProviders, type Command } from '../../shared/command-registry';
 import { decideCardOpen } from '../../shared/open-card-decision';
 import {
   orphanedClaims,
@@ -168,6 +171,8 @@ const DISPATCHER_WIDTH_KEY = 'mc.dispatcherWidth';
 
 /** localStorage key for the persisted UI theme (Atlas design language). */
 const THEME_KEY = 'mc.theme';
+/** localStorage key for the persisted rail-collapsed preference (issue 124). */
+const RAIL_COLLAPSED_KEY = 'mc.railCollapsed';
 type Theme = 'dark' | 'light';
 
 /** Read the persisted theme; the navy dark stage is the default. */
@@ -290,7 +295,12 @@ export function App(): JSX.Element {
   // and keep-mounted hosting derive from. The ref mirrors the memo below
   // (assigned each render, the viewRef pattern) so the stable event applier
   // never closes over stale facts.
-  const shellCtxRef = useRef<ShellContext>({ hasPlanning: false, runCount: 0, hasTalk: false });
+  const shellCtxRef = useRef<ShellContext>({
+    hasPlanning: false,
+    runCount: 0,
+    hasTalk: false,
+    attentionNeedsYou: 0,
+  });
   // Every view move goes through the pure `viewAfterEvent`: scattered
   // hand-coded setView rules became named shell events the model owns.
   const applyShellEvent = useCallback((event: ShellEvent): void => {
@@ -310,6 +320,35 @@ export function App(): JSX.Element {
       /* private mode / storage disabled — theme still applies for the session */
     }
   }, [theme]);
+  const toggleTheme = useCallback(
+    (): void => setTheme((t) => (t === 'dark' ? 'light' : 'dark')),
+    [],
+  );
+
+  // The Atlas rail's on-demand collapse (issue 124): a manual toggle, persisted
+  // so a Window reopens the way the user left it. Narrow width ALSO collapses
+  // the rail (CSS), independent of this flag — so the flag is purely the user's
+  // explicit preference, never fighting the responsive breakpoint.
+  const [railCollapsed, setRailCollapsed] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem(RAIL_COLLAPSED_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(RAIL_COLLAPSED_KEY, railCollapsed ? '1' : '0');
+    } catch {
+      /* storage disabled — the toggle still applies for the session */
+    }
+  }, [railCollapsed]);
+
+  // The Cmd+K command palette's open state (issue 124). Opened from anywhere
+  // by the shortcut or the header search button; every command it runs routes
+  // through the same flow its click-counterpart does (palette safety == click
+  // safety, ADR-0020).
+  const [paletteOpen, setPaletteOpen] = useState(false);
 
   // The live backlog + resolved Project path, lifted from the Map so the
   // Coordinator can plan against them.
@@ -323,7 +362,6 @@ export function App(): JSX.Element {
   // a legacy repo path — and is what the Map loads.
   const [projects, setProjects] = useState<ProjectView[]>([]);
   const [activeProjectKey, setActiveProjectKey] = useState<string | null>(null);
-  const [newRepoPath, setNewRepoPath] = useState('');
   const [projectError, setProjectError] = useState<string | null>(null);
   // A Project change this Window paused because a runner is live (issue 114):
   // switching/opening a different Project here would tear the running Run down,
@@ -559,12 +597,27 @@ export function App(): JSX.Element {
   // Which tile (if any) is maximized to fill the Pane area; null = tiled grid.
   const [maximizedId, setMaximizedId] = useState<number | null>(null);
 
+  // The cross-project needs-you count for the Attention rail badge (issue 124):
+  // the same non-briefing attention-item count the Inbox surfaces, so the rail
+  // badge and the surface always agree. Fed by the existing attention snapshot
+  // for now; issue 125 swaps the source to `attention-hub-model` unchanged.
+  const attentionNeedsYou = useMemo(
+    () => splitInbox(attention.items).groups.reduce((n, g) => n + g.items.length, 0),
+    [attention],
+  );
+
   // The shell context (shell-model, issue 123): the Plan tab and Planning
   // host follow the planning session; the Pane tab's count and the grid's
-  // keep-mounted hosting follow the tracked Runs and the talk session.
+  // keep-mounted hosting follow the tracked Runs and the talk session; the
+  // Attention entry's badge follows the needs-you count (issue 124).
   const shellCtx = useMemo<ShellContext>(
-    () => ({ hasPlanning: planning !== null, runCount: runs.length, hasTalk: talk !== null }),
-    [planning, runs, talk],
+    () => ({
+      hasPlanning: planning !== null,
+      runCount: runs.length,
+      hasTalk: talk !== null,
+      attentionNeedsYou,
+    }),
+    [planning, runs, talk, attentionNeedsYou],
   );
   shellCtxRef.current = shellCtx;
 
@@ -971,7 +1024,6 @@ export function App(): JSX.Element {
         resetForProjectSwitch();
       }
       setActiveProjectKey(res.activeProjectKey);
-      setNewRepoPath('');
       // An explicit open lands on the Map — in particular off the Launcher
       // (issue 81); a no-op elsewhere (opens already happen from the Map).
       applyShellEvent({ kind: 'project-opened' });
@@ -1044,23 +1096,6 @@ export function App(): JSX.Element {
     setInboxNotice(
       `Registered "${item.candidate.name}"${res.key ? ` as ${res.key}` : ''} in ${item.project}.`,
     );
-  }, []);
-
-  const openInNewWindow = useCallback((): void => {
-    const path = newRepoPath.trim();
-    if (!path) return;
-    void window.mc.openWindow({ path });
-    setNewRepoPath('');
-  }, [newRepoPath]);
-
-  // Browse… for a Project folder with the native OS chooser (issue 19). The
-  // chosen path just populates the repo-path field, so the existing Open here /
-  // Open in new Window buttons then act on it exactly as a pasted path would —
-  // one picker serving both flows. Cancelling the dialog resolves to a null
-  // path and is a clean no-op (the field keeps whatever was there).
-  const browseForFolder = useCallback(async (): Promise<void> => {
-    const { path } = await window.mc.pickProjectFolder();
-    if (path) setNewRepoPath(path);
   }, []);
 
   // The active Project's resolved view (issue 71/72): its layout kind, its
@@ -3267,6 +3302,177 @@ export function App(): JSX.Element {
   const shape = gridShape(runs.length + (talk !== null ? 1 : 0));
   const maximizedRun = runs.find((r) => r.target.issueId === maximizedId) ?? null;
 
+  // --- Atlas shell: header open affordances + command palette (issue 124) ---
+
+  // The header switcher's "open a folder" entries (absorbing the old
+  // ProjectBar's Browse + Open-here / Open-in-new-Window): the native picker,
+  // then the SAME open flow the ProjectBar used — open-here goes straight
+  // through `openProjectHere` (unguarded, exactly as the old "Open here"), and
+  // open-in-new-Window spawns a fresh Window. Cancelling the picker is a no-op.
+  const browseAndOpenHere = useCallback(async (): Promise<void> => {
+    const { path } = await window.mc.pickProjectFolder();
+    if (path) void openProjectHere(path);
+  }, [openProjectHere]);
+  const browseAndOpenNewWindow = useCallback(async (): Promise<void> => {
+    const { path } = await window.mc.pickProjectFolder();
+    if (path) void window.mc.openWindow({ path });
+  }, []);
+
+  // A palette issue-jump (or any "land on this issue") lands on the Map with
+  // the issue selected — reusing the exact focus channel the Inbox
+  // click-through uses (issue 80), so the palette adds no new authority: it is
+  // the same Map selection a click would make. `fileRef` stays null (no
+  // "From Inbox" line), and the sequence bump re-selects on repeat jumps.
+  const jumpToIssueOnMap = useCallback(
+    (issueId: number): void => {
+      setInboxFocus({ project: activeProjectKeyRef.current ?? '', issueId, fileRef: null });
+      setInboxFocusSeq((n) => n + 1);
+      applyShellEvent({ kind: 'navigate', to: 'map' });
+    },
+    [applyShellEvent],
+  );
+
+  // The palette's command set (issue 124), merged from four providers via the
+  // pure `command-registry`. Each command's `run` routes through the same flow
+  // its clickable counterpart does — the palette holds no authority of its own:
+  //   • projects  → `attemptProjectChange` (the interrupt guard, exactly as the
+  //                 switcher), disabled when owned by another Window;
+  //   • views     → a shell navigate event (the rail's own action);
+  //   • issues    → the active Project's OPEN issues, jumping to the Map;
+  //   • actions   → the entry points New project / Grill a feature / Simple
+  //                 issue / Just talk / theme toggle.
+  const paletteCommands = useMemo<Command[]>(() => {
+    const projectCmds: Command[] = projects.map((p) => ({
+      id: `project:${p.key}`,
+      kind: 'project',
+      title: p.label || p.key,
+      hint:
+        p.ownership === 'other'
+          ? 'open elsewhere'
+          : p.key === activeProjectKey
+            ? 'current'
+            : 'switch',
+      keywords: p.key,
+      disabled: p.ownership === 'other',
+      run: () =>
+        attemptProjectChange({
+          path: p.key,
+          label: p.label || p.key,
+          proceed: () => void switchProject(p.key),
+        }),
+    }));
+
+    const viewCmds: Command[] = shellTabs(shellCtx).map((t) => ({
+      id: `view:${t.id}`,
+      kind: 'view',
+      title: t.label,
+      hint: `Go to ${t.label}`,
+      // The ViewId as a keyword keeps 'inbox' finding the 'Attention' entry.
+      keywords: t.id,
+      run: () => applyShellEvent({ kind: 'navigate', to: t.id }),
+    }));
+
+    const issueCmds: Command[] = (backlog?.issues ?? [])
+      .filter((i) => i.status === 'open')
+      .map((i) => ({
+        id: `issue:${i.id}`,
+        kind: 'issue',
+        title: i.title,
+        hint: `#${String(i.id).padStart(2, '0')}`,
+        keywords: `${i.id} ${i.slug}`,
+        run: () => jumpToIssueOnMap(i.id),
+      }));
+
+    const actionCmds: Command[] = [
+      {
+        id: 'action:new-project',
+        kind: 'action',
+        title: 'New project',
+        hint: 'on Home',
+        run: () => applyShellEvent({ kind: 'navigate', to: 'launcher' }),
+      },
+    ];
+    // Grill a feature / Simple issue apply to the active workbench Project's
+    // ＋ Start something verbs — offered only when there is one. Grill opens the
+    // Planning view directly; Simple issue lands on the Map where its form lives.
+    if (mapStartProject) {
+      actionCmds.push({
+        id: 'action:grill',
+        kind: 'action',
+        title: 'Grill a feature',
+        hint: 'plan a Big feature',
+        run: () => void startPlanning(mapStartProject),
+      });
+      actionCmds.push({
+        id: 'action:simple-issue',
+        kind: 'action',
+        title: 'Simple issue',
+        hint: 'on the Map',
+        run: () => applyShellEvent({ kind: 'navigate', to: 'map' }),
+      });
+    }
+    actionCmds.push({
+      id: 'action:just-talk',
+      kind: 'action',
+      title: 'Just talk',
+      hint: 'a warm Pane',
+      run: () => void talkToFolder(),
+    });
+    actionCmds.push({
+      id: 'action:theme',
+      kind: 'action',
+      title: 'Toggle theme',
+      hint: `to ${theme === 'dark' ? 'light' : 'dark'}`,
+      run: toggleTheme,
+    });
+
+    return mergeProviders([
+      { id: 'projects', commands: projectCmds },
+      { id: 'views', commands: viewCmds },
+      { id: 'issues', commands: issueCmds },
+      { id: 'actions', commands: actionCmds },
+    ]);
+  }, [
+    projects,
+    activeProjectKey,
+    shellCtx,
+    backlog,
+    mapStartProject,
+    theme,
+    toggleTheme,
+    attemptProjectChange,
+    switchProject,
+    applyShellEvent,
+    startPlanning,
+    talkToFolder,
+    jumpToIssueOnMap,
+  ]);
+
+  // Global keyboard front door (issue 124): Cmd/Ctrl+K toggles the palette;
+  // Cmd/Ctrl+1…N jumps to the Nth rail view in its live order (so N tracks the
+  // Plan entry appearing/disappearing). Registered once; the shell context is
+  // read live off the ref so the shortcut set never goes stale.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+      if (e.key === 'k' || e.key === 'K') {
+        e.preventDefault();
+        setPaletteOpen((o) => !o);
+        return;
+      }
+      if (/^[1-9]$/.test(e.key)) {
+        const tabs = shellTabs(shellCtxRef.current);
+        const tab = tabs[Number.parseInt(e.key, 10) - 1];
+        if (tab) {
+          e.preventDefault();
+          applyShellEvent({ kind: 'navigate', to: tab.id });
+        }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [applyShellEvent]);
+
   // Open-here-or-new-Window choice (issue 121): this Window already has a
   // Project open and the user picked a DIFFERENT one from the home grid
   // (with nothing running — a live runner takes the stronger interrupt
@@ -3274,57 +3480,59 @@ export function App(): JSX.Element {
   // offer the same choice the project bar's buttons give — so the user can
   // open the other Project alongside this one without touching the top bar.
   // Open here switches this Window; Open in new Window leaves it untouched;
-  // Cancel stays put. (Still the hand-rolled overlay: the redesign replaces
-  // exactly ONE dialog in the tracer slice — this one follows in the shell
-  // rebuild, issue 124.)
-  const openChoiceDialog = pendingOpenChoice !== null && (
-    <div
-      className="app__interrupt-overlay"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="open-choice-title"
+  // Cancel stays put. Issue 124 moves this onto the Dialog primitive too (the
+  // tracer replaced only the interrupt guard; the shell rebuild folds the last
+  // hand-rolled overlay in), so every modal in the app is now one Radix Dialog
+  // with the same overlay/focus-trap/Escape behavior.
+  const openChoiceDialog = (
+    <Dialog
+      open={pendingOpenChoice !== null}
+      onOpenChange={(open) => {
+        if (!open) setPendingOpenChoice(null);
+      }}
     >
-      <div className="app__interrupt">
-        <h2 className="app__interrupt-title" id="open-choice-title">
-          Open {pendingOpenChoice.label}
-        </h2>
-        <p className="app__interrupt-text">
-          <strong>
-            {projects.find((p) => p.key === activeProjectKey)?.label ?? 'This project'}
-          </strong>{' '}
-          is open in this window. Open <strong>{pendingOpenChoice.label}</strong> here instead,
-          or in a new window so you can work on both at once?
-        </p>
-        <div className="app__interrupt-actions">
-          <button
-            className="app__interrupt-primary"
-            onClick={() => {
-              void openProjectHere(pendingOpenChoice.path);
-              setPendingOpenChoice(null);
-            }}
-            title="Switch this window to the picked project"
-          >
-            Open here
-          </button>
-          <button
-            className="app__interrupt-secondary"
-            onClick={() => {
-              void window.mc.openWindow({ path: pendingOpenChoice.path });
-              setPendingOpenChoice(null);
-            }}
-            title="Open the picked project in a new window; this window stays put"
-          >
-            Open in new window
-          </button>
-          <button
-            className="app__interrupt-cancel"
-            onClick={() => setPendingOpenChoice(null)}
-          >
-            Cancel
-          </button>
-        </div>
-      </div>
-    </div>
+      {pendingOpenChoice !== null && (
+        <DialogContent>
+          <DialogTitle>Open {pendingOpenChoice.label}</DialogTitle>
+          <DialogDescription>
+            <strong>
+              {projects.find((p) => p.key === activeProjectKey)?.label ?? 'This project'}
+            </strong>{' '}
+            is open in this window. Open <strong>{pendingOpenChoice.label}</strong> here instead,
+            or in a new window so you can work on both at once?
+          </DialogDescription>
+          <DialogActions>
+            <Button
+              variant="primary"
+              onClick={() => {
+                void openProjectHere(pendingOpenChoice.path);
+                setPendingOpenChoice(null);
+              }}
+              title="Switch this window to the picked project"
+            >
+              Open here
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={() => {
+                void window.mc.openWindow({ path: pendingOpenChoice.path });
+                setPendingOpenChoice(null);
+              }}
+              title="Open the picked project in a new window; this window stays put"
+            >
+              Open in new window
+            </Button>
+            <Button
+              variant="ghost"
+              className="ui-btn--end"
+              onClick={() => setPendingOpenChoice(null)}
+            >
+              Cancel
+            </Button>
+          </DialogActions>
+        </DialogContent>
+      )}
+    </Dialog>
   );
 
   // Interrupt confirmation (issue 114): a runner is fixing an issue in the
@@ -3396,13 +3604,15 @@ export function App(): JSX.Element {
       shellCtx={shellCtx}
       onNavigate={(to) => applyShellEvent({ kind: 'navigate', to })}
       theme={theme}
-      onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
-      projectBar={
-        <ProjectBar
+      onToggleTheme={toggleTheme}
+      collapsed={railCollapsed}
+      onToggleCollapsed={() => setRailCollapsed((c) => !c)}
+      onOpenPalette={() => setPaletteOpen(true)}
+      projectPath={activeProjectKey}
+      projectSwitcher={
+        <ProjectSwitcher
           projects={projects}
           activeProjectKey={activeProjectKey}
-          newRepoPath={newRepoPath}
-          onNewRepoPathChange={setNewRepoPath}
           onSwitch={(key) =>
             attemptProjectChange({
               path: key,
@@ -3410,9 +3620,8 @@ export function App(): JSX.Element {
               proceed: () => void switchProject(key),
             })
           }
-          onBrowse={() => void browseForFolder()}
-          onOpenHere={() => void openProjectHere(newRepoPath.trim())}
-          onOpenNewWindow={openInNewWindow}
+          onBrowseOpenHere={() => void browseAndOpenHere()}
+          onBrowseOpenNewWindow={() => void browseAndOpenNewWindow()}
           error={projectError}
         />
       }
@@ -3446,6 +3655,11 @@ export function App(): JSX.Element {
         <>
           {interruptDialog}
           {openChoiceDialog}
+          <CommandPalette
+            open={paletteOpen}
+            onOpenChange={setPaletteOpen}
+            commands={paletteCommands}
+          />
         </>
       }
     >
