@@ -57,6 +57,7 @@
 
   --shadow-cmd: 0 20px 50px rgba(0, 0, 0, 0.55);
   --shadow-card: 0 10px 30px rgba(0, 0, 0, 0.35);
+  --scrim: rgba(4, 7, 11, 0.62);
   --chrome: #0c1017;
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
 
@@ -109,6 +110,7 @@
 
   --shadow-cmd: 0 16px 44px rgba(14, 22, 32, 0.14);
   --shadow-card: 0 8px 24px rgba(14, 22, 32, 0.10);
+  --scrim: rgba(14, 22, 32, 0.45);
   --chrome: #e8edf0;
 }
 
@@ -3083,4 +3085,349 @@ body.is-col-resizing {
 .app__interrupt-cancel:hover {
   border-color: var(--border-strong);
   color: var(--fg);
+}
+
+/* =====================================================================
+   Component primitives — the ui-* layer (issue 123, ADR-0020).
+   Behavior comes from headless Radix (Dialog, DropdownMenu, Tabs, Tooltip,
+   Toast) or plain elements (Button, Card, Badge, Input); EVERY visual here
+   is an Atlas token above, so both themes render correctly by construction.
+   Views compose these classes via src/renderer/src/components/ — no view
+   hand-rolls chrome once its rebuild lands.
+   ===================================================================== */
+
+/* ---- Dialog ---- */
+
+.ui-dialog__overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: var(--scrim);
+  animation: mcFade 0.18s ease;
+}
+
+.ui-dialog {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 41;
+  width: min(460px, calc(100vw - 48px));
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px 22px;
+  background: var(--bg1);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: var(--shadow-cmd);
+  animation: mcFade 0.18s ease;
+}
+
+.ui-dialog:focus {
+  outline: none;
+}
+
+.ui-dialog__title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.ui-dialog__text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--fg-soft);
+}
+
+.ui-dialog__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+/* ---- Button ---- */
+
+.ui-btn {
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 13px;
+  padding: 8px 14px;
+  cursor: pointer;
+}
+
+.ui-btn:focus-visible {
+  outline: 2px solid var(--teal-border);
+  outline-offset: 1px;
+}
+
+.ui-btn--primary {
+  background: var(--teal-border);
+  border: 1px solid var(--teal-border);
+  color: var(--fg);
+}
+
+.ui-btn--primary:hover {
+  border-color: var(--teal);
+}
+
+.ui-btn--danger {
+  background: var(--red-bg);
+  border: 1px solid var(--red-border);
+  color: var(--red-soft);
+}
+
+.ui-btn--danger:hover {
+  border-color: var(--red);
+}
+
+.ui-btn--secondary {
+  background: none;
+  border: 1px solid var(--border-strong);
+  color: var(--fg);
+}
+
+.ui-btn--secondary:hover {
+  border-color: var(--teal);
+}
+
+.ui-btn--ghost {
+  background: none;
+  border: 1px solid var(--border-strong);
+  color: var(--fg-soft);
+}
+
+.ui-btn--ghost:hover {
+  color: var(--fg);
+}
+
+/* Push this button to the row's far end (a Cancel beside grouped actions). */
+.ui-btn--end {
+  margin-left: auto;
+}
+
+/* ---- Badge ---- */
+
+.ui-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--fg-soft);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.ui-badge--teal {
+  background: var(--teal-bg);
+  border-color: var(--teal-border);
+  color: var(--teal);
+}
+
+.ui-badge--amber {
+  background: var(--amber-bg);
+  border-color: var(--amber-border);
+  color: var(--amber-soft);
+}
+
+.ui-badge--red {
+  background: var(--red-bg);
+  border-color: var(--red-border);
+  color: var(--red-soft);
+}
+
+.ui-badge--green {
+  background: var(--green-bg);
+  border-color: var(--green-border);
+  color: var(--green-soft);
+}
+
+.ui-badge--violet {
+  background: var(--violet-bg);
+  border-color: var(--violet-border);
+  color: var(--violet);
+}
+
+/* ---- Card ---- */
+
+.ui-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-card);
+}
+
+.ui-card--raised {
+  background: var(--surface-2);
+  border-color: var(--border-strong);
+}
+
+/* ---- Input ---- */
+
+.ui-input {
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--fg);
+}
+
+.ui-input::placeholder {
+  color: var(--fg-faint);
+}
+
+.ui-input:focus {
+  outline: none;
+  border-color: var(--teal-border);
+  box-shadow: 0 0 0 3px var(--teal-soft);
+}
+
+/* ---- DropdownMenu ---- */
+
+.ui-menu {
+  z-index: 50;
+  min-width: 180px;
+  padding: 6px;
+  background: var(--bg1);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: var(--shadow-cmd);
+  animation: mcFade 0.14s ease;
+}
+
+.ui-menu__item {
+  padding: 7px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--fg-soft);
+  cursor: pointer;
+  user-select: none;
+  outline: none;
+}
+
+.ui-menu__item[data-highlighted] {
+  background: var(--teal-soft);
+  color: var(--fg);
+}
+
+.ui-menu__item[data-disabled] {
+  color: var(--fg-faint);
+  cursor: default;
+}
+
+.ui-menu__label {
+  padding: 6px 10px 2px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-mute);
+}
+
+.ui-menu__separator {
+  height: 1px;
+  margin: 6px 4px;
+  background: var(--border);
+}
+
+/* ---- Tabs (the shell's tab language, reusable inside views) ---- */
+
+.ui-tabs__list {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ui-tabs__tab {
+  background: transparent;
+  color: var(--fg-mute);
+  border: 1px solid transparent;
+  border-radius: 9px;
+  padding: 3px 12px;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.ui-tabs__tab:hover {
+  background: var(--surface);
+  color: var(--fg-soft);
+}
+
+.ui-tabs__tab[data-state='active'] {
+  background: var(--teal-soft);
+  border-color: var(--border-teal);
+  color: var(--fg);
+}
+
+.ui-tabs__panel {
+  outline: none;
+}
+
+/* ---- Tooltip ---- */
+
+.ui-tooltip {
+  z-index: 60;
+  max-width: 320px;
+  padding: 6px 10px;
+  background: var(--bg1);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  box-shadow: var(--shadow-card);
+  font-size: 12px;
+  color: var(--fg-soft);
+  animation: mcFade 0.14s ease;
+}
+
+.ui-tooltip__arrow {
+  fill: var(--bg1);
+}
+
+/* ---- Toast ---- */
+
+.ui-toast__viewport {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(380px, 100vw);
+  padding: 24px;
+  margin: 0;
+  list-style: none;
+  outline: none;
+}
+
+.ui-toast {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  background: var(--bg1);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: var(--shadow-cmd);
+  animation: mcRise 0.18s var(--ease-out);
+}
+
+.ui-toast__title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.ui-toast__text {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-soft);
 }

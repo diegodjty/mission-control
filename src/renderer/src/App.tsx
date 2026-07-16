@@ -6,6 +6,15 @@ import { DispatcherPanel } from './DispatcherPanel';
 import { Inbox } from './Inbox';
 import { Launcher, type QuickFixIssueRef } from './Launcher';
 import { PlanningView } from './PlanningView';
+import { AppShell } from './AppShell';
+import {
+  Button,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from './components';
 import { stageInvocation, type PlanningStage } from '../../shared/planning-model';
 import { quickFixRunTarget } from '../../shared/launcher-model';
 import type { AttentionItem } from '../../shared/attention-model';
@@ -123,6 +132,14 @@ import {
   type ScopedScan,
 } from '../../shared/project-switch';
 import { shouldConfirmInterrupt } from '../../shared/interrupt-guard';
+import {
+  DEFAULT_VIEW,
+  isSlotMounted,
+  viewAfterEvent,
+  type ShellContext,
+  type ShellEvent,
+  type ViewId,
+} from '../../shared/shell-model';
 import { decideCardOpen } from '../../shared/open-card-decision';
 import {
   orphanedClaims,
@@ -210,8 +227,6 @@ function slugOf(fileName: string): string {
   return fileName.replace(/\.md$/, '');
 }
 
-type View = 'launcher' | 'map' | 'pane' | 'inbox' | 'planning';
-
 /**
  * What the Planning view (issue 83) is planning: the chosen project's two
  * planning roots plus its label. Per-Project state — cleared on a switch.
@@ -264,13 +279,23 @@ export function App(): JSX.Element {
   // Every EMPTY Window is the Launcher (issue 81, ADR-0016): the front door
   // is the initial view; opening/re-attaching a Project lands on the Map, and
   // the Home tab returns here any time — without closing the open Project.
-  const [view, setView] = useState<View>('launcher');
+  const [view, setView] = useState<ViewId>(DEFAULT_VIEW);
   // A live mirror of `view` for subscription handlers that must know the
   // current view without re-subscribing on every navigation (issue 115).
-  const viewRef = useRef<View>('launcher');
+  const viewRef = useRef<ViewId>(DEFAULT_VIEW);
   useEffect(() => {
     viewRef.current = view;
   }, [view]);
+  // The shell's live facts (shell-model, issue 123): what the tabs, badges,
+  // and keep-mounted hosting derive from. The ref mirrors the memo below
+  // (assigned each render, the viewRef pattern) so the stable event applier
+  // never closes over stale facts.
+  const shellCtxRef = useRef<ShellContext>({ hasPlanning: false, runCount: 0, hasTalk: false });
+  // Every view move goes through the pure `viewAfterEvent`: scattered
+  // hand-coded setView rules became named shell events the model owns.
+  const applyShellEvent = useCallback((event: ShellEvent): void => {
+    setView((cur) => viewAfterEvent(cur, event, shellCtxRef.current));
+  }, []);
   const [paneStatus, setPaneStatus] = useState('starting…');
 
   // The UI theme (Atlas design language): dark navy stage by default, with a
@@ -359,7 +384,7 @@ export function App(): JSX.Element {
         void openProjectHere(decision.path);
       } else if (decision.kind === 'reattach') {
         setActiveProjectKey(decision.key);
-        setView('map');
+        applyShellEvent({ kind: 'window-reattached' });
       }
       // 'empty' → leave activeProjectKey null; the Window stays on the
       // Launcher (issue 81). We never open the backend cwd here.
@@ -533,6 +558,15 @@ export function App(): JSX.Element {
   const [focusedId, setFocusedId] = useState<number | null>(null);
   // Which tile (if any) is maximized to fill the Pane area; null = tiled grid.
   const [maximizedId, setMaximizedId] = useState<number | null>(null);
+
+  // The shell context (shell-model, issue 123): the Plan tab and Planning
+  // host follow the planning session; the Pane tab's count and the grid's
+  // keep-mounted hosting follow the tracked Runs and the talk session.
+  const shellCtx = useMemo<ShellContext>(
+    () => ({ hasPlanning: planning !== null, runCount: runs.length, hasTalk: talk !== null }),
+    [planning, runs, talk],
+  );
+  shellCtxRef.current = shellCtx;
 
   // --- Run log (issue 34, ADR-0013) ----------------------------------------
   // The Completion-block records for the active Project, newest first — read
@@ -918,7 +952,7 @@ export function App(): JSX.Element {
     setPlanning(null);
     planningPumpRef.current?.reset();
     planningTyping.current = INITIAL_TYPING_STATE;
-    setView((cur) => (cur === 'planning' ? 'map' : cur));
+    applyShellEvent({ kind: 'planning-closed' });
     setBacklog(null);
     setProjectPath(null);
   }, [releaseOrphanedClaims]);
@@ -940,7 +974,7 @@ export function App(): JSX.Element {
       setNewRepoPath('');
       // An explicit open lands on the Map — in particular off the Launcher
       // (issue 81); a no-op elsewhere (opens already happen from the Map).
-      setView((cur) => (cur === 'launcher' ? 'map' : cur));
+      applyShellEvent({ kind: 'project-opened' });
     }
   }, [resetForProjectSwitch]);
 
@@ -985,7 +1019,7 @@ export function App(): JSX.Element {
       setActiveProjectKey(res.activeProjectKey);
       setInboxFocus({ project: item.project, issueId: item.issueId, fileRef: item.fileRef });
       setInboxFocusSeq((n) => n + 1);
-      setView('map');
+      applyShellEvent({ kind: 'attention-opened' });
     },
     [attention.workbenchRoot, resetForProjectSwitch],
   );
@@ -1590,7 +1624,7 @@ export function App(): JSX.Element {
         return;
       }
 
-      setView('pane');
+      applyShellEvent({ kind: 'run-started' });
       setFocusedId(target.issueId);
 
       // Already tracked → just surface it, exactly as before (no re-spawn).
@@ -1774,7 +1808,7 @@ export function App(): JSX.Element {
         repoPath: projectView?.defaultRepoPath ?? p.defaultRepoPath,
         label: p.label,
       });
-      setView('planning');
+      applyShellEvent({ kind: 'planning-started' });
     },
     [resetForProjectSwitch],
   );
@@ -1827,10 +1861,13 @@ export function App(): JSX.Element {
 
   // Just talk (issue 81): one warm bare Pane — CORE.md injected for workbench
   // projects (main reads it at the spawn edge), nothing claimed or tracked.
-  const startTalk = useCallback((target: TalkTarget): void => {
-    setTalk(target);
-    setView('pane');
-  }, []);
+  const startTalk = useCallback(
+    (target: TalkTarget): void => {
+      setTalk(target);
+      applyShellEvent({ kind: 'run-started' });
+    },
+    [applyShellEvent],
+  );
 
   const talkToProject = useCallback(
     (p: LauncherProject): void =>
@@ -1883,7 +1920,7 @@ export function App(): JSX.Element {
           prev.some((r) => r.target.issueId === target.issueId) ? prev : [...prev, newRun(target)],
         );
         setFocusedId(target.issueId);
-        setView('pane');
+        applyShellEvent({ kind: 'run-started' });
       } else {
         // Same project already open: the normal path, with its duplicate and
         // concurrency-isolation guards against the live Run set.
@@ -2627,7 +2664,7 @@ export function App(): JSX.Element {
               },
         );
       }
-      setView('pane');
+      applyShellEvent({ kind: 'run-started' });
     },
     [midMerge, projectPath, backlog, dispatcher, runs, runStatusOf],
   );
@@ -3230,17 +3267,137 @@ export function App(): JSX.Element {
   const shape = gridShape(runs.length + (talk !== null ? 1 : 0));
   const maximizedRun = runs.find((r) => r.target.issueId === maximizedId) ?? null;
 
-  return (
-    <div className="app">
-      <header className="app__header">
-        <div className="app__brand" title="Mission Control">
-          <span className="app__mark" aria-hidden="true" />
-          <span className="app__wordmark">Mission Control</span>
-          <span className="app__presence">
-            <span className="app__pulse" aria-hidden="true" />
-            <span className="app__presence-text">all systems steady</span>
-          </span>
+  // Open-here-or-new-Window choice (issue 121): this Window already has a
+  // Project open and the user picked a DIFFERENT one from the home grid
+  // (with nothing running — a live runner takes the stronger interrupt
+  // dialog below instead). Rather than silently switching this Window,
+  // offer the same choice the project bar's buttons give — so the user can
+  // open the other Project alongside this one without touching the top bar.
+  // Open here switches this Window; Open in new Window leaves it untouched;
+  // Cancel stays put. (Still the hand-rolled overlay: the redesign replaces
+  // exactly ONE dialog in the tracer slice — this one follows in the shell
+  // rebuild, issue 124.)
+  const openChoiceDialog = pendingOpenChoice !== null && (
+    <div
+      className="app__interrupt-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="open-choice-title"
+    >
+      <div className="app__interrupt">
+        <h2 className="app__interrupt-title" id="open-choice-title">
+          Open {pendingOpenChoice.label}
+        </h2>
+        <p className="app__interrupt-text">
+          <strong>
+            {projects.find((p) => p.key === activeProjectKey)?.label ?? 'This project'}
+          </strong>{' '}
+          is open in this window. Open <strong>{pendingOpenChoice.label}</strong> here instead,
+          or in a new window so you can work on both at once?
+        </p>
+        <div className="app__interrupt-actions">
+          <button
+            className="app__interrupt-primary"
+            onClick={() => {
+              void openProjectHere(pendingOpenChoice.path);
+              setPendingOpenChoice(null);
+            }}
+            title="Switch this window to the picked project"
+          >
+            Open here
+          </button>
+          <button
+            className="app__interrupt-secondary"
+            onClick={() => {
+              void window.mc.openWindow({ path: pendingOpenChoice.path });
+              setPendingOpenChoice(null);
+            }}
+            title="Open the picked project in a new window; this window stays put"
+          >
+            Open in new window
+          </button>
+          <button
+            className="app__interrupt-cancel"
+            onClick={() => setPendingOpenChoice(null)}
+          >
+            Cancel
+          </button>
         </div>
+      </div>
+    </div>
+  );
+
+  // Interrupt confirmation (issue 114): a runner is fixing an issue in the
+  // Project this Window has open, and the user picked a different one in the
+  // switcher or the Launcher's Continue list. Rather than silently killing
+  // the live Run, offer to open the other Project in a NEW Window — which
+  // leaves this one (and its runner) untouched. "Switch here anyway" performs
+  // the interrupting change; Cancel stays put (the controlled
+  // switcher/Launcher snap back on their own). The redesign's tracer (issue
+  // 123): the first modal on the Dialog primitive — Radix supplies the
+  // portal, overlay, focus trap, and Escape/outside-click dismissal (both
+  // land on Cancel); the Atlas tokens supply every visual.
+  const interruptDialog = (
+    <Dialog
+      open={pendingProjectChange !== null}
+      onOpenChange={(open) => {
+        if (!open) setPendingProjectChange(null);
+      }}
+    >
+      {pendingProjectChange !== null && (
+        <DialogContent>
+          <DialogTitle>A runner is working here</DialogTitle>
+          <DialogDescription>
+            <strong>
+              {projects.find((p) => p.key === activeProjectKey)?.label ?? 'This project'}
+            </strong>{' '}
+            has a runner fixing an issue. Opening{' '}
+            <strong>{pendingProjectChange.label}</strong> in this window would interrupt it. Open{' '}
+            <strong>{pendingProjectChange.label}</strong> in a new window instead so the running
+            work keeps going?
+          </DialogDescription>
+          <DialogActions>
+            <Button
+              variant="primary"
+              onClick={() => {
+                void window.mc.openWindow({ path: pendingProjectChange.path });
+                setPendingProjectChange(null);
+              }}
+              title="Open the other project in a new window; this window's runner keeps going"
+            >
+              Open in new window
+            </Button>
+            <Button
+              variant="danger"
+              onClick={() => {
+                pendingProjectChange.proceed();
+                setPendingProjectChange(null);
+              }}
+              title="Switch this window now — the running work here is interrupted"
+            >
+              Switch here anyway
+            </Button>
+            <Button
+              variant="ghost"
+              className="ui-btn--end"
+              onClick={() => setPendingProjectChange(null)}
+            >
+              Cancel
+            </Button>
+          </DialogActions>
+        </DialogContent>
+      )}
+    </Dialog>
+  );
+
+  return (
+    <AppShell
+      view={view}
+      shellCtx={shellCtx}
+      onNavigate={(to) => applyShellEvent({ kind: 'navigate', to })}
+      theme={theme}
+      onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
+      projectBar={
         <ProjectBar
           projects={projects}
           activeProjectKey={activeProjectKey}
@@ -3258,91 +3415,40 @@ export function App(): JSX.Element {
           onOpenNewWindow={openInNewWindow}
           error={projectError}
         />
-        <nav className="app__nav">
-          {/* The home affordance (issue 81): return this Window to the
-              Launcher — without closing its Project (the Map tab goes back). */}
-          <button
-            className={`app__tab${view === 'launcher' ? ' app__tab--active' : ''}`}
-            onClick={() => setView('launcher')}
-            title="Home — the Launcher"
-          >
-            Home
-          </button>
-          <button
-            className={`app__tab${view === 'map' ? ' app__tab--active' : ''}`}
-            onClick={() => setView('map')}
-          >
-            Map
-          </button>
-          <button
-            className={`app__tab${view === 'pane' ? ' app__tab--active' : ''}`}
-            onClick={() => setView('pane')}
-          >
-            Pane{runs.length > 0 ? ` (${runs.length})` : ''}
-          </button>
-          {/* The Planning view's tab (issue 83): present only while a Big
-              feature planning session is open on this Window's project. */}
-          {planning !== null && (
-            <button
-              className={`app__tab${view === 'planning' ? ' app__tab--active' : ''}`}
-              onClick={() => setView('planning')}
-            >
-              Plan
-            </button>
-          )}
-          {/* The Inbox is a place you look (ADR-0012): a plain tab — no count,
-              no badge, no pulse — that shows what awaits you when YOU choose
-              to look. */}
-          <button
-            className={`app__tab${view === 'inbox' ? ' app__tab--active' : ''}`}
-            onClick={() => setView('inbox')}
-          >
-            Inbox
-          </button>
-          <button
-            className="app__theme-toggle"
-            onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
-            title={theme === 'dark' ? 'Switch to light' : 'Switch to dark'}
-            aria-label="Toggle light / dark theme"
-          >
-            {theme === 'dark' ? (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9z" />
-              </svg>
-            ) : (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="4" />
-                <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
-              </svg>
-            )}
-          </button>
-        </nav>
-
-        {view === 'pane' && runs.length > 0 && (
-          <span className="app__paneinfo">
-            {maximizedRun ? (
-              <>
-                <span className="app__run-title">
-                  {String(maximizedRun.target.issueId).padStart(2, '0')} ·{' '}
-                  {maximizedRun.target.issueTitle}
+      }
+      statusArea={
+        <>
+          {view === 'pane' && runs.length > 0 && (
+            <span className="app__paneinfo">
+              {maximizedRun ? (
+                <>
+                  <span className="app__run-title">
+                    {String(maximizedRun.target.issueId).padStart(2, '0')} ·{' '}
+                    {maximizedRun.target.issueTitle}
+                  </span>
+                  <button className="run-restore" onClick={() => setMaximizedId(null)}>
+                    Restore grid
+                  </button>
+                </>
+              ) : (
+                <span className="app__status">
+                  {runs.length} Run{runs.length === 1 ? '' : 's'} tiled
                 </span>
-                <button className="run-restore" onClick={() => setMaximizedId(null)}>
-                  Restore grid
-                </button>
-              </>
-            ) : (
-              <span className="app__status">
-                {runs.length} Run{runs.length === 1 ? '' : 's'} tiled
-              </span>
-            )}
-          </span>
-        )}
-        {view === 'pane' && runs.length === 0 && (
-          <span className="app__status">Pane: {paneStatus}</span>
-        )}
-      </header>
-
-      <div className="app__view">
+              )}
+            </span>
+          )}
+          {view === 'pane' && runs.length === 0 && (
+            <span className="app__status">Pane: {paneStatus}</span>
+          )}
+        </>
+      }
+      dialogs={
+        <>
+          {interruptDialog}
+          {openChoiceDialog}
+        </>
+      }
+    >
         {/* Map stays mounted (hidden in Pane view) so its live watch keeps the
             backlog — and therefore every Run's status and the drain plan —
             current even while you watch a Pane. */}
@@ -3356,7 +3462,10 @@ export function App(): JSX.Element {
               <span className="app__inbox-focus-text">
                 <strong>{onboardNudge}</strong> is set up — its backlog is empty. Plan a{' '}
                 <strong>Big feature</strong> or add a <strong>Quick fix</strong> from{' '}
-                <button className="app__nudge-home" onClick={() => setView('launcher')}>
+                <button
+                  className="app__nudge-home"
+                  onClick={() => applyShellEvent({ kind: 'navigate', to: 'launcher' })}
+                >
                   Home
                 </button>
                 .
@@ -3635,7 +3744,9 @@ export function App(): JSX.Element {
             )}
           </div>
         )}
-        {runs.length === 0 && talk === null && view === 'pane' && (
+        {/* With nothing live to preserve, the empty-shell Pane mounts per
+            visit like any remount view (shell-model's pane policy). */}
+        {runs.length === 0 && talk === null && isSlotMounted('pane', view, shellCtx) && (
           <div className="app__slot" style={{ display: 'flex' }}>
             <Pane onStatusChange={setPaneStatus} onExit={() => setPaneStatus('exited')} />
           </div>
@@ -3645,7 +3756,7 @@ export function App(): JSX.Element {
             preview. Kept MOUNTED (hidden) while other views show, so the
             planning session — and its file watch — survive tab switches;
             it unmounts only when the project switches (state cleared). */}
-        {planning !== null && (
+        {planning !== null && isSlotMounted('planning', view, shellCtx) && (
           <div
             className="app__slot"
             style={{ display: view === 'planning' ? 'flex' : 'none' }}
@@ -3665,7 +3776,7 @@ export function App(): JSX.Element {
         {/* The Launcher (issue 81): the front door every empty Window shows,
             and where the Home tab returns any Window — with its Project (if
             any) left open and untouched. */}
-        {view === 'launcher' && (
+        {isSlotMounted('launcher', view, shellCtx) && (
           <div className="app__slot" style={{ display: 'flex' }}>
             <Launcher
               projects={launcherProjects}
@@ -3674,7 +3785,11 @@ export function App(): JSX.Element {
               activeProjectLabel={
                 projects.find((p) => p.key === activeProjectKey)?.label ?? null
               }
-              onBackToProject={activeProjectKey !== null ? () => setView('map') : null}
+              onBackToProject={
+                activeProjectKey !== null
+                  ? () => applyShellEvent({ kind: 'navigate', to: 'map' })
+                  : null
+              }
               onOpenCard={openCard}
               onProjectCreated={(created) => void landOnNewProject(created)}
               onJustTalkProject={talkToProject}
@@ -3687,7 +3802,7 @@ export function App(): JSX.Element {
             "viewing", which is what advances the briefing's last-seen stamp
             and freezes the briefing you're reading. Available in every
             Window, whatever Project (if any) it has open. */}
-        {view === 'inbox' && (
+        {isSlotMounted('inbox', view, shellCtx) && (
           <div className="app__slot" style={{ display: 'flex' }}>
             <Inbox
               snapshot={attention}
@@ -3697,124 +3812,6 @@ export function App(): JSX.Element {
             />
           </div>
         )}
-      </div>
-
-      {/* Interrupt confirmation (issue 114): a runner is fixing an issue in the
-          Project this Window has open, and the user picked a different one in
-          the switcher or the Launcher's Continue list. Rather than silently
-          killing the live Run, offer to open the other Project in a NEW Window
-          — which leaves this one (and its runner) untouched. "Switch here
-          anyway" performs the interrupting change; Cancel stays put (the
-          controlled switcher/Launcher snap back on their own). */}
-      {pendingProjectChange !== null && (
-        <div
-          className="app__interrupt-overlay"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="interrupt-title"
-        >
-          <div className="app__interrupt">
-            <h2 className="app__interrupt-title" id="interrupt-title">
-              A runner is working here
-            </h2>
-            <p className="app__interrupt-text">
-              <strong>
-                {projects.find((p) => p.key === activeProjectKey)?.label ?? 'This project'}
-              </strong>{' '}
-              has a runner fixing an issue. Opening{' '}
-              <strong>{pendingProjectChange.label}</strong> in this window would interrupt it. Open{' '}
-              <strong>{pendingProjectChange.label}</strong> in a new window instead so the running
-              work keeps going?
-            </p>
-            <div className="app__interrupt-actions">
-              <button
-                className="app__interrupt-primary"
-                onClick={() => {
-                  void window.mc.openWindow({ path: pendingProjectChange.path });
-                  setPendingProjectChange(null);
-                }}
-                title="Open the other project in a new window; this window's runner keeps going"
-              >
-                Open in new window
-              </button>
-              <button
-                className="app__interrupt-danger"
-                onClick={() => {
-                  pendingProjectChange.proceed();
-                  setPendingProjectChange(null);
-                }}
-                title="Switch this window now — the running work here is interrupted"
-              >
-                Switch here anyway
-              </button>
-              <button
-                className="app__interrupt-cancel"
-                onClick={() => setPendingProjectChange(null)}
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Open-here-or-new-Window choice (issue 121): this Window already has a
-          Project open and the user picked a DIFFERENT one from the home grid
-          (with nothing running — a live runner takes the stronger interrupt
-          overlay above instead). Rather than silently switching this Window,
-          offer the same choice the project bar's buttons give — so the user can
-          open the other Project alongside this one without touching the top bar.
-          Open here switches this Window; Open in new Window leaves it untouched;
-          Cancel stays put. */}
-      {pendingOpenChoice !== null && (
-        <div
-          className="app__interrupt-overlay"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="open-choice-title"
-        >
-          <div className="app__interrupt">
-            <h2 className="app__interrupt-title" id="open-choice-title">
-              Open {pendingOpenChoice.label}
-            </h2>
-            <p className="app__interrupt-text">
-              <strong>
-                {projects.find((p) => p.key === activeProjectKey)?.label ?? 'This project'}
-              </strong>{' '}
-              is open in this window. Open <strong>{pendingOpenChoice.label}</strong> here instead,
-              or in a new window so you can work on both at once?
-            </p>
-            <div className="app__interrupt-actions">
-              <button
-                className="app__interrupt-primary"
-                onClick={() => {
-                  void openProjectHere(pendingOpenChoice.path);
-                  setPendingOpenChoice(null);
-                }}
-                title="Switch this window to the picked project"
-              >
-                Open here
-              </button>
-              <button
-                className="app__interrupt-secondary"
-                onClick={() => {
-                  void window.mc.openWindow({ path: pendingOpenChoice.path });
-                  setPendingOpenChoice(null);
-                }}
-                title="Open the picked project in a new window; this window stays put"
-              >
-                Open in new window
-              </button>
-              <button
-                className="app__interrupt-cancel"
-                onClick={() => setPendingOpenChoice(null)}
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
+    </AppShell>
   );
 }
