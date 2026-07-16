@@ -18,6 +18,7 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
+  TruncatedText,
 } from './components';
 import type { ProjectView } from '../../shared/ipc-contract';
 
@@ -60,16 +61,19 @@ export function ProjectSwitcher({
         <DropdownMenuTrigger asChild>
           <button
             className="shell-project__pill"
-            title={active ? active.key : 'Open a Project'}
             aria-label="Active Project — click to switch"
           >
             <span
               className={`shell-project__dot${active ? ' shell-project__dot--live' : ''}`}
               aria-hidden="true"
             />
-            <span className="shell-project__name">
-              {active ? active.label || basename(active.key) : 'No project'}
-            </span>
+            {/* Long Project names truncate with an ellipsis and reveal in full
+                through the shared Tooltip primitive (issue 126). */}
+            <TruncatedText
+              className="shell-project__name"
+              text={active ? active.label || basename(active.key) : 'No project'}
+              side="bottom"
+            />
             {active && <span className="shell-project__stage">{STAGE_LABEL[active.stage]}</span>}
             <svg
               className="shell-project__chev"

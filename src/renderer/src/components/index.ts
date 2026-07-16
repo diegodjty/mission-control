@@ -17,6 +17,7 @@ export {
 } from './DropdownMenu';
 export { Tabs, TabsList, TabsTrigger, TabsContent } from './Tabs';
 export { Tooltip, TooltipProvider } from './Tooltip';
+export { TruncatedText, type TruncatedTextProps } from './TruncatedText';
 export { Toast, ToastProvider, ToastTitle, ToastDescription } from './Toast';
 export { Button, type ButtonProps, type ButtonVariant } from './Button';
 export { Card, type CardProps } from './Card';

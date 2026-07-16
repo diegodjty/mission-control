@@ -62,6 +62,16 @@
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
 
   --font-sans: "Montserrat", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+
+  /* ---- responsive breakpoints (issue 126) ----
+     The one place a breakpoint width is defined. A CSS @media condition can't
+     read a custom property, so the shell (AppShell) reads these off :root at
+     runtime and toggles a matching data-attribute on the .app root
+     (data-narrow / data-compact) that the narrow-collapse and reflow rules
+     below consume — see src/shared/breakpoints.ts for the token→attribute map.
+     Theme-independent, so they stay here and are not overridden per theme. */
+  --bp-narrow: 900px;   /* rail collapses to icons; header text yields */
+  --bp-compact: 640px;  /* shared grids / panels drop to one fluid column */
 }
 
 :root[data-theme="light"] {
@@ -332,25 +342,34 @@ body {
   font-weight: 500;
 }
 
-/* Collapsed to icons — on demand (data-collapsed) or below the breakpoint. */
-.app__rail[data-collapsed='true'] {
+/* Collapsed to icons — on demand (data-collapsed on the rail) or below the
+   narrow breakpoint (data-narrow on the shell root, set by the AppShell from
+   the --bp-narrow token — index.css :root, src/shared/breakpoints.ts). Both
+   conditions produce the identical icon-only rail, so they share these rules. */
+.app__rail[data-collapsed='true'],
+.app[data-narrow='true'] .app__rail {
   --rail-w: 60px;
 }
 .app__rail[data-collapsed='true'] .app__rail-label,
-.app__rail[data-collapsed='true'] .app__wordmark {
+.app__rail[data-collapsed='true'] .app__wordmark,
+.app[data-narrow='true'] .app__rail-label,
+.app[data-narrow='true'] .app__wordmark {
   display: none;
 }
-.app__rail[data-collapsed='true'] .app__rail-item {
+.app__rail[data-collapsed='true'] .app__rail-item,
+.app[data-narrow='true'] .app__rail-item {
   justify-content: center;
   gap: 0;
   padding: 9px 0;
 }
-.app__rail[data-collapsed='true'] .app__rail-brand {
+.app__rail[data-collapsed='true'] .app__rail-brand,
+.app[data-narrow='true'] .app__rail-brand {
   justify-content: center;
   padding: 6px 0 14px;
 }
 /* The badge rides the icon's top-right corner when there's no room for a row. */
-.app__rail[data-collapsed='true'] .app__rail-badge {
+.app__rail[data-collapsed='true'] .app__rail-badge,
+.app[data-narrow='true'] .app__rail-badge {
   position: absolute;
   top: 3px;
   right: 5px;
@@ -359,7 +378,8 @@ body {
   font-size: 9px;
   line-height: 1.5;
 }
-.app__rail[data-collapsed='true'] .app__rail-dot {
+.app__rail[data-collapsed='true'] .app__rail-dot,
+.app[data-narrow='true'] .app__rail-dot {
   position: absolute;
   top: 6px;
   right: 9px;
@@ -534,49 +554,19 @@ body {
   max-width: 240px;
 }
 
-/* Below a narrow width, the rail auto-collapses to icons regardless of the
-   manual toggle, and header text yields to the essential controls. */
-@media (max-width: 900px) {
-  .app__rail {
-    --rail-w: 60px;
-  }
-  .app__rail .app__rail-label,
-  .app__rail .app__wordmark {
-    display: none;
-  }
-  .app__rail .app__rail-item {
-    justify-content: center;
-    gap: 0;
-    padding: 9px 0;
-  }
-  .app__rail .app__rail-brand {
-    justify-content: center;
-    padding: 6px 0 14px;
-  }
-  .app__rail .app__rail-badge {
-    position: absolute;
-    top: 3px;
-    right: 5px;
-    min-width: 0;
-    padding: 0 4px;
-    font-size: 9px;
-    line-height: 1.5;
-  }
-  .app__rail .app__rail-dot {
-    position: absolute;
-    top: 6px;
-    right: 9px;
-    margin: 0;
-  }
-  .app__crumb {
-    display: none;
-  }
-  .app__search {
-    min-width: 0;
-  }
-  .app__search-text {
-    display: none;
-  }
+/* Below the narrow breakpoint (data-narrow, set by the AppShell from the
+   --bp-narrow token) the header also yields its non-essential text to the
+   controls that matter — the search collapses to its icon and the path
+   breadcrumb drops out. The rail's own icon-collapse is handled by the shared
+   rules above, keyed off the same attribute. */
+.app[data-narrow='true'] .app__crumb {
+  display: none;
+}
+.app[data-narrow='true'] .app__search {
+  min-width: 0;
+}
+.app[data-narrow='true'] .app__search-text {
+  display: none;
 }
 
 .app__status {
@@ -3583,6 +3573,20 @@ body.is-col-resizing {
 
 .ui-tooltip__arrow {
   fill: var(--bg1);
+}
+
+/* ---- Truncation (issue 126) ----
+   The visible half of the TruncatedText primitive: one line, clipped with an
+   ellipsis. `min-width: 0` lets it shrink inside a flex row instead of forcing
+   its parent to overflow (the shared no-horizontal-scroll rule). The tooltip
+   half is added by the component only when the text is actually cut off. */
+.ui-truncate {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ---- Toast ---- */

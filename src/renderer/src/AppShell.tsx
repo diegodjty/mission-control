@@ -18,8 +18,10 @@
  * render decision, driven by `shell-model`'s `isSlotMounted` (Map/Pane/Planning
  * survive navigation with live terminals and watchers intact).
  */
-import type { ReactNode } from 'react';
+import { Fragment, useLayoutEffect, useState, type ReactNode } from 'react';
 import { shellTabs, type ShellContext, type ViewId } from '../../shared/shell-model';
+import { BREAKPOINT_LIST, maxWidthQuery } from '../../shared/breakpoints';
+import { Tooltip, TooltipProvider, TruncatedText } from './components';
 
 interface AppShellProps {
   /** The active view (local state owned by the parent). */
@@ -104,8 +106,42 @@ export function AppShell({
 }: AppShellProps): JSX.Element {
   const tabs = shellTabs(shellCtx);
 
+  // Responsive breakpoint bridge (issue 126): a CSS @media condition can't read
+  // a custom property, so we read each breakpoint width off :root's `--bp-*`
+  // tokens (the single source of truth) and mirror the matches into state. The
+  // matching data-attribute is then rendered onto the shell root, and the CSS
+  // narrow-collapse / reflow rules consume it. Kept as state (not an imperative
+  // DOM toggle) so the rail knows when it's narrow-collapsed — its labels are
+  // hidden, so it reveals them through the Tooltip primitive instead.
+  const [matches, setMatches] = useState<Record<string, boolean>>({});
+  useLayoutEffect(() => {
+    if (typeof window.matchMedia !== 'function') return;
+    const cs = getComputedStyle(document.documentElement);
+    const cleanups = BREAKPOINT_LIST.map((bp) => {
+      const query = maxWidthQuery(cs.getPropertyValue(bp.token));
+      if (!query) return () => {};
+      const mql = window.matchMedia(query);
+      const apply = (): void =>
+        setMatches((prev) => ({ ...prev, [bp.attribute]: mql.matches }));
+      apply();
+      mql.addEventListener('change', apply);
+      return () => mql.removeEventListener('change', apply);
+    });
+    return () => cleanups.forEach((fn) => fn());
+  }, []);
+
+  const shellData: Record<string, string> = {};
+  for (const bp of BREAKPOINT_LIST) {
+    if (matches[bp.attribute]) shellData[bp.attribute] = 'true';
+  }
+  // The rail is icon-only either on demand (the manual flag) or below the
+  // narrow breakpoint; when it is, labels are hidden and the tooltip is how you
+  // read them.
+  const railIconOnly = collapsed || matches['data-narrow'] === true;
+
   return (
-    <div className="app">
+    <TooltipProvider>
+      <div className="app" {...shellData}>
       <nav
         className="app__rail"
         data-collapsed={collapsed ? 'true' : 'false'}
@@ -120,28 +156,38 @@ export function AppShell({
           {/* shell-model decides which entries exist (Plan only while a planning
               session does — issue 83) and what each carries (the Pane's Run
               count, Attention's needs-you count — issue 124); the rail draws it. */}
-          {tabs.map((tab) => (
-            <button
-              key={tab.id}
-              className={`app__rail-item${view === tab.id ? ' app__rail-item--active' : ''}`}
-              aria-current={view === tab.id ? 'page' : undefined}
-              onClick={() => onNavigate(tab.id)}
-              title={tab.title ?? tab.label}
-            >
-              <span className="app__rail-icon" aria-hidden="true">
-                {RAIL_ICONS[tab.id]}
-              </span>
-              <span className="app__rail-label">{tab.label}</span>
-              {tab.badge !== null ? (
-                <span className="app__rail-badge" aria-label={`${tab.badge}`}>
-                  {tab.badge}
+          {tabs.map((tab) => {
+            const item = (
+              <button
+                className={`app__rail-item${view === tab.id ? ' app__rail-item--active' : ''}`}
+                aria-current={view === tab.id ? 'page' : undefined}
+                onClick={() => onNavigate(tab.id)}
+              >
+                <span className="app__rail-icon" aria-hidden="true">
+                  {RAIL_ICONS[tab.id]}
                 </span>
-              ) : (
-                // Plan advertises only its presence — a quiet dot, no count.
-                tab.id === 'planning' && <span className="app__rail-dot" aria-hidden="true" />
-              )}
-            </button>
-          ))}
+                <span className="app__rail-label">{tab.label}</span>
+                {tab.badge !== null ? (
+                  <span className="app__rail-badge" aria-label={`${tab.badge}`}>
+                    {tab.badge}
+                  </span>
+                ) : (
+                  // Plan advertises only its presence — a quiet dot, no count.
+                  tab.id === 'planning' && <span className="app__rail-dot" aria-hidden="true" />
+                )}
+              </button>
+            );
+            // Icon-only rail: the label is hidden, so reveal it (or a custom
+            // title) through the Tooltip primitive. Expanded: the label is
+            // right there, so a tooltip would only repeat it — skip it.
+            return railIconOnly ? (
+              <Tooltip key={tab.id} content={tab.title ?? tab.label} side="right">
+                {item}
+              </Tooltip>
+            ) : (
+              <Fragment key={tab.id}>{item}</Fragment>
+            );
+          })}
         </div>
 
         <div className="app__rail-foot">
@@ -188,9 +234,7 @@ export function AppShell({
         <header className="app__topbar">
           {projectSwitcher}
           {projectPath && (
-            <span className="app__crumb" title={projectPath}>
-              {projectPath}
-            </span>
+            <TruncatedText className="app__crumb" text={projectPath} side="bottom" />
           )}
           {statusArea}
           <button
@@ -221,6 +265,7 @@ export function AppShell({
       </div>
 
       {dialogs}
-    </div>
+      </div>
+    </TooltipProvider>
   );
 }
