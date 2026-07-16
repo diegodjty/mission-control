@@ -8,6 +8,7 @@ import {
   type ActiveRun,
 } from './run-coordinator';
 import type { BacklogIssue, IssueStatus } from './backlog-model';
+import type { RunStatus } from './run-state';
 
 /** Minimal issue factory — only the fields the coordinator/eligibility read. */
 function mk(
@@ -34,6 +35,13 @@ function mk(
 }
 
 const running = (id: number): ActiveRun => ({ issueId: id, status: 'running' });
+
+/** A leftover Run from a PRIOR drain generation (issue 132). */
+const leftover = (id: number, status: RunStatus = 'running'): ActiveRun => ({
+  issueId: id,
+  status,
+  leftover: true,
+});
 
 describe('normalizeCap', () => {
   it('floors non-positive caps at 1', () => {
@@ -151,6 +159,103 @@ describe('planDrain — active Runs occupy slots', () => {
     });
     expect(plan.startable).toEqual([2, 3]);
     expect(plan.queued).toEqual([]);
+  });
+});
+
+describe('planDrain — a leftover Run from a prior drain never wedges a fresh drain (issue 132)', () => {
+  // The reported bug: two `claude` Panes from YESTERDAY's drain lingered alive
+  // at their prompt having neither flipped `done` nor written a Receipt, so
+  // run-state read them `running` forever. A fresh cap-3 drain over three
+  // eligible issues then saw runningCount=2 → freeSlots=1 → started ONE Run and
+  // the rest starved, because those phantom slots never freed. A Run explicitly
+  // marked `leftover` (carried over from a prior drain generation) must not
+  // occupy a slot in — nor halt — the current drain.
+
+  it('does not count a leftover `running` Run against the cap', () => {
+    const issues = [mk(101, 'open'), mk(102, 'open'), mk(103, 'open')];
+    // Two lingering phantoms (99, 105) from a prior drain, plus 3 fresh eligible.
+    const plan = planDrain({
+      issues,
+      maxConcurrent: 3,
+      activeRuns: [leftover(99), leftover(105)],
+    });
+    // All three fresh issues start — the phantoms no longer eat the budget.
+    expect(plan.startable).toEqual([101, 102, 103]);
+    expect(plan.queued).toEqual([]);
+  });
+
+  it('starts every fresh issue up to the cap regardless of how many leftovers linger', () => {
+    const issues = [mk(1, 'open'), mk(2, 'open')];
+    const plan = planDrain({
+      issues,
+      maxConcurrent: 2,
+      activeRuns: [leftover(90), leftover(91), leftover(92), leftover(93)],
+    });
+    expect(plan.startable).toEqual([1, 2]);
+  });
+
+  it('a leftover Run whose Pane is still alive (`running`) does not halt the drain', () => {
+    const issues = [mk(1, 'open')];
+    const plan = planDrain({
+      issues,
+      maxConcurrent: 3,
+      activeRuns: [leftover(99, 'running')],
+    });
+    expect(plan.drain.stop).toBe(false);
+    expect(plan.startable).toEqual([1]);
+  });
+
+  it('a leftover Run that ended `blocked` (session died) does NOT halt a fresh drain', () => {
+    // Before the fix a stale blocked Pane from yesterday would stop today's
+    // drain with run-blocked. A leftover blocked Run is not this drain's
+    // concern — the drain proceeds.
+    const issues = [mk(1, 'open'), mk(2, 'open')];
+    const plan = planDrain({
+      issues,
+      maxConcurrent: 2,
+      activeRuns: [leftover(99, 'blocked')],
+    });
+    expect(plan.drain.stop).toBe(false);
+    expect(plan.startable).toEqual([1, 2]);
+  });
+
+  it('still excludes a leftover Run\'s OWN issue from re-start (no double-run)', () => {
+    // 99 is a leftover whose issue happens to still read `open`; it must never
+    // be re-started inside this drain even though it no longer occupies a slot.
+    const issues = [mk(99, 'open'), mk(101, 'open')];
+    const plan = planDrain({
+      issues,
+      maxConcurrent: 3,
+      activeRuns: [leftover(99, 'running')],
+    });
+    expect(plan.startable).toEqual([101]);
+    expect(plan.startable).not.toContain(99);
+  });
+
+  it('still counts THIS drain\'s own Runs against the cap (leftovers are only prior ones)', () => {
+    // A current-drain Run (not marked leftover) occupies its slot exactly as
+    // before, so the drain never over-starts its own work.
+    const issues = [mk(1, 'wip'), mk(2, 'open'), mk(3, 'open')];
+    const plan = planDrain({
+      issues,
+      maxConcurrent: 2,
+      // 1 is this drain's running Run; 99 is a prior-drain leftover.
+      activeRuns: [running(1), leftover(99)],
+    });
+    expect(plan.startable).toEqual([2]); // cap 2 − 1 current running = 1 free
+    expect(plan.queued).toEqual([3]);
+  });
+
+  it('a leftover chained Run does not hold the single integration-branch slot', () => {
+    // A prior-drain chained Run left running must not block a fresh chain root
+    // from taking the solo slot.
+    const issues = [mk(1, 'open'), mk(2, 'open', [1])];
+    const plan = planDrain({
+      issues,
+      maxConcurrent: 3,
+      activeRuns: [leftover(80, 'running')],
+    });
+    expect(plan.startable).toEqual([1]); // 1 is a chain root; it starts solo
   });
 });
 
