@@ -41,7 +41,7 @@ import {
   deriveAttention,
   type AttentionItem,
   type AttentionResult,
-} from '../shared/attention-model';
+} from '../shared/attention-hub-model';
 import type { AttentionSnapshot } from '../shared/ipc-contract';
 import { parseRegistry } from '../shared/workbench-model';
 

@@ -418,12 +418,12 @@ export function Launcher({
                     >
                       <span className="launcher__row-name">{c.label}</span>
                       <span className="launcher__row-counts">{c.countsLabel}</span>
-                      {c.parkedHitl > 0 && (
+                      {c.needsYou > 0 && (
                         <span
                           className="launcher__card-needsyou"
-                          title={`${c.parkedHitl} parked awaiting you`}
+                          title={`${c.needsYou} attention item${c.needsYou === 1 ? '' : 's'} awaiting you`}
                         >
-                          {c.parkedHitl} needs you
+                          {c.needsYou} needs you
                         </span>
                       )}
                       <span className="launcher__row-liveness">{c.livenessLabel}</span>
@@ -444,18 +444,20 @@ export function Launcher({
                     >
                       {/* Full card stats (issue 118): the header carries the
                           name, the pipeline-stage badge, and — when the Project
-                          is parked awaiting the human — the needs-you badge (no
-                          badge at zero). The liveness line reads "N running" /
-                          a relative last-activity / "not started". */}
+                          has attention awaiting the human — the needs-you badge
+                          (no badge at zero; the same count the rail and the
+                          attention surface show, issue 125). The liveness line
+                          reads "N running" / a relative last-activity /
+                          "not started". */}
                       <span className="launcher__card-header">
                         <span className="launcher__card-name">{c.label}</span>
                         {c.stageLabel && <span className="launcher__card-stage">{c.stageLabel}</span>}
-                        {c.parkedHitl > 0 && (
+                        {c.needsYou > 0 && (
                           <span
                             className="launcher__card-needsyou"
-                            title={`${c.parkedHitl} parked awaiting you`}
+                            title={`${c.needsYou} attention item${c.needsYou === 1 ? '' : 's'} awaiting you`}
                           >
-                            {c.parkedHitl} needs you
+                            {c.needsYou} needs you
                           </span>
                         )}
                       </span>

@@ -419,8 +419,16 @@ export function relativeActivityLabel(iso: string | null, now: Date): string {
 export interface ProjectCardSignals {
   /** Count of live Runs (run-coordinator / Dispatcher state) — drives "N running" and the float. */
   liveRuns: number;
-  /** Parked HITL count (the Inbox's attention watch) — the needs-you badge and the float. */
+  /** Parked HITL count (attention-hub-model) — the attention-float's second tier. */
   parkedHitl: number;
+  /**
+   * Needs-you count (attention-hub-model, issue 125): this Project's actionable
+   * attention items. The card's needs-you badge, and the SAME number the rail
+   * badge and the unified attention surface read for this Project — so the
+   * three can never disagree. Distinct from `parkedHitl`, which counts only
+   * parked HITL and stays the ordering tier issue 118 defined.
+   */
+  needsYou: number;
   /** The Project's pipeline stage (registry / CONFIG) — the stage badge. */
   stage: PipelineStage;
   /** True for a repo-less Project (no member repos) — enables the "not started" state. */
@@ -530,6 +538,7 @@ export function buildProjectGrid(
     const signals = signalsFor(p);
     const liveRuns = Math.max(0, signals?.liveRuns ?? 0);
     const parkedHitl = Math.max(0, signals?.parkedHitl ?? 0);
+    const needsYou = Math.max(0, signals?.needsYou ?? 0);
     const stage: PipelineStage = signals?.stage ?? 'backlog';
     const repoless = signals?.repoless ?? false;
     return {
@@ -538,6 +547,7 @@ export function buildProjectGrid(
       activityLabel: relativeActivityLabel(p.lastActivity, now),
       liveRuns,
       parkedHitl,
+      needsYou,
       livenessLabel: livenessLabel({ liveRuns, counts: p.counts, lastActivity: p.lastActivity, repoless, now }),
       stage,
       stageLabel: stageBadgeLabel(stage),

@@ -2099,7 +2099,7 @@ body.is-col-resizing {
 
 /* --- Inbox (issue 80, ADR-0016): a quiet place you look, never a notifier -- */
 
-.inbox {
+.attention {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
@@ -2107,16 +2107,16 @@ body.is-col-resizing {
   overflow-y: auto;
 }
 
-.inbox__body {
+.attention__body {
   width: 100%;
-  max-width: 720px;
+  max-width: 760px;
   padding: 20px 24px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 18px;
 }
 
-.inbox__notice {
+.attention__notice {
   margin: 0;
   color: var(--amber-soft);
   background: var(--amber-bg);
@@ -2126,38 +2126,65 @@ body.is-col-resizing {
   font-size: 13px;
 }
 
-.inbox__empty {
+.attention__empty {
   margin: 8px 0;
   color: var(--fg-mute);
   font-size: 14px;
 }
 
-.inbox__briefing,
-.inbox__notes {
+/* ---- Briefing: the since-last-seen journal strip (issue 80/125) ---- */
+.attention__briefing,
+.attention__notes {
   border: 1px solid var(--border-strong);
-  border-radius: 6px;
+  border-radius: 10px;
   background: var(--bg1);
-  padding: 6px 10px;
+  padding: 10px 14px;
 }
 
-.inbox__briefing-summary,
-.inbox__notes-summary {
+.attention__briefing-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.attention__briefing-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--teal);
+  box-shadow: 0 0 8px var(--glow);
+  align-self: center;
+}
+
+.attention__briefing-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg-soft);
+}
+
+.attention__briefing-meta {
+  font-size: 12px;
+  color: var(--fg-mute);
+}
+
+.attention__notes-summary {
   cursor: pointer;
   color: var(--fg-mute);
   font-size: 12px;
   user-select: none;
 }
 
-.inbox__briefing-list {
+.attention__briefing-list {
   list-style: none;
   margin: 8px 0 2px;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 5px;
 }
 
-.inbox__briefing-line {
+.attention__briefing-line {
   display: flex;
   gap: 8px;
   align-items: baseline;
@@ -2165,97 +2192,160 @@ body.is-col-resizing {
   color: var(--fg-mute);
 }
 
-.inbox__group {
+/* ---- Groups: one per Project, urgency-ordered (parked HITL first) ---- */
+.attention__group {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 
-.inbox__group-title {
+.attention__group-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.attention__group-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin: 0;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--fg-mute);
+  color: var(--fg-soft);
 }
 
-.inbox__list {
+.attention__group-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--teal);
+}
+
+.attention__group-count {
+  flex: 0 0 auto;
+  min-width: 18px;
+  text-align: center;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--amber-border);
+  color: var(--amber-soft);
+  background: var(--amber-bg);
+}
+
+.attention__group-open {
+  margin-left: auto;
+  font: inherit;
+  font-size: 12px;
+  color: var(--fg-mute);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 3px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.attention__group-open:hover {
+  color: var(--teal);
+  border-color: var(--border-teal);
+}
+
+.attention__list {
   list-style: none;
   margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 
-.inbox__item {
+.attention__item {
   width: 100%;
   display: flex;
-  align-items: baseline;
-  gap: 10px;
+  align-items: center;
+  gap: 12px;
   text-align: left;
   font: inherit;
   font-size: 13px;
   color: var(--fg-soft);
   background: var(--bg1);
   border: 1px solid var(--border-strong);
-  border-radius: 6px;
-  padding: 8px 12px;
+  border-radius: 10px;
+  padding: 12px 14px;
   cursor: pointer;
 }
 
-.inbox__item:hover {
+.attention__item:hover {
   background: var(--surface-2);
   border-color: var(--border-strong);
 }
 
-.inbox__project {
+/* Parked HITL — the most urgent kind — gets an amber emphasis, per the mock. */
+.attention__item--hitl-park {
+  border-color: var(--amber-border);
+  background: var(--amber-bg);
+}
+
+.attention__project {
   color: var(--teal);
   font-size: 12px;
   white-space: nowrap;
 }
 
-.inbox__text {
+.attention__text {
+  flex: 1 1 auto;
   min-width: 0;
   overflow-wrap: anywhere;
 }
 
-.inbox__badge {
+.attention__action {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--teal);
+  white-space: nowrap;
+}
+
+.attention__badge {
   flex: 0 0 auto;
   font-size: 10px;
-  padding: 2px 6px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 2px 7px;
   border-radius: 4px;
   border: 1px solid var(--border-strong);
   color: var(--fg-mute);
   white-space: nowrap;
 }
 
-.inbox__badge--hitl-park {
+.attention__badge--hitl-park {
   color: var(--amber-soft);
   border-color: var(--amber-border);
   background: var(--amber-bg);
 }
 
-.inbox__badge--curator-proposal {
+.attention__badge--curator-proposal {
   color: var(--violet);
   border-color: var(--violet-border);
   background: var(--violet-bg);
 }
 
-.inbox__badge--blocked-run {
+.attention__badge--blocked-run {
   color: var(--red-soft);
   border-color: var(--red-border);
   background: var(--red-bg);
 }
 
-.inbox__badge--setup-gate {
+.attention__badge--setup-gate {
   color: var(--teal);
   border-color: var(--teal-border);
   background: var(--bg1);
 }
 
-.inbox__badge--new-repo-candidate {
+.attention__badge--new-repo-candidate {
   color: var(--green-soft);
   border-color: var(--green-border);
   background: var(--green-bg);
@@ -3124,7 +3214,7 @@ body.is-col-resizing {
 
 /* ---- floating surfaces read as glass over the ambient stage ---- */
 .app__tile,
-.inbox__item,
+.attention__item,
 .launcher__project,
 .launcher__removable-row,
 .map__drainbar,
@@ -3138,12 +3228,12 @@ body.is-col-resizing {
 }
 
 /* interactive cards lift and pick up a teal edge on hover */
-.inbox__item,
+.attention__item,
 .launcher__project {
   transition: transform 160ms var(--ease-out), border-color 160ms var(--ease-out),
     box-shadow 160ms var(--ease-out);
 }
-.inbox__item:hover,
+.attention__item:hover,
 .launcher__project:hover {
   transform: translateY(-1px);
   border-color: var(--border-teal);
@@ -3166,7 +3256,7 @@ body.is-col-resizing {
 }
 
 /* ---- empty states get the breathing diamond, per the prototype ---- */
-.inbox__empty::before,
+.attention__empty::before,
 .launcher__empty::before,
 .planning__empty::before {
   content: '';
@@ -3180,7 +3270,7 @@ body.is-col-resizing {
   box-shadow: 0 0 26px var(--glow), inset 0 0 18px var(--teal-soft);
   animation: mcBreathe 7s ease-in-out infinite;
 }
-.inbox__empty,
+.attention__empty,
 .launcher__empty,
 .planning__empty {
   text-align: center;

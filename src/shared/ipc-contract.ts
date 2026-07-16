@@ -6,7 +6,7 @@
  * Shared by main, preload, and renderer, so it must stay free of node/electron
  * runtime imports (types only).
  */
-import type { AttentionItem } from './attention-model';
+import type { AttentionItem } from './attention-hub-model';
 import type { Backlog, IssueStatus } from './backlog-model';
 import type { PlanningDoc } from './planning-model';
 import type { CompletionRecord, RunOutcome } from './completion-parser';
@@ -1014,10 +1014,16 @@ export interface ProjectCardView extends LauncherProject {
    */
   liveRuns: number;
   /**
-   * Parked HITL count (issue 118) — the needs-you badge (no badge at zero) and
-   * the attention-float ordering's second tier.
+   * Parked HITL count (issue 118) — the attention-float ordering's second tier.
    */
   parkedHitl: number;
+  /**
+   * Needs-you count (issue 125) — this Project's actionable attention items,
+   * from `attention-hub-model`. The card's needs-you badge (no badge at zero),
+   * and the SAME number the rail badge and the attention surface read for this
+   * Project, so the three can never disagree.
+   */
+  needsYou: number;
   /**
    * The liveness label (issue 118): `"N running"` when a Run is live, else a
    * relative last-activity time, or `"not started"` for a repo-less Project

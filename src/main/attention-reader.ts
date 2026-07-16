@@ -10,7 +10,7 @@
  * detector (issue 95, ADR-0017) it also reads the project's `CONFIG.md`
  * (`workspace_root` + `repos:` map), the workspace root's top-level dirs (each
  * probed for a `.git`), and the workbench `registry.md`. All classification
- * logic lives in `src/shared/attention-model`; this file only reads.
+ * logic lives in `src/shared/attention-hub-model`; this file only reads.
  *
  * Read-only by contract (the whole issue-79 service is): nothing here writes,
  * creates, or commits anything, ever.
@@ -24,7 +24,7 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { readBacklogAt } from './backlog-reader';
-import type { AttentionInput, JournalFile } from '../shared/attention-model';
+import type { AttentionInput, JournalFile } from '../shared/attention-hub-model';
 import type { Backlog } from '../shared/backlog-model';
 import { parseReceipt, type ReceiptRecord } from '../shared/receipt-parser';
 import type { SelfHealInput, WorkspaceEntry } from '../shared/self-heal';

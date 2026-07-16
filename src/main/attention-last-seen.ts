@@ -14,11 +14,11 @@
  * unseen — the safe direction) and a failed persist keeps the in-memory
  * stamps so the running app stays correct; only a restart would re-show.
  * The stamp semantics (parse/serialize/advance) live in the pure
- * `shared/inbox-model`; this file is only the fs edge.
+ * `shared/attention-hub-model`; this file is only the fs edge.
  */
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { advanceLastSeen, parseLastSeen, serializeLastSeen } from '../shared/inbox-model';
+import { advanceLastSeen, parseLastSeen, serializeLastSeen } from '../shared/attention-hub-model';
 
 const FILE_NAME = 'attention-last-seen.json';
 

@@ -1,44 +1,52 @@
 /**
- * Attention model (PURE) — what needs the human, derived from one project's
- * workbench artifacts (issue 78, ADR-0016).
+ * Attention hub model (PURE) — issue 125, ADR-0020.
  *
- * The Inbox's brain: takes plain parsed values — the backlog (backlog-model),
- * Receipts (receipt-parser), plus memory/HUMAN-SETUP/journal facts the adapter
- * read — and derives typed **attention items**:
+ * The SINGLE source of truth for cross-project attention. It absorbs the two
+ * models that used to answer "where am I needed?" separately (the old
+ * `attention-model` and `inbox-model`), so the rail's needs-you badge, the
+ * Launcher cards' needs-you counts, and the unified attention surface can
+ * never disagree — they all read the numbers this module derives.
  *
- *   - `hitl-park` — an `hitl: true` issue at `wip` whose latest Receipt
- *     declares `needs-verification`: a park awaiting the human's sign-off.
- *     A `needs-verification` Receipt on a non-HITL issue is NOT a park (that
- *     is needs-attention territory, handled elsewhere).
- *   - `curator-proposal` — `memory/CORE.proposed.md` exists: a curated CORE
- *     change awaiting human review (CORE edits always need sign-off).
- *   - `blocked-run` — an issue whose latest Receipt declares `blocked` while
- *     the issue isn't `done`: a Run stopped on something only the human can
- *     unstick.
- *   - `setup-gate` — an unchecked HUMAN-SETUP checkbox whose text names an
- *     issue that is open/wip in this backlog: a prerequisite the human owes
- *     the batch. Only explicit references count (`Unblocks: 07, 08`,
- *     `issue 12`) — a bare number in prose ("Node 22") is not a reference.
- *   - `new-repo-candidate` — a git repo has APPEARED under the project's
- *     workspace root but is not yet registered (issue 95, ADR-0017): MC
- *     proposes registering it (the human confirms with one click — a new repo
- *     is new state, never auto-registered). The pure `self-heal` detector
- *     decides candidacy; this module turns each into an item that carries the
- *     repo path + a suggested key for the one-click register action.
- *   - `briefing` — journal entries newer than the caller-supplied last-seen
- *     stamp, rendered as quiet one-liners (never notifications, ADR-0012).
+ * Two layers live here:
  *
- * Each item carries the project, kind, an issue/file reference, one line of
- * human text, and a **stable id** — the same inputs always derive the same
- * ids, so re-derivation dedupes and resolved items simply disappear.
+ *  1. **Per-project derivation** (`deriveAttention`) — turns one project's
+ *     parsed workbench artifacts (backlog, Receipts, memory / HUMAN-SETUP /
+ *     journal facts, self-heal input) into typed **attention items**:
  *
- * "Latest Receipt" follows receipt-audit's latest-wins rule (a superseded
- * re-run's stale outcome is not a live claim), keyed here on the Receipt's
- * declared `finished` stamp — completions files carry no capture time.
+ *       - `hitl-park` — an `hitl: true` issue at `wip` whose latest Receipt
+ *         declares `needs-verification`: a park awaiting the human's sign-off.
+ *         A `needs-verification` Receipt on a non-HITL issue is NOT a park.
+ *       - `curator-proposal` — `memory/CORE.proposed.md` exists: a curated CORE
+ *         change awaiting human review (CORE edits always need sign-off).
+ *       - `blocked-run` — an issue whose latest Receipt declares `blocked` while
+ *         the issue isn't `done`: a Run stopped on something only the human can
+ *         unstick.
+ *       - `setup-gate` — an unchecked HUMAN-SETUP checkbox whose text names an
+ *         issue that is open/wip in this backlog. Only explicit references count
+ *         (`Unblocks: 07, 08`, `issue 12`) — a bare number in prose is not one.
+ *       - `new-repo-candidate` — a git repo APPEARED under the project's
+ *         workspace root but is not yet registered (issue 95, ADR-0017).
+ *       - `briefing` — journal entries newer than the caller-supplied last-seen
+ *         stamp, rendered as quiet one-liners (never notifications, ADR-0012).
  *
- * House PURE contract: no file/network/Electron I/O, any input yields a
- * value, never a throw. Malformed artifacts degrade to no item plus an
- * explicit `notes` entry — never a guess, never silence about a skip.
+ *     Each item carries the project, kind, an issue/file reference, one line of
+ *     human text, and a **stable id** — the same inputs always derive the same
+ *     ids, so re-derivation dedupes and resolved items simply disappear.
+ *
+ *  2. **Cross-project presentation** — the aggregated items (every project's,
+ *     as the background watch collected them) shaped for the surface, the rail,
+ *     and the cards: the briefing split out, the actionable items grouped by
+ *     Project and ordered by urgency (**parked HITL first**), and the needs-you
+ *     counts (total and per-project) every badge reads from. Plus the last-seen
+ *     stamp operations behind the briefing filter and the workbench-path helper
+ *     click-through hands to the normal open flow.
+ *
+ * "Latest Receipt" follows receipt-audit's latest-wins rule, keyed here on the
+ * Receipt's declared `finished` stamp — completions files carry no capture time.
+ *
+ * House PURE contract: no file/network/Electron I/O, any input yields a value,
+ * never a throw. Malformed artifacts degrade to no item plus an explicit
+ * `notes` entry — never a guess, never silence about a skip.
  */
 import type { Backlog, BacklogIssue } from './backlog-model';
 import type { ReceiptRecord } from './receipt-parser';
@@ -52,7 +60,7 @@ export type AttentionKind =
   | 'new-repo-candidate'
   | 'briefing';
 
-/** One thing that needs the human, ready for the cross-project Inbox. */
+/** One thing that needs the human, ready for the cross-project surface. */
 export interface AttentionItem {
   /** The workbench project directory name this item belongs to. */
   project: string;
@@ -67,7 +75,7 @@ export interface AttentionItem {
   id: string;
   /**
    * For a `new-repo-candidate` only (null otherwise): the appeared repo to
-   * register — its absolute path and a suggested short key. The Inbox's
+   * register — its absolute path and a suggested short key. The surface's
    * one-click register action needs both; every other kind leaves it null.
    */
   candidate?: RepoCandidate | null;
@@ -362,7 +370,7 @@ function deriveRepoCandidates(project: string, selfHeal: SelfHealInput | null): 
 }
 
 // ---------------------------------------------------------------------------
-// The derivation
+// The per-project derivation
 // ---------------------------------------------------------------------------
 
 const KIND_ORDER: readonly AttentionKind[] = [
@@ -417,4 +425,217 @@ export function deriveAttention(input: AttentionInput): AttentionResult {
   );
 
   return { items, notes };
+}
+
+// ===========================================================================
+// Cross-project presentation — the unified attention surface / rail / cards
+// ===========================================================================
+
+/** A defensively-read attention-item array: anything malformed degrades out. */
+function asItems(value: readonly AttentionItem[] | null | undefined): AttentionItem[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (i): i is AttentionItem =>
+      i !== null &&
+      typeof i === 'object' &&
+      typeof (i as AttentionItem).id === 'string' &&
+      typeof (i as AttentionItem).project === 'string',
+  );
+}
+
+/** An actionable item is anything a human might act on — everything but the
+ *  quiet journal briefing. This is THE needs-you set the whole app counts. */
+function isActionable(item: AttentionItem): boolean {
+  return item.kind !== 'briefing';
+}
+
+/** One project's actionable attention items, ready to render as a group. */
+export interface AttentionGroup {
+  project: string;
+  /** The project's actionable items, in the aggregate's deterministic order. */
+  items: AttentionItem[];
+  /** Parked-HITL count — what floats this group up the urgency order. */
+  parkedHitl: number;
+  /** This project's needs-you count (its actionable item count). */
+  needsYou: number;
+}
+
+/** The unified attention surface's shape: the briefing, the grouped items, and
+ *  the one needs-you total the rail badge shows. */
+export interface AttentionHub {
+  /** Journal one-liners (kind `briefing`), in the aggregate's newest-first order. */
+  briefing: AttentionItem[];
+  /** Actionable items grouped by Project, ordered by urgency (parked HITL first). */
+  groups: AttentionGroup[];
+  /** Cross-project needs-you: the total actionable (non-briefing) item count. */
+  needsYou: number;
+}
+
+/**
+ * Shape the aggregated cross-project attention list into the unified surface:
+ * the quiet journal **briefing** split out, the actionable items grouped by
+ * Project and ordered by **urgency** — a group with parked HITL floats above
+ * one without (by park count, desc), ties broken alphabetically — so the top
+ * of the list is always the right next thing. Within a group the aggregate's
+ * deterministic order (parked HITL already first per `deriveAttention`) is
+ * preserved. The `needsYou` total is the same number the rail badge reads, so
+ * the surface and the rail cannot disagree. Pure; any input yields a value.
+ */
+export function buildAttentionHub(items: readonly AttentionItem[]): AttentionHub {
+  const briefing: AttentionItem[] = [];
+  const byProject = new Map<string, AttentionItem[]>();
+  for (const item of asItems(items)) {
+    if (!isActionable(item)) {
+      briefing.push(item);
+      continue;
+    }
+    const group = byProject.get(item.project);
+    if (group) group.push(item);
+    else byProject.set(item.project, [item]);
+  }
+
+  const groups: AttentionGroup[] = [...byProject.entries()].map(([project, groupItems]) => ({
+    project,
+    items: groupItems,
+    parkedHitl: groupItems.filter((i) => i.kind === 'hitl-park').length,
+    needsYou: groupItems.length,
+  }));
+  // Urgency float: parked HITL desc, then project name asc (deterministic).
+  groups.sort(
+    (a, b) =>
+      b.parkedHitl - a.parkedHitl ||
+      (a.project < b.project ? -1 : a.project > b.project ? 1 : 0),
+  );
+
+  const needsYou = groups.reduce((n, g) => n + g.needsYou, 0);
+  return { briefing, groups, needsYou };
+}
+
+/**
+ * The cross-project needs-you count — the actionable (non-briefing) item total
+ * the rail badge shows. Equal to `buildAttentionHub(items).needsYou`; kept as a
+ * standalone function so the rail can read the one number without building the
+ * whole surface. Pure and total.
+ */
+export function needsYouCount(items: readonly AttentionItem[]): number {
+  return asItems(items).filter(isActionable).length;
+}
+
+/**
+ * The per-project needs-you counts — a `project → actionable count` map the
+ * Launcher cards read, so a card's badge is the same number the surface shows
+ * for that project and the rail's total is their sum. Projects with no
+ * actionable item are absent (a card then shows no badge). Pure and total.
+ */
+export function needsYouByProject(items: readonly AttentionItem[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const item of asItems(items)) {
+    if (!isActionable(item)) continue;
+    counts.set(item.project, (counts.get(item.project) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/**
+ * The briefing the OPEN surface shows: the lines frozen when it was opened
+ * (viewing advanced the stamp, so a re-derive drops them — they must not blink
+ * out mid-read) plus anything that arrived live since, deduped by the items'
+ * stable ids. Live items lead: they are the newest.
+ */
+export function mergeBriefing(
+  frozen: readonly AttentionItem[],
+  live: readonly AttentionItem[],
+): AttentionItem[] {
+  const liveItems = asItems(live);
+  const seen = new Set(liveItems.map((i) => i.id));
+  return [...liveItems, ...asItems(frozen).filter((i) => !seen.has(i.id))];
+}
+
+/** The short badge text for an attention kind. */
+export function kindLabel(kind: AttentionKind): string {
+  switch (kind) {
+    case 'hitl-park':
+      return 'PARKED';
+    case 'curator-proposal':
+      return 'PROPOSAL';
+    case 'blocked-run':
+      return 'BLOCKED';
+    case 'setup-gate':
+      return 'SETUP';
+    case 'new-repo-candidate':
+      return 'NEW REPO';
+    case 'briefing':
+      return 'JOURNAL';
+    default:
+      return 'NOTE';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Last-seen stamps — the briefing's "newer than when I last looked" filter
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse the persisted stamp file (`{ project: iso }` JSON). Malformed content
+ * — missing file, junk JSON, non-object, non-string values — degrades to the
+ * empty map: everything then reads as unseen, which is the safe direction.
+ */
+export function parseLastSeen(content: string | null): Record<string, string> {
+  if (typeof content !== 'string' || content.length === 0) return {};
+  let raw: unknown;
+  try {
+    raw = JSON.parse(content);
+  } catch {
+    return {};
+  }
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const stamps: Record<string, string> = {};
+  for (const [project, stamp] of Object.entries(raw)) {
+    if (typeof stamp === 'string' && stamp.length > 0) stamps[project] = stamp;
+  }
+  return stamps;
+}
+
+/** Serialize the stamp map for the userData file (stable key order). */
+export function serializeLastSeen(stamps: Record<string, string>): string {
+  const ordered: Record<string, string> = {};
+  for (const key of Object.keys(stamps ?? {}).sort()) ordered[key] = stamps[key];
+  return `${JSON.stringify(ordered, null, 2)}\n`;
+}
+
+/**
+ * Advance the given projects' stamps to `nowIso` — the "I looked at the
+ * attention surface" moment. Non-listed projects keep their stamps; a stamp
+ * never moves backwards (a skewed clock must not resurrect already-seen entries
+ * as new forever, nor mark future entries seen). Pure: returns a new map.
+ */
+export function advanceLastSeen(
+  stamps: Record<string, string> | null | undefined,
+  projects: readonly string[],
+  nowIso: string,
+): Record<string, string> {
+  const next: Record<string, string> = { ...(stamps ?? {}) };
+  if (typeof nowIso !== 'string' || nowIso.length === 0) return next;
+  for (const project of Array.isArray(projects) ? projects : []) {
+    if (typeof project !== 'string' || project.length === 0) continue;
+    const prior = next[project];
+    next[project] = prior !== undefined && prior > nowIso ? prior : nowIso;
+  }
+  return next;
+}
+
+/**
+ * The workbench project directory an attention item's `project` names, under
+ * the snapshot's workbench root — what click-through hands to the normal
+ * `openProject` flow (ownership rules and all). Null when either half is
+ * unusable: a path is never guessed from junk (a `project` carrying
+ * separators or `..` is not a directory NAME).
+ */
+export function workbenchProjectPath(workbenchRoot: string, project: string): string | null {
+  if (typeof workbenchRoot !== 'string' || workbenchRoot.trim() === '') return null;
+  if (typeof project !== 'string' || project.trim() === '') return null;
+  if (project.includes('/') || project.includes('\\') || project === '.' || project === '..') {
+    return null;
+  }
+  return `${workbenchRoot.replace(/\/+$/, '')}/${project}`;
 }

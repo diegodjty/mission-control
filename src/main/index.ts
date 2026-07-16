@@ -57,6 +57,7 @@ import {
   type ProjectCardSignals,
 } from '../shared/launcher-model';
 import { removeRegistryProject } from '../shared/workbench-model';
+import { needsYouByProject } from '../shared/attention-hub-model';
 import { isAllowedPlanningDoc } from '../shared/planning-model';
 import {
   claimEventsBetween,
@@ -1292,13 +1293,18 @@ function registerIpc(): void {
   // subscriptions (no new watcher here).
   ipcMain.handle(IpcChannel.ProjectGrid, async (): Promise<ProjectGridResult> => {
     const projects = await gatherLauncherProjects();
-    // Parked HITL per project — count `hitl-park` items (grouped by their
-    // workbench project dir name) from the background attention watch's snapshot,
-    // the same source the Inbox reads. No snapshot yet ⇒ zero everywhere.
+    // Per-project attention counts from the background watch's snapshot — the
+    // SAME `attention-hub-model` the rail badge and the attention surface read,
+    // so the card badge can never show a different number (issue 125). No
+    // snapshot yet ⇒ zero everywhere.
+    //   • parkedHitl — parks only, the issue-118 attention-float ordering tier;
+    //   • needsYou   — the full actionable set, the card's needs-you badge.
+    const attentionItems = attentionWatcher?.snapshot.items ?? [];
     const parked = new Map<string, number>();
-    for (const item of attentionWatcher?.snapshot.items ?? []) {
+    for (const item of attentionItems) {
       if (item.kind === 'hitl-park') parked.set(item.project, (parked.get(item.project) ?? 0) + 1);
     }
+    const needsYou = needsYouByProject(attentionItems);
     const live = liveRunsByProject();
     // Repo-less per project — a repo-less Project (ADR-0017) has no member repos.
     // Resolved once here (the same resolution the gather uses) so `signalsFor`
@@ -1317,6 +1323,7 @@ function registerIpc(): void {
     const signalsFor = (p: LauncherProject): ProjectCardSignals => ({
       liveRuns: live.get(p.dirName) ?? 0,
       parkedHitl: parked.get(p.dirName) ?? 0,
+      needsYou: needsYou.get(p.dirName) ?? 0,
       // Stage lives in the in-memory registry (ADR-0004), populated for Projects
       // opened in a Window; an unopened card shows the app's default stage.
       stage: findProject(registry, p.workbenchDir)?.stage ?? 'backlog',

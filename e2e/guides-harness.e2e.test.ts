@@ -56,7 +56,7 @@ import { commitWorkbenchProject } from '../src/main/workbench-git';
 import { readBacklogAt } from '../src/main/backlog-reader';
 import { ReceiptWatcher } from '../src/main/receipt-watcher';
 import { resolveOpenedProject } from '../src/shared/project-identity';
-import { splitInbox } from '../src/shared/inbox-model';
+import { buildAttentionHub } from '../src/shared/attention-hub-model';
 import {
   buildQuickFixIssue,
   nextIssueNumber,
@@ -257,11 +257,12 @@ describe('e2e guides harness — real modules over the guides-batch seams', () =
         gate!.id,
       ]);
 
-      // Issue 80's Inbox split reads the same snapshot: briefing separate,
-      // actionable items grouped per project.
-      const view = splitInbox(watcher.snapshot.items);
-      expect(view.briefing.map((i) => i.id)).toEqual(['alpha:briefing:2026-07-04.md']);
-      expect(view.groups.map((g) => g.project)).toEqual(['alpha', 'beta']);
+      // Issue 125's attention hub reads the same snapshot: briefing separate,
+      // actionable items grouped per project, urgency-ordered (parked HITL
+      // first — alpha has the park, so it leads).
+      const hub = buildAttentionHub(watcher.snapshot.items);
+      expect(hub.briefing.map((i) => i.id)).toEqual(['alpha:briefing:2026-07-04.md']);
+      expect(hub.groups.map((g) => g.project)).toEqual(['alpha', 'beta']);
 
       // Stable across re-derivation: same inputs → same ids, same order.
       const before = ids();

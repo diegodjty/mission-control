@@ -4,7 +4,7 @@ import { Map } from './Map';
 import { ProjectSwitcher } from './ProjectSwitcher';
 import { CommandPalette } from './CommandPalette';
 import { DispatcherPanel } from './DispatcherPanel';
-import { Inbox } from './Inbox';
+import { Attention } from './Attention';
 import { Launcher, type QuickFixIssueRef } from './Launcher';
 import { PlanningView } from './PlanningView';
 import { AppShell } from './AppShell';
@@ -18,8 +18,11 @@ import {
 } from './components';
 import { stageInvocation, type PlanningStage } from '../../shared/planning-model';
 import { quickFixRunTarget } from '../../shared/launcher-model';
-import type { AttentionItem } from '../../shared/attention-model';
-import { workbenchProjectPath, splitInbox } from '../../shared/inbox-model';
+import {
+  workbenchProjectPath,
+  needsYouCount,
+  type AttentionItem,
+} from '../../shared/attention-hub-model';
 import type { Backlog, IssueStatus } from '../../shared/backlog-model';
 import type {
   AttentionSnapshot,
@@ -597,14 +600,12 @@ export function App(): JSX.Element {
   // Which tile (if any) is maximized to fill the Pane area; null = tiled grid.
   const [maximizedId, setMaximizedId] = useState<number | null>(null);
 
-  // The cross-project needs-you count for the Attention rail badge (issue 124):
-  // the same non-briefing attention-item count the Inbox surfaces, so the rail
-  // badge and the surface always agree. Fed by the existing attention snapshot
-  // for now; issue 125 swaps the source to `attention-hub-model` unchanged.
-  const attentionNeedsYou = useMemo(
-    () => splitInbox(attention.items).groups.reduce((n, g) => n + g.items.length, 0),
-    [attention],
-  );
+  // The cross-project needs-you count for the Attention rail badge (issue 124,
+  // re-pointed in issue 125): THE one needs-you number, straight from
+  // `attention-hub-model`. The rail badge, the Launcher card counts (main sums
+  // the same model per project), and the surface header all read this, so they
+  // can never disagree.
+  const attentionNeedsYou = useMemo(() => needsYouCount(attention.items), [attention]);
 
   // The shell context (shell-model, issue 123): the Plan tab and Planning
   // host follow the planning session; the Pane tab's count and the grid's
@@ -1044,37 +1045,9 @@ export function App(): JSX.Element {
     }
   }, [resetForProjectSwitch]);
 
-  // An Inbox item was clicked (issue 80): open/switch to its project through
-  // the NORMAL open/claim flow — ownership rules and all (ADR-0004): if
-  // another Window owns it, main rejects with a clear message we surface as
-  // the Inbox's quiet notice — then land on the Map with the referenced thing
-  // focused (the parked/blocked issue selected; a file reference shown as a
-  // dismissible line). Acting on an item never claims or writes anything
-  // beyond what opening a project always did.
-  const openAttentionItem = useCallback(
-    async (item: AttentionItem): Promise<void> => {
-      const path = workbenchProjectPath(attention.workbenchRoot, item.project);
-      if (path === null) {
-        setInboxNotice(`Can't resolve a workbench directory for "${item.project}".`);
-        return;
-      }
-      const res = await window.mc.openProject({ path });
-      setProjects(res.projects);
-      if (!res.ok) {
-        setInboxNotice(res.error ?? `Could not open ${item.project}.`);
-        return;
-      }
-      setInboxNotice(null);
-      if (isProjectSwitch(activeProjectKeyRef.current, res.activeProjectKey)) {
-        resetForProjectSwitch();
-      }
-      setActiveProjectKey(res.activeProjectKey);
-      setInboxFocus({ project: item.project, issueId: item.issueId, fileRef: item.fileRef });
-      setInboxFocusSeq((n) => n + 1);
-      applyShellEvent({ kind: 'attention-opened' });
-    },
-    [attention.workbenchRoot, resetForProjectSwitch],
-  );
+  // NOTE: `openAttentionItem` / `openAttentionProject` (the surface's
+  // click-through) live below `attemptProjectChange` — they route through it so
+  // acting on attention honors the live-runner interrupt guard (issue 125).
 
   // A `new-repo-candidate` item's one-click confirm (issue 95, ADR-0017):
   // register the appeared repo through the ADR-0015 path (CONFIG repos entry +
@@ -1545,6 +1518,76 @@ export function App(): JSX.Element {
       }
     },
     [liveRunIssueIds],
+  );
+
+  // The actual open a click-through performs once the guard clears (issue
+  // 80/125): open/switch to the project through the NORMAL open/claim flow —
+  // ownership rules and all (ADR-0004). If another Window owns it, main rejects
+  // with a message we surface as the surface's quiet notice; otherwise land on
+  // the Map with the referenced thing focused (the parked/blocked issue
+  // selected; a file reference shown as a dismissible line). Acting on an item
+  // never claims or writes anything beyond what opening a project always did.
+  const openAttentionTarget = useCallback(
+    async (
+      path: string,
+      project: string,
+      issueId: number | null,
+      fileRef: string | null,
+    ): Promise<void> => {
+      const res = await window.mc.openProject({ path });
+      setProjects(res.projects);
+      if (!res.ok) {
+        setInboxNotice(res.error ?? `Could not open ${project}.`);
+        return;
+      }
+      setInboxNotice(null);
+      if (isProjectSwitch(activeProjectKeyRef.current, res.activeProjectKey)) {
+        resetForProjectSwitch();
+      }
+      setActiveProjectKey(res.activeProjectKey);
+      setInboxFocus({ project, issueId, fileRef });
+      setInboxFocusSeq((n) => n + 1);
+      applyShellEvent({ kind: 'attention-opened' });
+    },
+    [resetForProjectSwitch],
+  );
+
+  // An attention item was clicked (issue 80, re-pointed in issue 125): switch
+  // to its project through the SAME guarded flow a Project click uses — so
+  // acting on attention is never less safe than clicking a Project (the
+  // interrupt guard fires when a live Run would be left behind).
+  const openAttentionItem = useCallback(
+    (item: AttentionItem): void => {
+      const path = workbenchProjectPath(attention.workbenchRoot, item.project);
+      if (path === null) {
+        setInboxNotice(`Can't resolve a workbench directory for "${item.project}".`);
+        return;
+      }
+      attemptProjectChange({
+        path,
+        label: item.project,
+        proceed: () => void openAttentionTarget(path, item.project, item.issueId, item.fileRef),
+      });
+    },
+    [attention.workbenchRoot, attemptProjectChange, openAttentionTarget],
+  );
+
+  // A group header's "open →" (issue 125): open the whole Project with no
+  // specific focus — the same guarded switch, landing on the Map.
+  const openAttentionProject = useCallback(
+    (project: string): void => {
+      const path = workbenchProjectPath(attention.workbenchRoot, project);
+      if (path === null) {
+        setInboxNotice(`Can't resolve a workbench directory for "${project}".`);
+        return;
+      }
+      attemptProjectChange({
+        path,
+        label: project,
+        proceed: () => void openAttentionTarget(path, project, null, null),
+      });
+    },
+    [attention.workbenchRoot, attemptProjectChange, openAttentionTarget],
   );
 
   // A Launcher home-grid card was clicked (issue 121). The pure `decideCardOpen`
@@ -4012,15 +4055,17 @@ export function App(): JSX.Element {
           </div>
         )}
 
-        {/* The Inbox (issue 80): mounted fresh per view — being here IS
-            "viewing", which is what advances the briefing's last-seen stamp
-            and freezes the briefing you're reading. Available in every
-            Window, whatever Project (if any) it has open. */}
+        {/* The unified attention surface (issue 125, replacing the Inbox tab):
+            mounted fresh per view — being here IS "viewing", which is what
+            advances the briefing's last-seen stamp and freezes the briefing
+            you're reading. Available in every Window, whatever Project (if any)
+            it has open. */}
         {isSlotMounted('inbox', view, shellCtx) && (
           <div className="app__slot" style={{ display: 'flex' }}>
-            <Inbox
+            <Attention
               snapshot={attention}
-              onOpenItem={(item) => void openAttentionItem(item)}
+              onOpenItem={openAttentionItem}
+              onOpenProject={openAttentionProject}
               onRegisterRepo={(item) => void registerRepoFromInbox(item)}
               notice={inboxNotice}
             />

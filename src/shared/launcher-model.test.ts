@@ -31,6 +31,7 @@ import type { LauncherProject } from './ipc-contract';
 const IDLE: ProjectCardSignals = {
   liveRuns: 0,
   parkedHitl: 0,
+  needsYou: 0,
   stage: 'backlog',
   repoless: false,
 };
@@ -561,9 +562,12 @@ describe('buildProjectGrid', () => {
   ];
 
   const signals: Record<string, ProjectCardSignals> = {
-    '/w/billing': { liveRuns: 0, parkedHitl: 1, stage: 'backlog', repoless: false },
-    '/w/atlas': { liveRuns: 2, parkedHitl: 0, stage: 'executing', repoless: false },
-    '/w/newthing': { liveRuns: 0, parkedHitl: 0, stage: 'planning', repoless: true },
+    // billing: 1 parked HITL + 1 more actionable item ⇒ needsYou 2 (needs-you
+    // is the full actionable set, not just parks — issue 125).
+    '/w/billing': { liveRuns: 0, parkedHitl: 1, needsYou: 2, stage: 'backlog', repoless: false },
+    // atlas: no parks but one actionable item (e.g. a blocked run) ⇒ needsYou 1.
+    '/w/atlas': { liveRuns: 2, parkedHitl: 0, needsYou: 1, stage: 'executing', repoless: false },
+    '/w/newthing': { liveRuns: 0, parkedHitl: 0, needsYou: 0, stage: 'planning', repoless: true },
   };
   const signalsFor = (p: LauncherProject): ProjectCardSignals => signals[p.workbenchDir] ?? IDLE;
 
@@ -581,10 +585,16 @@ describe('buildProjectGrid', () => {
     expect(newthing.livenessLabel).toBe('not started');
   });
 
-  it('carries the needs-you (parked HITL) count and the stage badge', () => {
+  it('carries the parked-HITL ordering tier, the needs-you badge count, and the stage badge', () => {
     const [atlas, billing, newthing] = cards;
+    // parkedHitl stays the parks-only ordering tier (issue 118)...
     expect(billing.parkedHitl).toBe(1);
     expect(atlas.parkedHitl).toBe(0);
+    // ...while needsYou is the full actionable count the badge shows (issue 125),
+    // distinct from parkedHitl — atlas has a needs-you item with zero parks.
+    expect(billing.needsYou).toBe(2);
+    expect(atlas.needsYou).toBe(1);
+    expect(newthing.needsYou).toBe(0);
     expect(atlas.liveRuns).toBe(2);
     expect(atlas.stage).toBe('executing');
     expect(atlas.stageLabel).toBe('Executing');
