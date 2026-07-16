@@ -224,6 +224,43 @@ export function decideIsolationByRepo(
     });
 }
 
+/** The two facts that decide whether a tracked Run belongs in the isolation set. */
+export interface RunIsolationMembership {
+  /** Is the Run still live (its Worker `running`), not terminal? */
+  live: boolean;
+  /**
+   * Is the Run's work in a worktree on an `afk/NN-slug` branch (not on `main`)?
+   * True while a worktree exists for it — i.e. a live parallel Run OR a
+   * finished/blocked/parked/stopped Run whose branch is not yet merged, whose
+   * worktree must survive for a pending Merge.
+   */
+  isolated: boolean;
+}
+
+/**
+ * Whether a tracked Run belongs in the isolation set — the pure encoding of the
+ * "intended set" this module's header describes: **a live Run, plus a finished
+ * Run whose branch is not yet merged**. Both entry points (the manual "▶ Run"
+ * path and the drain's drive loop) MUST scope the Runs they hand to
+ * `decideIsolation`/`applyIsolation` through this rule, so neither counts a Run
+ * that no longer needs a worktree.
+ *
+ * A Run qualifies when it is still `live`, OR its work sits `isolated` in a
+ * worktree (unmerged — so tearing it down would pull work out from under a
+ * pending Merge). A **terminal SOLO** Run — finished/blocked/parked/stopped on
+ * `main` — is neither: it is done competing for the working tree and has no
+ * worktree to preserve, so it drops out.
+ *
+ * This is the fix for issue 134: the drive loop used to feed *every* tracked Run
+ * (including terminal ones lingering on screen) into the isolation set, so once
+ * a finished chained Run's dependency edge resolved it could be handed a
+ * spurious worktree cut and keep `.afk-parallel` stuck on across drain rounds.
+ * Scoping both entry points through this predicate closes that.
+ */
+export function runNeedsIsolation(membership: RunIsolationMembership): boolean {
+  return membership.live || membership.isolated;
+}
+
 /**
  * The set of Runs that need isolation once `added` joins the ones already
  * live — the concurrency input the *manual* "▶ Run" path feeds to isolation,
