@@ -111,6 +111,7 @@ import {
   soloChainedIssueIds,
   type ActiveRun,
 } from '../../shared/run-coordinator';
+import { takeoverKindFor, takeoverTarget } from '../../shared/run-takeover';
 import { isNotableDrainActivity } from '../../shared/workbench-memory';
 import { hasInFlightRun } from '../../shared/run-eligibility';
 import {
@@ -2130,6 +2131,37 @@ export function App(): JSX.Element {
     );
   }, []);
 
+  // Take over a headless Run in a Pane (issue 144) — the affordance on a live
+  // Feed ("grab the wheel mid-flight") and on a finished Run's card ("reopen
+  // post-mortem"). It transforms the SAME tracked Run in place: the target flips
+  // from headless (Feed) to a `claude --resume <captured-session-id>` Pane in the
+  // same cwd. Because the Run keeps its issue id and drain generation, the
+  // coordinator still sees an identical ActiveRun — its drain slot and issue
+  // guard are unchanged across the switch (a live take-over keeps occupying its
+  // slot; a finished one, `done` on disk, still reads `finished` and takes none).
+  //
+  // Killing the old headless child is automatic: flipping `headless` false
+  // unmounts the RunFeed, whose cleanup calls killPty on the headless session
+  // (and unsubscribes first, so the child's exit never flips this Run's liveness
+  // as it dies). Resetting `sessionAlive`/`stoppedByUser` keeps a live Run reading
+  // `running` across the swap until the resumed Pane reports its own exit.
+  const takeOverRun = useCallback((issueId: number): void => {
+    setRuns((prev) =>
+      prev.map((r) => {
+        if (r.target.issueId !== issueId) return r;
+        const kind = takeoverKindFor(runStatusOf(r), r.target.headless, r.claudeSessionId);
+        if (kind === null) return r;
+        return {
+          ...r,
+          target: takeoverTarget(r.target, r.claudeSessionId!),
+          sessionAlive: true,
+          stoppedByUser: false,
+        };
+      }),
+    );
+    setFocusedId(issueId);
+  }, [runStatusOf]);
+
   // Maximize a tile to fill the Pane area (click its header again to restore
   // the grid). All Panes stay mounted either way, so sessions never drop.
   const toggleMaximize = useCallback((issueId: number): void => {
@@ -4000,6 +4032,12 @@ export function App(): JSX.Element {
               const status = runStatusOf(r);
               const id = r.target.issueId;
               const slug = slugOf(r.target.issueFileName);
+              // Take-over affordance (issue 144): a live headless Run offers
+              // "Take over" (grab it mid-flight as a Pane); a finished one offers
+              // "Resume" (reopen the session post-mortem to interrogate it). Both
+              // need a captured claude session id — null until the init event
+              // lands — and only apply to a headless (Feed) Run.
+              const takeover = takeoverKindFor(status, r.target.headless, r.claudeSessionId);
               // The header shows the issue slug WITHOUT its numeric prefix (the
               // number is already the "Run NN" / issue-id cue); `slug` itself
               // keeps the prefix because it names the afk/<slug> branch below.
@@ -4086,17 +4124,43 @@ export function App(): JSX.Element {
                     )}
                     <span className="app__tile-controls">
                       {status === 'running' ? (
-                        <button
-                          className="run-stop run-stop--tile"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            stopRun(r.target.issueId);
-                          }}
-                        >
-                          Stop
-                        </button>
+                        <>
+                          {takeover === 'live' && (
+                            <button
+                              className="run-takeover run-takeover--tile"
+                              title="Kill this headless Run and take over its session in an interactive Pane (same working directory)"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                takeOverRun(r.target.issueId);
+                              }}
+                            >
+                              Take over
+                            </button>
+                          )}
+                          <button
+                            className="run-stop run-stop--tile"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              stopRun(r.target.issueId);
+                            }}
+                          >
+                            Stop
+                          </button>
+                        </>
                       ) : (
                         <>
+                          {takeover === 'post-mortem' && (
+                            <button
+                              className="run-takeover run-takeover--tile"
+                              title="Reopen this finished Run's session in an interactive Pane to interrogate it (no new Run)"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                takeOverRun(r.target.issueId);
+                              }}
+                            >
+                              Resume
+                            </button>
+                          )}
                           {discardable && (
                             <button
                               className="run-discard run-discard--tile"
