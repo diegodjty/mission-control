@@ -76,9 +76,12 @@ import {
   createWorktree,
   readIsolatedIssueStatus,
   commitFinishedMain,
+  commitFinishedWorktree,
   worktreePathFor,
   scanAfkBranches,
   isMidMerge,
+  isMergedIntoDefaultBranch,
+  reconcileMergedWorktrees,
   detectDefaultBranch,
   enableParallel,
   isParallel,
@@ -116,6 +119,7 @@ import {
   type DrainPlan,
 } from '../src/shared/run-coordinator';
 import { deriveRunStatus } from '../src/shared/run-state';
+import { classifyBranch, deriveWorktreeRunStates } from '../src/shared/worktree-scan';
 import {
   lifecycleKindForOutcome,
   actionForLifecycle,
@@ -1799,6 +1803,127 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
     expect(regressedDecision.placements.find((p) => p.issueId === 2)?.placement.kind).toBe(
       'worktree',
     );
+  });
+
+  // ---------------------------------------------------------------------------
+  // Scenario 13 — issue 153: a GHOST completion commit on an already-merged
+  // afk/ branch, and its lingering worktree. The live 2026-07-17 incident:
+  // afk/138 was merged into main, yet its worktree survived, and a later
+  // observe/recovery tick auto-committed the worktree's STALE tree as a fresh
+  // "afk: complete issue 138" commit (`fddc618`). That ghost moved the branch
+  // tip off main's history (re-badging the Run finished-unmerged) and, being
+  // BEHIND the merge, the Merge press then walked the human toward reverting the
+  // day's doc work. This drives the REAL observe/commit + cleanup seam and
+  // asserts: no ghost commit lands, no finished-unmerged badge reappears, and
+  // the lingering merged worktree + branch are reclaimed.
+  // ---------------------------------------------------------------------------
+  it('Scenario 13a (issue 153): a recovery tick over a lingering merged worktree writes no ghost commit and shows no finished-unmerged badge', async () => {
+    ingestFrom(sandbox.issuesDir);
+    const six = sandboxIssue(6);
+    const wt = worktreePathFor(repo, six.slug);
+    const branch = branchFor(six.slug);
+
+    // A finished isolated Run: worktree work + done flip, committed onto its
+    // branch by MC's real auto-commit (this is what lands the completion commit).
+    await createWorktree(repo, six.slug, branch);
+    await runFakeWorker({ repo, worktree: wt, issue: six });
+    const obs = await readIsolatedIssueStatus(repo, six.slug);
+    expect(obs.status).toBe('done');
+    const defaultBranch = await detectDefaultBranch(repo);
+    expect(await isMergedIntoDefaultBranch(repo, six.slug, defaultBranch)).toBe(false);
+
+    // The "day's doc work" lands on main directly — so main advances beyond the
+    // base the worktree was cut with (the incident's CONTEXT.md + configs).
+    await writeFile(join(repo, 'CONTEXT.md'), '# Context\n' + 'doc line\n'.repeat(30));
+    await git(repo, 'add', 'CONTEXT.md');
+    await git(repo, 'commit', '-m', 'docs: grow CONTEXT.md (the day\'s doc work)');
+
+    // Merge the branch into main but DELIBERATELY keep the worktree (cleanup:
+    // false) — reproducing "the worktree survived the merge".
+    const merge = await mergeRuns(repo, [six.slug], { scriptPath: SCRIPT, cleanup: false });
+    expect(merge.ok).toBe(true);
+    expect(merge.merged).toEqual([six.slug]);
+    expect(await isMergedIntoDefaultBranch(repo, six.slug, defaultBranch)).toBe(true);
+    expect(existsSync(wt)).toBe(true); // lingered
+
+    // A residual uncommitted change appears in the lingering worktree (a late
+    // Receipt / re-touched file) — the trigger a real observe/recovery tick sees.
+    await writeFile(join(wt, 'late-residue.txt'), 'residue in a lingering worktree\n');
+
+    const tipBefore = (await git(repo, 'rev-parse', branch)).trim();
+
+    // The recovery tick, BOTH observe paths the app runs:
+    //  - IssueStatusObserve → readIsolatedIssueStatus → commitFinishedWorktree
+    //  - WorktreeCommit (workbench) → commitFinishedWorktree with statusOverride
+    const recover1 = await readIsolatedIssueStatus(repo, six.slug);
+    const recover2 = await commitFinishedWorktree(repo, six.slug, { statusOverride: 'done' });
+
+    // No ghost commit: both refuse, the branch tip is unmoved, and it stays merged.
+    expect(recover2.committed).toBe(false);
+    expect(recover2.error).toBeNull();
+    expect((await git(repo, 'rev-parse', branch)).trim()).toBe(tipBefore);
+    expect(await isMergedIntoDefaultBranch(repo, six.slug, defaultBranch)).toBe(true);
+    // The observe still reports the Run done (its work is on main) — it just
+    // never re-commits.
+    expect(recover1.status).toBe('done');
+
+    // No finished-unmerged badge: the scan classifies the merged branch as
+    // integrated (null), never finished-unmerged.
+    const facts = await scanAfkBranches(repo);
+    const f6 = facts.find((f) => f.slug === six.slug)!;
+    expect(f6.mergedIntoMain).toBe(true);
+    expect(classifyBranch(f6, [])).toBeNull();
+    expect(deriveWorktreeRunStates(facts, []).find((s) => s.slug === six.slug)).toBeUndefined();
+
+    // Main still holds the day's doc work — nothing regressed it.
+    expect((await git(repo, 'show', `main:CONTEXT.md`)).split('\n').length).toBeGreaterThan(20);
+  });
+
+  it('Scenario 13b (issue 153): a dirty lingering merged worktree + branch are reclaimed by post-merge cleanup', async () => {
+    ingestFrom(sandbox.issuesDir);
+    const six = sandboxIssue(6);
+    const wt = worktreePathFor(repo, six.slug);
+    const branch = branchFor(six.slug);
+
+    // A finished isolated Run committed onto its branch.
+    await createWorktree(repo, six.slug, branch);
+    await runFakeWorker({ repo, worktree: wt, issue: six });
+    expect((await readIsolatedIssueStatus(repo, six.slug)).status).toBe('done');
+
+    // The worktree is DIRTY at merge time (an untracked leftover) — the exact
+    // state that made a non-force remove refuse and the worktree linger.
+    await writeFile(join(wt, 'untracked-leftover.txt'), 'stale scratch\n');
+
+    // A full merge (cleanup ON): its work lands on main AND the just-merged,
+    // dirty worktree is force-removed with its branch — no lingering residue.
+    const merge = await mergeRuns(repo, [six.slug], { scriptPath: SCRIPT });
+    expect(merge.ok).toBe(true);
+    expect(merge.merged).toEqual([six.slug]);
+    expect(existsSync(wt)).toBe(false);
+    await expect(
+      git(repo, 'rev-parse', '--verify', '--quiet', branch),
+    ).rejects.toBeTruthy(); // branch deleted
+    expect(await git(repo, 'ls-files')).toContain(`work/${six.slug}.txt`);
+
+    // And the standalone reconcile sweep is idempotent + also reclaims a dirty
+    // merged worktree left by another route (cleanup:false), not just the merge's
+    // own slugs.
+    const seven = sandboxIssue(7);
+    const wt7 = worktreePathFor(repo, seven.slug);
+    await createWorktree(repo, seven.slug, branchFor(seven.slug));
+    await runFakeWorker({ repo, worktree: wt7, issue: seven });
+    await readIsolatedIssueStatus(repo, seven.slug);
+    await mergeRuns(repo, [seven.slug], { scriptPath: SCRIPT, cleanup: false }); // lingers
+    await writeFile(join(wt7, 'untracked-leftover.txt'), 'stale scratch\n'); // dirty
+    expect(existsSync(wt7)).toBe(true);
+
+    const swept = await reconcileMergedWorktrees(repo);
+    expect(swept.reclaimed).toContain(seven.slug);
+    expect(swept.leftBehind).toEqual([]);
+    expect(existsSync(wt7)).toBe(false);
+    await expect(
+      git(repo, 'rev-parse', '--verify', '--quiet', branchFor(seven.slug)),
+    ).rejects.toBeTruthy();
   });
 });
 

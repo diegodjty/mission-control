@@ -33,6 +33,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
   removeWorktree,
+  forceRemoveWorktree,
   detectDefaultBranch,
   reconcileMergedWorktrees,
   adoptStrayReceipts,
@@ -420,9 +421,16 @@ export async function mergeRuns(
       try {
         await removeWorktree(projectPath, slug);
       } catch {
-        // Non-force remove refuses on uncommitted/untracked leftovers — the
-        // merged work is safely on main, so this is a soft failure we report.
-        worktreeGone = false;
+        // Non-force remove refuses on uncommitted/untracked leftovers. This slug
+        // was just integrated by afk-merge.sh, so its work is CONFIRMED on the
+        // default branch — the leftover is stale residue. Force-remove it (issue
+        // 153): a lingering merged worktree is exactly what got re-observed into
+        // a ghost completion commit. Nothing mergeable is lost.
+        try {
+          await forceRemoveWorktree(projectPath, slug);
+        } catch {
+          worktreeGone = false;
+        }
       }
       // Only delete the branch once its worktree is gone (git refuses to delete
       // a branch that is still checked out in a worktree).
