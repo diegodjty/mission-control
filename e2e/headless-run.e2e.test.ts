@@ -32,6 +32,9 @@ import { HeadlessSessionManager } from '../src/main/headless-session-manager';
 import { ReceiptWatcher } from '../src/main/receipt-watcher';
 import { readBacklog } from '../src/main/backlog-reader';
 import { parseReceipt } from '../src/shared/receipt-parser';
+import { deriveRunStatus } from '../src/shared/run-state';
+import { planDrain, type ActiveRun } from '../src/shared/run-coordinator';
+import { deriveAttention } from '../src/shared/attention-hub-model';
 import type {
   PtyExitMessage,
   RunLogRecord,
@@ -60,6 +63,7 @@ const FAKE_ENV_KEYS = [
   'MC_FAKE_FINISHED',
   'MC_FAKE_OUTCOME',
   'MC_FAKE_NO_RECEIPT',
+  'MC_FAKE_DENIED_ACTION',
 ];
 let savedEnv: Record<string, string | undefined>;
 
@@ -70,6 +74,8 @@ function configureFakeWorker(opts: {
   id: number;
   finished: string;
   outcome?: 'completed' | 'blocked' | 'needs-verification';
+  /** issue 142: with outcome=blocked, the action whose denial parked the Worker. */
+  deniedAction?: string;
 }): void {
   process.env.MC_RUN_CMD = `node ${FAKE}`;
   process.env.MC_FAKE_SESSION_ID = opts.sessionId;
@@ -80,6 +86,7 @@ function configureFakeWorker(opts: {
   process.env.MC_FAKE_ID = String(opts.id);
   process.env.MC_FAKE_FINISHED = opts.finished;
   process.env.MC_FAKE_OUTCOME = opts.outcome ?? 'completed';
+  if (opts.deniedAction) process.env.MC_FAKE_DENIED_ACTION = opts.deniedAction;
 }
 
 /** The RunTarget a workbench-less (legacy layout) drain Run carries, headless. */
@@ -262,6 +269,113 @@ describe('headless Run tracer (issue 139) — real child process, real modules',
     const parsed = parseReceipt(await readFile(receiptFile, 'utf8'));
     expect(parsed.outcome).toBe('needs-verification');
     expect(parsed.outcomeSource).toBe('declared');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Issue 142 (consumer half) — a headless Worker that hits a PERMISSION DENIAL
+  // parks `blocked` through the SAME seam: it names the denied action in its
+  // Receipt, the Run reads `blocked`, an attention item is raised carrying the
+  // denial, and the drain NEVER retries the denied issue. In THIS worktree issue
+  // 137's continue-past-blocked change is not landed (its code is on the unmerged
+  // `afk/137-…` branch), so the drain conservatively STOPS on the blocked Run —
+  // issue 142's "conservative stop until then". Under either rule the denied
+  // issue is off the table (it already has a Run), so no retry is scheduled.
+  // ---------------------------------------------------------------------------
+  it('a denial-blocked headless Worker parks blocked: Receipt names the denial, attention raised, never retried', async () => {
+    const issue = sandboxIssue(2); // independent, non-HITL — the first drainable issue
+    const finished = '2026-07-17T14:00:00.000Z';
+    const deniedAction = 'git push';
+    configureFakeWorker({
+      sessionId: 'sess-headless-denied',
+      slug: issue.slug,
+      id: 2,
+      finished,
+      outcome: 'blocked',
+      deniedAction,
+    });
+
+    const exits: PtyExitMessage[] = [];
+    const captured: RunSessionCapturedMessage[] = [];
+    manager = new HeadlessSessionManager({
+      onExit: (msg) => exits.push(msg),
+      onSessionCaptured: (msg) => captured.push(msg),
+    });
+    manager.spawn({ cols: 80, rows: 24, run: headlessRunTarget(2) });
+
+    // Same headless seam: the session id is captured and the child exits CLEAN —
+    // a denial is a Worker DECISION to park, not a crash (exit 0), and there is
+    // exactly ONE process: no retry-loop against the denial at the process level.
+    await waitFor(() => captured.length > 0, 'denied-run session id captured');
+    expect(captured[0].claudeSessionId).toBe('sess-headless-denied');
+    await waitFor(() => exits.length > 0, 'denied headless child exits');
+    expect(exits).toHaveLength(1);
+    expect(exits[0].exitCode).toBe(0);
+
+    // The park leaves the claim `wip` — a denial builds nothing and flips nothing.
+    const backlog = await readBacklog(repo);
+    expect(backlog.issues.find((i) => i.id === 2)?.status).toBe('wip');
+    expect(existsSync(join(repo, 'work', `${issue.slug}.txt`))).toBe(false);
+
+    // The Receipt DECLARES blocked and NAMES the denied action in its body.
+    const receiptFile = join(repo, 'issues', 'completions', `${issue.slug}.md`);
+    const raw = await readFile(receiptFile, 'utf8');
+    const parsed = parseReceipt(raw);
+    expect(parsed.outcome).toBe('blocked');
+    expect(parsed.outcomeSource).toBe('declared');
+    expect(raw).toContain(deniedAction);
+    expect(parsed.detail).toContain(deniedAction);
+
+    // The REAL watcher ingests it as one blocked record (the drain's input).
+    const records: RunLogRecord[] = [];
+    watcher = new ReceiptWatcher({ debounceMs: 40, stabilityMs: 25 });
+    watcher.watch('project', [sandbox.issuesDir], new Map(), (r) => records.push(r));
+    await waitFor(() => records.some((r) => r.issueId === 2), 'watcher ingests the denied Receipt');
+    const record = records.find((r) => r.issueId === 2)!;
+    expect(record.outcome).toBe('blocked');
+
+    // Consumer 1 — the Run parks BLOCKED (the standard blocked handling; the
+    // declared Receipt ends it without waiting for a session death).
+    const status = deriveRunStatus({
+      sessionAlive: false,
+      stoppedByUser: false,
+      issueStatus: backlog.issues.find((i) => i.id === 2)?.status ?? null,
+      receiptOutcome: record.outcome,
+    });
+    expect(status).toBe('blocked');
+
+    // Consumer 2 — a `blocked-run` attention item is raised, its text carrying
+    // the denied action (so the human reads exactly what to grant).
+    const attention = deriveAttention({
+      project: 'sandbox',
+      backlog,
+      receipts: [parsed],
+      coreProposedPresent: false,
+      humanSetup: null,
+      journal: [],
+      lastSeen: null,
+    });
+    const blockedItem = attention.items.find((i) => i.kind === 'blocked-run' && i.issueId === 2);
+    expect(blockedItem).toBeDefined();
+    expect(blockedItem!.text).toContain(deniedAction);
+
+    // Consumer 3 — the drain does NOT retry the denial. The blocked issue already
+    // has a Run, so the coordinator excludes it from BOTH startable and queued
+    // (true under conservative-stop AND under issue 137's continue-past rules).
+    const activeRuns: ActiveRun[] = [{ issueId: 2, status, receiptOutcome: record.outcome }];
+    const plan = planDrain({ issues: backlog.issues, maxConcurrent: 1, activeRuns });
+    expect(plan.drain.stop).toBe(true); // conservative stop (137 unmerged here)
+    expect(plan.drain.reason).toBe('run-blocked');
+    expect(plan.drain.blockedIssueId).toBe(2);
+    expect(plan.startable).not.toContain(2);
+    expect(plan.queued).not.toContain(2);
+
+    // Idempotent re-plan — re-observing the same blocked Run schedules no retry.
+    const replan = planDrain({ issues: backlog.issues, maxConcurrent: 1, activeRuns });
+    expect(replan.startable).toEqual(plan.startable);
+    expect(replan.startable).not.toContain(2);
+
+    // Process-level: still exactly one child was ever spawned for this issue.
+    expect(exits).toHaveLength(1);
   });
 
   // ---------------------------------------------------------------------------
