@@ -9,7 +9,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, symlink, lstat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -18,6 +18,7 @@ import {
   applyIsolation,
   currentState,
   createWorktree,
+  provisionWorktree,
   removeWorktree,
   discardWorktree,
   enableParallel,
@@ -91,6 +92,81 @@ describe('createWorktree / removeWorktree (real git)', () => {
     const path = await createWorktree(repo, slug, branchFor(slug));
     expect(existsSync(path)).toBe(true);
     await removeWorktree(repo, slug);
+  });
+});
+
+describe('worktree provisioning — copy the main checkout node_modules (issue 136, real git+fs)', () => {
+  const slug = '06-provision';
+
+  /** Seed a realistic `node_modules` in the MAIN checkout: a nested dep file and
+   *  a `.bin` symlink (the shape a real install has), all UNCOMMITTED. */
+  async function seedMainNodeModules(): Promise<void> {
+    await mkdir(join(repo, 'node_modules', 'left-pad'), { recursive: true });
+    await writeFile(
+      join(repo, 'node_modules', 'left-pad', 'index.js'),
+      'module.exports = () => "installed";\n',
+    );
+    await mkdir(join(repo, 'node_modules', '.bin'), { recursive: true });
+    // A relative symlink like a real `.bin` shim — must survive as a symlink.
+    await symlink('../left-pad/index.js', join(repo, 'node_modules', '.bin', 'left-pad'));
+  }
+
+  it('a repo WITH node_modules yields a worktree whose deps are present (no install needed)', async () => {
+    await seedMainNodeModules();
+    const wt = await createWorktree(repo, slug, branchFor(slug));
+
+    // The dep the "test command" would need is on disk in the worktree — the
+    // provisioning ran as part of cutting the worktree, no network install.
+    expect(existsSync(join(wt, 'node_modules', 'left-pad', 'index.js'))).toBe(true);
+
+    // The provisioned node_modules is a REAL directory, not the self-referential
+    // symlink that corrupted main (issue 98)...
+    expect((await lstat(join(wt, 'node_modules'))).isDirectory()).toBe(true);
+    // ...and the inner `.bin` shim was preserved AS a symlink, not dereferenced.
+    expect((await lstat(join(wt, 'node_modules', '.bin', 'left-pad'))).isSymbolicLink()).toBe(true);
+  });
+
+  it('a repo WITHOUT node_modules provisions nothing and does not throw', async () => {
+    // No node_modules in the main checkout (a non-Node repo) — a silent skip.
+    const wt = await createWorktree(repo, slug, branchFor(slug));
+    expect(existsSync(join(wt, 'node_modules'))).toBe(false);
+
+    // provisionWorktree is a clean no-op that reports nothing was copied.
+    expect(await provisionWorktree(repo, wt)).toEqual([]);
+  });
+
+  it('provisionWorktree reports what it copied and is idempotent', async () => {
+    await seedMainNodeModules();
+    // createWorktree already provisioned once; a direct re-call finds the dir
+    // present and copies nothing (never overwrites, never errors).
+    const wt = await createWorktree(repo, slug, branchFor(slug));
+    expect(await provisionWorktree(repo, wt)).toEqual([]);
+
+    // Remove the provisioned dir and re-call: now it reports the copy it made.
+    await rm(join(wt, 'node_modules'), { recursive: true, force: true });
+    expect(await provisionWorktree(repo, wt)).toEqual(['node_modules']);
+    expect(existsSync(join(wt, 'node_modules', 'left-pad', 'index.js'))).toBe(true);
+  });
+
+  it('the provisioned node_modules stays IGNORED/uncommitted on the afk branch', async () => {
+    // A real Node repo commits a .gitignore that ignores node_modules; the
+    // worktree inherits it (checked out from main), so the provisioned install
+    // never dirties the tree nor enters the afk branch.
+    await writeFile(join(repo, '.gitignore'), 'node_modules\n');
+    await git(repo, 'add', '.gitignore');
+    await git(repo, 'commit', '-m', 'ignore node_modules');
+    await seedMainNodeModules();
+
+    const wt = await createWorktree(repo, slug, branchFor(slug));
+    expect(existsSync(join(wt, 'node_modules', 'left-pad', 'index.js'))).toBe(true);
+
+    // The worktree working tree is CLEAN — node_modules is ignored, so it shows
+    // no untracked change (nothing to trip the merge preflight)...
+    const porcelain = (await git(wt, 'status', '--porcelain')).trim();
+    expect(porcelain).toBe('');
+    // ...and nothing under node_modules is tracked on the afk/<slug> branch.
+    const tracked = (await git(wt, 'ls-files')).split('\n');
+    expect(tracked.some((p) => p.split('/').includes('node_modules'))).toBe(false);
   });
 });
 

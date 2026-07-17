@@ -53,7 +53,8 @@ sequenceDiagram
   participant MC as Watchers → Run log
   U->>C: press Drain (cap N)
   C->>C: planDrain — startable = eligible + deps done
-  C->>W: spawn fresh claude, worktree per parallel Run
+  C->>C: cut + provision worktree (copy node_modules)
+  C->>W: spawn fresh claude (NODE_ENV=development)
   W->>F: flip issue open→wip (the claim)
   W->>W: work · verify gate
   W->>F: flip wip→done, write Receipt (before final message)

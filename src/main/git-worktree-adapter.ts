@@ -10,7 +10,7 @@
  */
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import {
@@ -310,6 +310,67 @@ async function branchExists(projectPath: string, branch: string): Promise<boolea
 }
 
 /**
+ * The dependency directories a fresh worktree is provisioned with from the main
+ * checkout (issue 136). `node_modules` is the one that matters: a worktree is
+ * born WITHOUT it (git-ignored, so `git worktree add` never checks it out), and
+ * a Worker then had to install it — slowly, and under the inherited
+ * NODE_ENV=production it pruned devDeps and broke the build, or it committed the
+ * install artifact and tripped the issue-98 merge refusal. These names match the
+ * artifact-hygiene segments, so what we provision is exactly what stays ignored.
+ */
+const PROVISIONED_DEPENDENCY_DIRS = ['node_modules'] as const;
+
+/**
+ * Copy a directory tree from `src` to `dest`. Prefers an APFS copy-on-write
+ * clone (`cp -c -R`): near-instant and space-free — blocks are shared until
+ * written — which is what makes provisioning a large `node_modules` cheap. Falls
+ * back to a real recursive copy when clonefile isn't available (a non-APFS
+ * volume, a non-macOS host, a cross-device copy). Either way the result is a REAL
+ * directory, never the self-referential symlink that corrupted `main` on merge
+ * (issue 98). Symlinks inside the tree (e.g. `node_modules/.bin/*`) are preserved
+ * as symlinks, not dereferenced.
+ */
+async function copyTree(src: string, dest: string): Promise<void> {
+  try {
+    await exec('cp', ['-c', '-R', src, dest], { maxBuffer: 16 * 1024 * 1024 });
+    return;
+  } catch {
+    // clonefile unsupported here — fall back to a plain recursive copy.
+  }
+  await cp(src, dest, { recursive: true });
+}
+
+/**
+ * Provision a freshly-cut worktree with the main checkout's installed
+ * dependencies (issue 136) so the Run's test/build command runs WITHOUT a
+ * network install. For each provisioned dir (`node_modules`) present in the main
+ * checkout, copy it into the worktree; a directory the worktree already has is
+ * left alone (idempotent), and a directory absent from the main checkout is
+ * skipped silently — a non-Node repo provisions nothing and logs nothing.
+ *
+ * The copied `node_modules` stays IGNORED/uncommitted on the `afk/` branch: the
+ * repo's `.gitignore` (inherited into the worktree) matches it, and the
+ * commit-path hygiene guard (`unstageIgnoredArtifacts`) is a structural backstop
+ * even if a repo lacks that ignore — so provisioning can never introduce tracked
+ * install content. Returns the dir names actually copied (for callers/tests).
+ */
+export async function provisionWorktree(
+  projectPath: string,
+  worktreePath: string,
+): Promise<string[]> {
+  const provisioned: string[] = [];
+  for (const dir of PROVISIONED_DEPENDENCY_DIRS) {
+    const src = join(projectPath, dir);
+    if (!existsSync(src)) continue; // non-Node repo / dir absent — skip silently
+    const dest = join(worktreePath, dir);
+    if (existsSync(dest)) continue; // already provisioned — leave it (idempotent)
+    await copyTree(src, dest);
+    provisioned.push(dir);
+  }
+  return provisioned;
+}
+
+/**
  * Create a worktree for a Run at `.afk-worktrees/<slug>` on `afk/<slug>`. If the
  * branch already exists (e.g. a re-run), it is attached rather than recreated.
  * Returns the worktree path.
@@ -325,6 +386,15 @@ export async function createWorktree(
     ? ['worktree', 'add', path, branch]
     : ['worktree', 'add', '-b', branch, path];
   await git(projectPath, args);
+  // Provision the fresh worktree with the main checkout's installed deps
+  // (issue 136). Best-effort: a provisioning failure must NEVER block the Run
+  // from starting — the Worker falls back to installing itself (now under
+  // NODE_ENV=development, so that install no longer prunes devDeps).
+  try {
+    await provisionWorktree(projectPath, path);
+  } catch {
+    // Non-fatal — see above. The worktree is fully usable without provisioning.
+  }
   return path;
 }
 

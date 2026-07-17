@@ -520,7 +520,12 @@ describe('ignored-artifact merge preflight (issue 98) — refuses a branch carry
   async function runCarryingNodeModules(slug: string, file = 'work.txt'): Promise<string> {
     const wt = await createWorktree(repo, slug, branchFor(slug));
     await writeFile(join(wt, file), `work for ${slug}\n`);
-    // The self-referential symlink: worktree/node_modules -> repo/node_modules.
+    // createWorktree now provisions the worktree with a REAL node_modules when the
+    // main checkout has one (issue 136); this helper deliberately reconstructs the
+    // OLD broken shape instead — a self-referential symlink committed by raw git,
+    // as a branch created BEFORE these fixes carried — so clear any provisioned
+    // copy first, then plant the symlink the issue-98 guard must still refuse.
+    await rm(join(wt, 'node_modules'), { recursive: true, force: true });
     await symlink(join(repo, 'node_modules'), join(wt, 'node_modules'));
     await git(wt, 'add', '-A');
     await git(wt, 'commit', '-m', `work for ${slug} (+ stray node_modules symlink)`);
