@@ -73,6 +73,16 @@ export const IpcChannel = {
   /** main → renderer (send): a PTY exited. */
   PtyExit: 'pty:exit',
   /**
+   * main → renderer (broadcast): a headless Run's claude **session id** was
+   * captured from its stream-json output (issue 139, ADR-0001 amendment) — the
+   * `system`/`init` event's `session_id`. Carries the MC-internal spawn
+   * `sessionId` (for the Feed to self-filter) and the parsed `claudeSessionId`,
+   * which the renderer persists on the Run for resume/take-over. A headless Run's
+   * exit still arrives on `PtyExit`; its raw stream is buffered in main for
+   * peek/debug only and is NEVER a capture input (ADR-0013 untouched).
+   */
+  RunSessionCaptured: 'run:session-captured',
+  /**
    * renderer → main (invoke): reconcile isolation for the current active Run
    * set — create/remove worktrees, toggle parallel mode — and resolve each
    * Run's cwd. Resolves to an IsolationApplyResult.
@@ -349,6 +359,15 @@ export interface RunTarget {
     issuesRoot: string;
     completionsRoot: string;
   } | null;
+  /**
+   * Spawn this Run HEADLESS (issue 139, ADR-0001 amendment): `claude -p
+   * --output-format stream-json --verbose` as a plain child process (no pty),
+   * watched via a read-only Feed, instead of an interactive Pane. Set by the
+   * drain for every drain Run (from this slice on, drain Runs are headless);
+   * absent/false for a manual single Run, which keeps its interactive Pane. The
+   * Worker seed (prompt, CORE.md, Receipt path) is byte-identical either way.
+   */
+  headless?: boolean;
 }
 
 /**
@@ -442,6 +461,18 @@ export interface PtyExitMessage {
   sessionId: SessionId;
   exitCode: number;
   signal?: number;
+}
+
+/**
+ * A headless Run's claude session id, captured from its stream-json output
+ * (issue 139). Broadcast once per Run, when the leading `system`/`init` event
+ * (or the first event carrying a `session_id`) is parsed.
+ */
+export interface RunSessionCapturedMessage {
+  /** The MC-internal spawn session id (routes this to the right Feed). */
+  sessionId: SessionId;
+  /** The claude session id parsed from the stream (for resume/take-over). */
+  claudeSessionId: string;
 }
 
 export interface BacklogLoadRequest {
@@ -1403,6 +1434,13 @@ export interface MissionControlApi {
   killPty(msg: PtyKillMessage): void;
   onPtyData(listener: (msg: PtyDataMessage) => void): () => void;
   onPtyExit(listener: (msg: PtyExitMessage) => void): () => void;
+  /**
+   * Subscribe to headless Runs' captured claude session ids (issue 139): fired
+   * when a headless Run's stream-json yields its `session_id`. The renderer's
+   * Feed self-filters by the internal `sessionId` and persists the
+   * `claudeSessionId` on the Run. Returns an unsubscribe function.
+   */
+  onRunSessionCaptured(listener: (msg: RunSessionCapturedMessage) => void): () => void;
 }
 
 declare global {

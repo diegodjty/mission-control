@@ -1,0 +1,80 @@
+// Fake headless `claude -p --output-format stream-json` Worker (issue 139) — a
+// scripted, deterministic stand-in spawned as a REAL child process by the
+// HeadlessSessionManager through the command-override seam (`MC_RUN_CMD=node
+// <this>`), so the e2e exercises the genuine child-process edge with no LLM.
+//
+// It does exactly what a headless afk-issue-runner Worker does: emit a
+// stream-json event stream (a `system`/`init` event that declares the
+// session id, some assistant chatter, a terminal `result`), and perform the
+// on-disk work its exit requires — claim flip (open → wip → done), a
+// deliverable, and the Receipt written last (one save).
+//
+// Config rides env vars the test sets (the manager passes process.env through);
+// the scoped prompt rides argv and is ignored here.
+import { writeFileSync, readFileSync, mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+
+const env = process.env;
+const sessionId = env.MC_FAKE_SESSION_ID ?? 'sess-fake';
+const issueFile = env.MC_FAKE_ISSUE_FILE ?? '';
+const receiptPath = env.MC_FAKE_RECEIPT_PATH ?? '';
+const deliverable = env.MC_FAKE_DELIVERABLE ?? '';
+const slug = env.MC_FAKE_SLUG ?? 'issue';
+const id = env.MC_FAKE_ID ?? '0';
+const finished = env.MC_FAKE_FINISHED ?? '2026-07-17T00:00:00.000Z';
+const outcome = env.MC_FAKE_OUTCOME ?? 'completed'; // completed | blocked | needs-verification
+const writeReceipt = env.MC_FAKE_NO_RECEIPT !== '1';
+
+const emit = (obj) => process.stdout.write(`${JSON.stringify(obj)}\n`);
+
+// 1. The stream: the leading system/init event declares the session id; a
+//    non-init event follows to prove the parser handles more than just init.
+emit({ type: 'system', subtype: 'init', session_id: sessionId, cwd: process.cwd(), tools: [] });
+emit({
+  type: 'assistant',
+  session_id: sessionId,
+  message: { role: 'assistant', content: [{ type: 'text', text: `Working ${slug}…` }] },
+});
+
+// 2. The on-disk work. A blocked/park Worker leaves the claim `wip`; a completed
+//    one flips through to `done` and writes a deliverable.
+const setStatus = (status) => {
+  if (!issueFile) return;
+  const cur = readFileSync(issueFile, 'utf8');
+  writeFileSync(issueFile, cur.replace(/status: (open|wip|done)/, `status: ${status}`));
+};
+setStatus('wip'); // claim
+if (outcome === 'completed') {
+  setStatus('done');
+  if (deliverable) {
+    mkdirSync(dirname(deliverable), { recursive: true });
+    writeFileSync(deliverable, `deliverable for ${slug}\n`);
+  }
+}
+
+// 3. The Receipt — one save, declaring the machine-facing outcome — then the
+//    terminal result event. `claude -p` exits cleanly once the stream ends.
+if (writeReceipt && receiptPath) {
+  mkdirSync(dirname(receiptPath), { recursive: true });
+  const label = `${String(id).padStart(2, '0')} — ${slug}`;
+  const body =
+    outcome === 'completed'
+      ? `## Completed issue ${label}\n\n` +
+        `**What changed** — the headless Worker completed ${slug}.\n\n` +
+        `**Try it yourself** — read work/${slug}.txt.\n\n` +
+        `**Verified** — read the deliverable back from disk.\n\n` +
+        `**Bookkeeping** — files touched: work/${slug}.txt, issues/${slug}.md.\n\n` +
+        `**Doc drift** — none.\n`
+      : outcome === 'needs-verification'
+        ? `## Ready for manual verification — issue ${id} — ${slug}\n\n` +
+          `Steps:\n1. Open the surface this issue changed.\n2. Confirm by hand.\n`
+        : `No AFK-eligible work completable on issue ${id} — ${slug}. I stopped because a ` +
+          `dependency the issue says is done turned out not to be done in the code.\n`;
+  writeFileSync(
+    receiptPath,
+    `---\nissue: ${id}\nslug: ${slug}\noutcome: ${outcome}\nfinished: ${finished}\n---\n${body}`,
+  );
+}
+
+emit({ type: 'result', subtype: 'success', session_id: sessionId, is_error: false, num_turns: 2, total_cost_usd: 0.01 });
+// Let the process exit naturally so buffered stdout is fully flushed first.

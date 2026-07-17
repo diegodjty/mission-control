@@ -70,6 +70,7 @@ import {
   type PtySpawnRequest,
   type PtySpawnResult,
   type PtyWriteMessage,
+  type RunSessionCapturedMessage,
 } from '../shared/ipc-contract';
 
 const api: MissionControlApi = {
@@ -241,6 +242,14 @@ const api: MissionControlApi = {
     const handler = (_e: IpcRendererEvent, msg: PtyExitMessage): void => listener(msg);
     ipcRenderer.on(IpcChannel.PtyExit, handler);
     return () => ipcRenderer.removeListener(IpcChannel.PtyExit, handler);
+  },
+
+  onRunSessionCaptured: (
+    listener: (msg: RunSessionCapturedMessage) => void,
+  ): (() => void) => {
+    const handler = (_e: IpcRendererEvent, msg: RunSessionCapturedMessage): void => listener(msg);
+    ipcRenderer.on(IpcChannel.RunSessionCaptured, handler);
+    return () => ipcRenderer.removeListener(IpcChannel.RunSessionCaptured, handler);
   },
 };
 

@@ -4,7 +4,9 @@ import {
   buildTalkPrompt,
   receiptPathFor,
   resolveRunCommand,
+  resolveHeadlessRunCommand,
   resolveTalkCommand,
+  HEADLESS_CLAUDE_FLAGS,
 } from './resolve-run-command';
 import {
   CORE_MEMORY_CHAR_CAP,
@@ -84,6 +86,60 @@ describe('resolveRunCommand', () => {
   it('ignores a blank CLAUDE_BIN and falls back to `claude`', () => {
     const cmd = resolveRunCommand({ CLAUDE_BIN: '   ' }, ISSUE);
     expect(cmd.file).toBe('claude');
+  });
+});
+
+describe('resolveHeadlessRunCommand (issue 139, ADR-0001 amendment)', () => {
+  it('spawns `claude -p --output-format stream-json --verbose` with the SAME Worker seed', () => {
+    const cmd = resolveHeadlessRunCommand({}, ISSUE);
+    expect(cmd.file).toBe('claude');
+    // The headless flags precede the positional prompt (which stays last).
+    expect(cmd.args.slice(0, HEADLESS_CLAUDE_FLAGS.length)).toEqual([...HEADLESS_CLAUDE_FLAGS]);
+    expect(cmd.args).toContain('-p');
+    expect(cmd.args).toContain('--output-format');
+    expect(cmd.args).toContain('stream-json');
+    // stream-json in print mode REQUIRES --verbose.
+    expect(cmd.args).toContain('--verbose');
+    const last = cmd.args[cmd.args.length - 1];
+    expect(last).toContain('issue 03');
+    // The seed is byte-identical to the interactive Run's — same prompt builder.
+    expect(last).toBe(resolveRunCommand({}, ISSUE).args[0]);
+    expect(last).toContain('/repos/project/issues/completions/03-run-issue-in-pane.md');
+  });
+
+  it('honours CLAUDE_BIN for the executable path', () => {
+    const cmd = resolveHeadlessRunCommand({ CLAUDE_BIN: '/opt/homebrew/bin/claude' }, ISSUE);
+    expect(cmd.file).toBe('/opt/homebrew/bin/claude');
+    expect(cmd.args).toContain('stream-json');
+    expect(cmd.args[cmd.args.length - 1]).toContain('issue 03');
+  });
+
+  it('honours MC_RUN_CMD as a whole-command override and does NOT inject the headless flags', () => {
+    // The command-override seam the e2e fake Worker rides: it speaks stream-json
+    // itself, so `-p`/`--output-format` must not be forced onto it. Byte-identical
+    // to resolveRunCommand's override branch — only the scoped prompt is appended.
+    const cmd = resolveHeadlessRunCommand({ MC_RUN_CMD: 'node ./fake-headless.mjs --flag' }, ISSUE);
+    expect(cmd.file).toBe('node');
+    expect(cmd.args.slice(0, 2)).toEqual(['./fake-headless.mjs', '--flag']);
+    expect(cmd.args).not.toContain('--output-format');
+    expect(cmd.args[cmd.args.length - 1]).toContain('issue 03');
+    expect(cmd).toEqual(resolveRunCommand({ MC_RUN_CMD: 'node ./fake-headless.mjs --flag' }, ISSUE));
+  });
+
+  it('carries the workbench paths + CORE.md exactly like an interactive Run', () => {
+    const wbIssue = {
+      ...ISSUE,
+      cwd: '/repos/api',
+      workbench: {
+        issuesRoot: '/Users/dev/Workbench/billing/issues',
+        completionsRoot: '/Users/dev/Workbench/billing/completions',
+      },
+      memoryCore: '- The billing repo deploys via Fastlane.',
+    };
+    const last = resolveHeadlessRunCommand({}, wbIssue).args.slice(-1)[0];
+    expect(last).toBe(buildRunPrompt(wbIssue));
+    expect(last).toContain('/Users/dev/Workbench/billing/issues');
+    expect(last).toContain('- The billing repo deploys via Fastlane.');
   });
 });
 

@@ -1,0 +1,92 @@
+/*
+ * RunFeed (issue 139, ADR-0001 amendment) — the read-only Feed strip of a
+ * headless drain Run. Deliberately NOT a terminal: it fills the Run tile body
+ * where a Pane's xterm would sit, but shows only status + elapsed and carries no
+ * input surface. Themed with the Atlas tokens (index.css) so it reads as one
+ * system in light and dark.
+ */
+.run-feed {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 18px 20px;
+  background: var(--bg1, #0c1017);
+  color: var(--fg, #eaf2f7);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  overflow: hidden;
+}
+
+.run-feed__line {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.run-feed__status {
+  font-size: 15px;
+  font-weight: 600;
+  text-transform: capitalize;
+  color: var(--fg, #eaf2f7);
+}
+
+/* Tint the status word by the Run's derived state, echoing the tile dot. */
+.run-feed__status--running {
+  color: var(--teal, #4fd1c5);
+}
+.run-feed__status--finished {
+  color: var(--green, #58c98a);
+}
+.run-feed__status--blocked {
+  color: var(--red, #e06c75);
+}
+.run-feed__status--stopped {
+  color: var(--fg-mute, #93a1ad);
+}
+.run-feed__status--parked {
+  color: var(--amber, #e0a458);
+}
+
+.run-feed__elapsed {
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  color: var(--fg-soft, #b6c2cc);
+}
+
+.run-feed__meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.run-feed__badge {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--teal-bg, rgba(79, 209, 197, 0.12));
+  border: 1px solid var(--teal-border, rgba(79, 209, 197, 0.35));
+  color: var(--teal, #4fd1c5);
+}
+
+.run-feed__hint {
+  font-size: 12px;
+  color: var(--fg-mute, #93a1ad);
+}
+
+.run-feed__session {
+  font-size: 11px;
+  color: var(--fg-faint, #6b7783);
+}
+
+.run-feed__session code {
+  font-family: Menlo, Monaco, 'Courier New', monospace;
+  font-size: 11px;
+  color: var(--fg-soft, #b6c2cc);
+}

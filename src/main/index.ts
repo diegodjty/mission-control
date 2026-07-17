@@ -11,6 +11,7 @@ import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { PtySessionManager } from './pty-session-manager';
+import { HeadlessSessionManager } from './headless-session-manager';
 import { AttentionLastSeenStore } from './attention-last-seen';
 import { AttentionWatcher } from './attention-watcher';
 import { readBacklogAt } from './backlog-reader';
@@ -501,6 +502,20 @@ const ptyManager = new PtySessionManager({
   },
 });
 
+// The headless counterpart (issue 139, ADR-0001 amendment): drain Runs spawn a
+// plain `claude -p --output-format stream-json` child process here instead of an
+// interactive pty. Exit shares the PtyExit channel (so the Feed and the live-Run
+// tally react identically); the captured claude session id rides its own
+// broadcast. The raw stream is NOT broadcast — it stays buffered in main for
+// peek/debug only (ADR-0013), so a headless Run puts no stream bytes on the IPC.
+const headlessManager = new HeadlessSessionManager({
+  onExit: (msg) => {
+    broadcast(IpcChannel.PtyExit, msg);
+    if (runSessionProject.delete(msg.sessionId)) broadcastRegistryChanged();
+  },
+  onSessionCaptured: (msg) => broadcast(IpcChannel.RunSessionCaptured, msg),
+});
+
 // One Backlog Watcher for the app; keyed per renderer WebContents so a Window
 // that closes (or re-points at another Project) never leaks a watcher.
 const backlogWatcher = new BacklogWatcher();
@@ -989,7 +1004,13 @@ function registerIpc(): void {
         talkDest = { issuesRoot: join(projectRoot, 'issues'), projectRoot };
       }
     }
-    const result = ptyManager.spawn(req, { memoryCore, talkDest });
+    // A drain Run is headless (issue 139): route it to the child-process
+    // manager, which spawns `claude -p --output-format stream-json` (no pty). The
+    // SpawnContext (CORE.md) is identical — the Worker seed is unchanged. A
+    // manual Run, the Dispatcher, talk, and plain shells stay on the PTY manager.
+    const result = req.run?.headless
+      ? headlessManager.spawn(req, { memoryCore })
+      : ptyManager.spawn(req, { memoryCore, talkDest });
     // Track a Run's live session per workbench project (issue 118) so the home
     // grid's "N running" liveness and attention-float reflect it immediately.
     // Only a Run with an explicit workbench (ADR-0015) maps to a card; the dir
@@ -1011,7 +1032,10 @@ function registerIpc(): void {
   });
 
   ipcMain.on(IpcChannel.PtyKill, (_event, msg: PtyKillMessage) => {
+    // Session ids are unique across both managers; each ignores an id it doesn't
+    // own, so a headless Run's kill (Take over / Stop) reaches the right one.
     ptyManager.kill(msg.sessionId);
+    headlessManager.kill(msg.sessionId);
   });
 
   // --- Project registry (ADR-0004) ---------------------------------------
@@ -1674,6 +1698,7 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   ptyManager.killAll();
+  headlessManager.killAll();
   backlogWatcher.closeAll();
   receiptWatcher.closeAll();
   planningWatcher.closeAll();
@@ -1682,6 +1707,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   ptyManager.killAll();
+  headlessManager.killAll();
   backlogWatcher.closeAll();
   receiptWatcher.closeAll();
   planningWatcher.closeAll();

@@ -153,6 +153,49 @@ export function resolveRunCommand(
 }
 
 /**
+ * The flags that turn a `claude` invocation headless (issue 139, ADR-0001
+ * amendment): print mode + a newline-delimited JSON event stream. `--verbose`
+ * is REQUIRED for `stream-json` in print mode (the CLI errors without it); it is
+ * what makes the full event stream — including the leading `system`/`init` event
+ * that declares the `session_id` — land on stdout. Ordered before the positional
+ * prompt so the prompt stays the final argument, exactly as the interactive Run
+ * command places it.
+ */
+export const HEADLESS_CLAUDE_FLAGS = ['-p', '--output-format', 'stream-json', '--verbose'] as const;
+
+/**
+ * Resolve the executable + args for a HEADLESS drain Run (issue 139): the same
+ * Worker seed (`buildRunPrompt`) and the same override precedence as an
+ * interactive Run, but spawned as a plain child process emitting stream-json
+ * rather than an interactive pty.
+ *
+ * Precedence, mirroring `resolveRunCommand`:
+ *   1. `MC_RUN_CMD` — whole-command override (the e2e command-override seam, and
+ *      a manual escape hatch). The scoped prompt is appended as the final arg.
+ *      The headless flags are NOT injected: an override defines its own argv (a
+ *      scripted fake Worker that speaks stream-json itself), so forcing `-p` onto
+ *      it would be wrong. This is the seam the fake Worker rides — byte-identical
+ *      to `resolveRunCommand`'s override branch on purpose.
+ *   2. `CLAUDE_BIN` (or bare `claude`) with `HEADLESS_CLAUDE_FLAGS` then the
+ *      scoped prompt as the positional initial-prompt argument.
+ */
+export function resolveHeadlessRunCommand(
+  env: Record<string, string | undefined>,
+  issue: RunIssueRef,
+): ShellCommand {
+  const prompt = buildRunPrompt(issue);
+
+  const override = env.MC_RUN_CMD?.trim();
+  if (override) {
+    const parts = override.split(/\s+/);
+    return { file: parts[0], args: [...parts.slice(1), prompt] };
+  }
+
+  const bin = env.CLAUDE_BIN?.trim() || 'claude';
+  return { file: bin, args: [...HEADLESS_CLAUDE_FLAGS, prompt] };
+}
+
+/**
  * The Workbench artifact destination a PLANNING talk session carries (issue
  * 101, ADR-0015): where `/to-prd`, `/to-issues`, and `/grill-with-docs` must
  * write, so they don't fall back to a file backlog in the session's cwd (a

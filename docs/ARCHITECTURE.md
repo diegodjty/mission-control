@@ -16,12 +16,14 @@ flowchart LR
   subgraph R["Renderer (per Window)"]
     APP["App orchestrator"] --> MAP["Map"]
     APP --> LCH["Launcher"]
-    APP --> PANE["Panes (xterm)"]
+    APP --> PANE["Panes (xterm) · interactive"]
+    APP --> FEED["Feeds · headless drain Runs"]
     APP --> ATT["Attention hub"]
   end
   subgraph M["Main process (the backend)"]
     HUB["Coordinator hub / IPC"]
     PTY["PTY session manager"]
+    HEADLESS["Headless session mgr (claude -p)"]
     WATCH["Watchers: backlog · receipt · attention · planning"]
     GITA["Worktree adapter + merge + preview"]
     WB["Workbench git (auto-commit)"]
@@ -33,7 +35,7 @@ flowchart LR
     MODELS["receipt · launcher · attention · notification models"]
   end
   APP <-->|"window.mc bridge"| HUB
-  HUB --> PTY & GITA & WB
+  HUB --> PTY & HEADLESS & GITA & WB
   WATCH --> HUB & NOTIFY
   HUB --> COORD & ISO & MODELS
   HUB -->|"merge conflict · drain end"| NOTIFY
@@ -57,7 +59,8 @@ sequenceDiagram
   U->>C: press Drain (cap N)
   C->>C: planDrain — startable = eligible + deps done
   C->>C: cut + provision worktree (copy node_modules)
-  C->>W: spawn fresh claude (NODE_ENV=development)
+  C->>W: spawn headless claude -p (stream-json, no pty; NODE_ENV=development)
+  W-->>C: session id captured from stream (Feed: status + elapsed)
   W->>F: flip issue open→wip (the claim)
   W->>W: work · verify gate
   W->>F: flip wip→done, write Receipt (before final message)
@@ -65,13 +68,16 @@ sequenceDiagram
   MC-->>C: re-plan → next issue fills the slot
 ```
 
-Results travel **only** through Receipt files (ADR-0013) — the terminal is never
-parsed. The **summon moments now fire OS notifications** (issue 138): an HITL
-park, a blocked park, a merge conflict, and the drain stopping/finishing each
-ping natively so you can walk away; a click focuses the Window on that Project's
-attention surface. *Changes queued:* Workers go headless behind **Feeds**
-(139–140), hung Runs are killed at `run_timeout` (141), blocked Runs park instead
-of halting the drain (137).
+Results travel **only** through Receipt files (ADR-0013) — the raw stream is
+buffered for peek/debug only, never parsed. The **summon moments now fire OS
+notifications** (issue 138): an HITL park, a blocked park, a merge conflict, and
+the drain stopping/finishing each ping natively so you can walk away; a click
+focuses the Window on that Project's attention surface. *Landed (139):* drain
+Runs execute **headless** (`claude -p --output-format stream-json`, no pty),
+watched via a minimal **Feed** (status + elapsed), with the session id captured
+from the stream; a manual single Run keeps its interactive **Pane**. *Queued:*
+the richer Feed model + telemetry (140), hung Runs killed at `run_timeout` (141),
+blocked Runs park instead of halting the drain (137).
 
 ## 3. Merge lifecycle
 

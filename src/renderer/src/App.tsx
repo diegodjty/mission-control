@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Pane } from './Pane';
+import { RunFeed } from './RunFeed';
 import { Map } from './Map';
 import { ProjectSwitcher } from './ProjectSwitcher';
 import { CommandPalette } from './CommandPalette';
@@ -337,10 +338,30 @@ interface TrackedRun {
    * Such a phantom must not silently shrink a fresh drain's effective cap.
    */
   drainGeneration: number | null;
+  /**
+   * The MC-internal spawn session id, once its Feed/Pane reports it (issue 139).
+   * Null until spawned. Paired with `claudeSessionId` for a headless Run's
+   * future take-over (kill this process, `claude --resume <claudeSessionId>`).
+   */
+  sessionId?: string | null;
+  /**
+   * A headless drain Run's claude session id, captured from its stream-json
+   * (issue 139, AC3) and persisted here on the Run record for resume/take-over.
+   * Null for a manual (Pane) Run and until the headless Run's init event lands.
+   */
+  claudeSessionId?: string | null;
 }
 
 function newRun(target: RunTarget, drainGeneration: number | null = null): TrackedRun {
-  return { target, sessionAlive: true, stoppedByUser: false, stopSignal: 0, drainGeneration };
+  return {
+    target,
+    sessionAlive: true,
+    stoppedByUser: false,
+    stopSignal: 0,
+    drainGeneration,
+    sessionId: null,
+    claudeSessionId: null,
+  };
 }
 
 /**
@@ -2189,6 +2210,26 @@ export function App(): JSX.Element {
     );
   }, []);
 
+  // A headless Run reported its MC-internal spawn session id (issue 139).
+  const handleRunSession = useCallback((issueId: number, sessionId: string): void => {
+    setRuns((prev) =>
+      prev.map((r) => (r.target.issueId === issueId ? { ...r, sessionId } : r)),
+    );
+  }, []);
+
+  // A headless Run's claude session id was captured from its stream (issue 139,
+  // AC3) — persist it on the Run record for resume/take-over.
+  const handleRunClaudeSession = useCallback(
+    (issueId: number, claudeSessionId: string): void => {
+      setRuns((prev) =>
+        prev.map((r) =>
+          r.target.issueId === issueId ? { ...r, claudeSessionId } : r,
+        ),
+      );
+    },
+    [],
+  );
+
   // Upsert an ingested record into the feed, keyed by its Receipt id, so a
   // superseding ingest (same issue + `finished`, changed body) replaces the
   // earlier version rather than adding a duplicate card. Newest first.
@@ -3104,6 +3145,11 @@ export function App(): JSX.Element {
             // Workbench Runs carry the explicit workbench paths in the spawn
             // prompt (issue 72); null for a legacy Project.
             workbench: workbenchPathsForRun,
+            // From this slice on, drain Runs execute HEADLESS (issue 139,
+            // ADR-0001 amendment): spawned as `claude -p --output-format
+            // stream-json` and watched via a read-only Feed, never a Pane. A
+            // manual "▶ Run" (startRun) leaves this unset → its interactive Pane.
+            headless: true,
           },
           // Stamp the Run with THIS drain's generation (issue 132) so a later
           // drain can tell it apart from a leftover Pane it should not count.
@@ -4093,12 +4139,28 @@ export function App(): JSX.Element {
                       </button>
                     </span>
                   </div>
-                  <Pane
-                    run={r.target}
-                    stopSignal={r.stopSignal}
-                    onStatusChange={r.target.issueId === focusedId ? setPaneStatus : undefined}
-                    onExit={() => handleRunExit(r.target.issueId)}
-                  />
+                  {r.target.headless ? (
+                    // A drain Run is headless (issue 139): a read-only Feed strip
+                    // (status + elapsed), not a terminal — there is no input to
+                    // type into. The claude session id it captures is persisted
+                    // on the Run for resume/take-over.
+                    <RunFeed
+                      run={r.target}
+                      status={status}
+                      stopSignal={r.stopSignal}
+                      onSession={(sid) => handleRunSession(r.target.issueId, sid)}
+                      onClaudeSession={(sid) => handleRunClaudeSession(r.target.issueId, sid)}
+                      onStatusChange={r.target.issueId === focusedId ? setPaneStatus : undefined}
+                      onExit={() => handleRunExit(r.target.issueId)}
+                    />
+                  ) : (
+                    <Pane
+                      run={r.target}
+                      stopSignal={r.stopSignal}
+                      onStatusChange={r.target.issueId === focusedId ? setPaneStatus : undefined}
+                      onExit={() => handleRunExit(r.target.issueId)}
+                    />
+                  )}
                 </div>
               );
             })}
