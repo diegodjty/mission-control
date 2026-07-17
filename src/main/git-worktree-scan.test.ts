@@ -223,3 +223,40 @@ describe('scanAfkBranches — on-disk afk/ state (issue 16)', () => {
     expect(mergeReadinessOnDisk(scan).ready).toBe(false);
   });
 });
+
+describe('commitFinishedWorktree — merged-branch guard (issue 153)', () => {
+  it('does NOT write a ghost completion commit onto a lingering, already-merged branch', async () => {
+    const wt = await createWorktree(repo, ALPHA, branchFor(ALPHA));
+    await simulateFinished(wt, ALPHA, '02');
+
+    // The FIRST commit lands normally — the guard must NOT block it, even though
+    // a fresh branch's tip is trivially an ancestor of main (no completion commit
+    // yet, committed status not done).
+    expect((await commitFinishedWorktree(repo, ALPHA)).committed).toBe(true);
+
+    // Integrate the branch into main (as a clean Merge would), then advance main
+    // — the "day's doc work" the lingering worktree was cut before.
+    await git(repo, 'merge', '--no-ff', '-m', 'merge alpha', branchFor(ALPHA));
+    await writeFile(join(repo, 'DOCS.md'), 'grown doc\n'.repeat(20));
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-m', 'docs: day work');
+
+    // The worktree LINGERED past its merge and picks up a residual change — the
+    // trigger a real observe/recovery tick sees (dirty + still `done`).
+    await writeFile(join(wt, 'residue.txt'), 'stale residue\n');
+    const tipBefore = (await git(repo, 'rev-parse', branchFor(ALPHA))).trim();
+
+    // The recovery tick refuses: no ghost commit, tip unmoved, still merged.
+    const outcome = await commitFinishedWorktree(repo, ALPHA, { statusOverride: 'done' });
+    expect(outcome.committed).toBe(false);
+    expect(outcome.error).toBeNull();
+    expect((await git(repo, 'rev-parse', branchFor(ALPHA))).trim()).toBe(tipBefore);
+
+    // No finished-unmerged badge reappears: the branch stays integrated.
+    const scan = await scanAfkBranches(repo);
+    const alpha = scan.find((b) => b.slug === ALPHA)!;
+    expect(alpha.mergedIntoMain).toBe(true);
+    expect(deriveWorktreeRunStates(scan)).toEqual([]);
+    expect(mergeReadinessOnDisk(scan).ready).toBe(false);
+  });
+});

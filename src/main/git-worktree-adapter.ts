@@ -409,6 +409,30 @@ export async function removeWorktree(projectPath: string, slug: string): Promise
   await git(projectPath, ['worktree', 'remove', path]);
 }
 
+/**
+ * Force-remove a Run's worktree and prune any stale admin entry, WITHOUT
+ * deleting its `afk/<slug>` branch (issue 153). Unlike `removeWorktree` (a
+ * deliberate non-force keep-the-work remove) this discards uncommitted/untracked
+ * leftovers in the worktree dir — used ONLY once the branch's work is CONFIRMED
+ * merged into the default branch, where any leftover is stale residue and keeping
+ * the worktree only lets it be re-observed into a ghost completion commit. The
+ * branch delete is left to the caller (it decides `-d` vs `-D`). Best-effort per
+ * step and idempotent: a missing worktree is not an error.
+ */
+export async function forceRemoveWorktree(projectPath: string, slug: string): Promise<void> {
+  const path = worktreePathFor(projectPath, slug);
+  try {
+    await git(projectPath, ['worktree', 'remove', '--force', path]);
+  } catch {
+    // Not registered (already removed / never created) — carry on to the prune.
+  }
+  try {
+    await git(projectPath, ['worktree', 'prune']);
+  } catch {
+    // Pruning is housekeeping; a failure here must not block the branch delete.
+  }
+}
+
 /** The outcome of a merged-worktree reconciliation sweep (issue 50). */
 export interface ReconcileMergedResult {
   /** Slugs whose worktree (if any) was removed AND `afk/<slug>` branch deleted. */
@@ -449,24 +473,60 @@ export async function reconcileMergedWorktrees(
 ): Promise<ReconcileMergedResult> {
   const facts = await scanAfkBranches(projectPath, options);
   const hasWorktree = new Set(facts.filter((f) => f.hasWorktree).map((f) => f.slug));
+
+  // The reclaim set: every `afk/` branch whose work is CONFIRMED integrated. The
+  // pure `mergedAfkSlugsToReclaim` covers the clean case (committed `done` AND
+  // merged). Issue 153 adds the case it cannot see — a worktree that lingered
+  // past its merge and is DIRTY, so `committedStatus` reads null (and, for a
+  // workbench Project, no `issues/<slug>.md` lives in the repo at all) — detected
+  // by MC's own completion commit being present on an already-merged branch. A
+  // fresh worktree (trivial ancestor, no completion commit) is in NEITHER set and
+  // is spared, preserving issue 50's "don't nuke a Run in progress" invariant.
+  const reclaimSlugs = new Set(mergedAfkSlugsToReclaim(facts));
+  for (const f of facts) {
+    if (
+      !reclaimSlugs.has(f.slug) &&
+      f.mergedIntoMain &&
+      (await branchHasCompletionCommit(projectPath, f.slug))
+    ) {
+      reclaimSlugs.add(f.slug);
+    }
+  }
+
   const reclaimed: string[] = [];
   const leftBehind: string[] = [];
-  for (const slug of mergedAfkSlugsToReclaim(facts)) {
+  for (const slug of [...reclaimSlugs].sort((a, b) => issueIdFromSlug(a) - issueIdFromSlug(b))) {
     if (hasWorktree.has(slug)) {
+      let removed = false;
       try {
         await removeWorktree(projectPath, slug);
+        removed = true;
       } catch {
-        // Uncommitted/untracked leftovers block a non-force remove. The merged
-        // work is safely on the default branch, so keep the worktree + branch
-        // (git also refuses to delete a still-checked-out branch) and report it.
-        leftBehind.push(slug);
-        continue;
+        // Non-force refused on uncommitted/untracked leftovers. The merged work
+        // is safely on the default branch, so the leftover is stale residue —
+        // force-remove it (issue 153): keeping a lingering merged worktree only
+        // lets it be re-observed into a ghost completion commit. Nothing
+        // mergeable is lost.
+        try {
+          await forceRemoveWorktree(projectPath, slug);
+          removed = true;
+        } catch {
+          leftBehind.push(slug);
+        }
       }
+      if (!removed) continue;
     }
     try {
       await git(projectPath, ['branch', '-d', branchFor(slug)]);
     } catch {
-      // Branch already gone (or -d refused) — the worktree is cleaned regardless.
+      // `-d` refused although the branch is confirmed merged (a stale reflog, or
+      // git already dropped it) — the worktree is reclaimed regardless, so fall
+      // back to `-D` so no merged `afk/*` branch lingers on the Map.
+      try {
+        await git(projectPath, ['branch', '-D', branchFor(slug)]);
+      } catch {
+        // Branch already gone — the worktree is cleaned regardless.
+      }
     }
     reclaimed.push(slug);
   }
@@ -669,6 +729,30 @@ export async function readCommittedIssueStatus(
 }
 
 /**
+ * Does the `afk/<slug>` branch already carry Mission Control's own completion
+ * commit (issue 153)? Its history is scanned for a commit whose subject exactly
+ * matches `commitMessageForRun(slug)` — the message MC writes when it
+ * auto-commits a finished Run. This is the layout-agnostic "this Run already
+ * finished and committed" signal: unlike `readCommittedIssueStatus` it does not
+ * depend on an `issues/<slug>.md` living in the code repo, so it works for a
+ * workbench Project (ADR-0015) whose claim surface — and therefore whose issue
+ * files — never live in the repo. A fresh worktree branch has no such commit; an
+ * already-finished Run always does. False on any git error (branch absent, etc.).
+ */
+export async function branchHasCompletionCommit(
+  projectPath: string,
+  slug: string,
+): Promise<boolean> {
+  const target = commitMessageForRun(slug);
+  try {
+    const log = await git(projectPath, ['log', '--format=%s', branchFor(slug)]);
+    return log.split('\n').some((line) => line.trim() === target);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Auto-commit a finished isolated Run's worktree onto its `afk/<slug>` branch
  * (issue 15, Option A). The agent is spawned in single-issue mode and never
  * commits, so when it finishes — flipping `issues/<slug>.md` to `done` in the
@@ -761,6 +845,27 @@ export async function commitFinishedWorktree(
     // nothing to commit (a Run already committed, by MC or by hand).
     const porcelain = await git(worktreePath, ['status', '--porcelain']);
     if (porcelain.trim().length === 0) return { committed: false, error: null };
+
+    // Merged-branch guard (issue 153): NEVER write a second completion commit
+    // onto an `afk/<slug>` branch whose work is ALREADY integrated into the
+    // default branch. A worktree that lingered past its own merge still reads
+    // `done`, so a later observe/recovery tick lands here — and any residual or
+    // stale dirt in it would otherwise be committed as a fresh completion. That
+    // "ghost" commit moves the branch tip OFF the default branch's history
+    // (re-badging the finished Run as finished-unmerged) and, because the
+    // lingering tree is BEHIND the merge, a re-merge would REVERT newer
+    // default-branch work — the live 2026-07-17 incident (`fddc618` on afk/138).
+    // A fresh branch's legitimate first commit is unaffected: its trivial-
+    // ancestor tip carries neither a completion commit nor a committed `done`.
+    const defaultBranch = await detectDefaultBranch(projectPath);
+    if (
+      (await isMergedIntoDefaultBranch(projectPath, slug, defaultBranch)) &&
+      ((await branchHasCompletionCommit(projectPath, slug)) ||
+        (await readCommittedIssueStatus(projectPath, slug)) === 'done')
+    ) {
+      return { committed: false, error: null };
+    }
+
     await git(worktreePath, ['add', '-A']);
     // Structural hygiene guard (issue 98): never let a local install artifact
     // (a `node_modules` symlink, a `dist/`/`out/` build output) enter the commit,
