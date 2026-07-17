@@ -584,6 +584,50 @@ describe('soloChainedIssueIds — dependency chains must stay solo (issue 111)',
     ]);
     expect([...solo].sort((a, b) => a - b)).toEqual([2, 3, 4]);
   });
+
+  // --- HITL-aggregator edges are exempt (issue 135) --------------------------
+
+  it('does not solo-chain a batch behind an HITL aggregator that depends_on every issue (issue 135)', () => {
+    // The /to-issues batch shape: 2, 3, 4 mutually independent; 9 is the HITL
+    // batch-QA walkthrough that `depends_on` all of them and stays not-done for
+    // the whole drain. Its edges are eligibility-only (never claim the
+    // walkthrough early), not build edges — so none of 2/3/4 is forced solo and
+    // they parallelize up to the cap.
+    const solo = soloChainedIssueIds([
+      mk(2, 'open'),
+      mk(3, 'open'),
+      mk(4, 'open'),
+      mk(9, 'open', [2, 3, 4], true), // hitl aggregator
+    ]);
+    expect(solo.size).toBe(0);
+  });
+
+  it('does not solo-chain the HITL aggregator itself via its own edges (issue 135)', () => {
+    // The exempt endpoint includes the aggregator: its edge into a not-done batch
+    // issue marks neither the dependency NOR the aggregator solo.
+    const solo = soloChainedIssueIds([mk(2, 'open'), mk(9, 'open', [2], true)]);
+    expect(solo.size).toBe(0);
+  });
+
+  it('still solo-chains a genuine build chain even when an HITL aggregator also depends on both (issue 135)', () => {
+    // 3 depends_on 2 (a real build edge, neither HITL) AND the HITL aggregator 9
+    // depends_on both. The aggregator's edges are exempt, but the 3→2 build edge
+    // still forces both endpoints solo, exactly as before.
+    const solo = soloChainedIssueIds([
+      mk(2, 'open'),
+      mk(3, 'open', [2]),
+      mk(9, 'open', [2, 3], true),
+    ]);
+    expect([...solo].sort((a, b) => a - b)).toEqual([2, 3]);
+  });
+
+  it('a non-HITL dependent of an HITL issue is NOT exempt — only the dependent-is-HITL edge is (issue 135)', () => {
+    // The exemption keys on the DEPENDENT being HITL, not the dependency. If a
+    // non-HITL issue 3 genuinely `depends_on` an HITL issue 2 (both not-done),
+    // that edge is a real dependent→dependency edge and still solo-chains both.
+    const solo = soloChainedIssueIds([mk(2, 'open', [], true), mk(3, 'open', [2])]);
+    expect([...solo].sort((a, b) => a - b)).toEqual([2, 3]);
+  });
 });
 
 describe('planDrain — chained Runs serialize on the integration branch (issue 111)', () => {
@@ -632,6 +676,23 @@ describe('planDrain — chained Runs serialize on the integration branch (issue 
     const plan = planDrain({ issues, maxConcurrent: 2, activeRuns: [] });
     expect(plan.startable).toEqual([1, 2]);
     expect(plan.queued).toEqual([3]);
+  });
+
+  it('fills the cap with all independent batch issues under an HITL aggregator (issue 135)', () => {
+    // The redesign-batch regression: N mutually-independent issues plus an HITL
+    // batch-QA walkthrough (9) that `depends_on` all of them. Pre-135 the
+    // aggregator's edges solo-chained the whole batch and the drain started ONE
+    // at a time; now all N fan out up to the cap while the aggregator stays
+    // ineligible (its deps aren't done, so it never appears as startable).
+    const issues = [
+      mk(2, 'open'),
+      mk(3, 'open'),
+      mk(4, 'open'),
+      mk(9, 'open', [2, 3, 4], true),
+    ];
+    const plan = planDrain({ issues, maxConcurrent: 3, activeRuns: [] });
+    expect(plan.startable).toEqual([2, 3, 4]);
+    expect(plan.queued).toEqual([]);
   });
 });
 

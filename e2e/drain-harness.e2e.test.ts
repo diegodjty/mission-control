@@ -159,6 +159,7 @@ import {
   sleep,
   FakePty,
   type Sandbox,
+  type SandboxIssue,
 } from './sandbox';
 import { runFakeWorker, type WorkerExit } from './fake-worker';
 
@@ -848,6 +849,68 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
     const seenByB = await readFile(join(placeB.cwd, 'work', 'shared-symbol.ts'), 'utf8');
     expect(seenByB).toContain('FROM_A');
     expect(existsSync(join(placeB.cwd, 'work', `${A.slug}.txt`))).toBe(true);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Scenario 4c (issue 135) — a /to-issues batch is three mutually-independent
+  // issues plus one HITL batch-QA walkthrough that `depends_on` all of them and
+  // stays not-done for the whole drain. The aggregator's edges are eligibility-
+  // only, not build edges, so they must NOT solo-chain the batch: a cap-3 drain
+  // fans all three out into their own worktrees on the very first plan tick,
+  // rather than serializing behind a walkthrough that never lands.
+  // ---------------------------------------------------------------------------
+  it('Scenario 4c: a cap-3 drain over 3 independents under an HITL aggregator starts 3 parallel worktree Runs in the first tick (issue 135)', async () => {
+    // Replace the seeded backlog with the batch fixture: three independent
+    // non-HITL issues + one HITL aggregator depending on all three. Commit it so
+    // HEAD (the worktree base) matches the working tree the Backlog Model reads.
+    const batch: SandboxIssue[] = [
+      { id: 2, slug: '02-independent-a', title: 'Independent A', status: 'open', dependsOn: [], hitl: false },
+      { id: 4, slug: '04-independent-b', title: 'Independent B', status: 'open', dependsOn: [], hitl: false },
+      { id: 6, slug: '06-independent-c', title: 'Independent C', status: 'open', dependsOn: [], hitl: false },
+      { id: 9, slug: '09-batch-qa', title: 'Batch QA walkthrough (HITL)', status: 'open', dependsOn: [2, 4, 6], hitl: true },
+    ];
+    for (const name of await readdir(sandbox.issuesDir)) {
+      await rm(join(sandbox.issuesDir, name));
+    }
+    for (const issue of batch) {
+      await writeFile(join(sandbox.issuesDir, `${issue.slug}.md`), issueFileContent(issue, issue.status));
+    }
+    await git(repo, 'add', '-A');
+    await git(repo, 'commit', '-m', 'e2e: batch fixture (3 independents + HITL aggregator)');
+
+    const backlog = await readBacklog(repo);
+    // Ground truth: 9 is HITL and depends on every batch issue.
+    const aggregator = backlog.issues.find((i) => i.id === 9)!;
+    expect(aggregator.hitl).toBe(true);
+    expect(aggregator.dependsOn.sort((a, b) => a - b)).toEqual([2, 4, 6]);
+
+    // Core of the fix: the aggregator's eligibility edges do NOT solo-chain any
+    // endpoint — neither the three independents nor the aggregator itself.
+    expect([...soloChainedIssueIds(backlog.issues)]).toEqual([]);
+
+    // First plan tick, cap 3: all three independents are startable; the
+    // aggregator is not eligible (deps not done) so it neither starts nor queues.
+    const plan = planDrain({ issues: backlog.issues, maxConcurrent: 3, activeRuns: [] });
+    expect(plan.startable).toEqual([2, 4, 6]);
+    expect(plan.queued).toEqual([]);
+
+    // Isolating those three startable Runs (none chained) cuts THREE worktrees
+    // and turns parallel mode on — the "3 parallel worktree Runs" the AC demands,
+    // instead of the pre-135 single integration-branch Run.
+    const solo = soloChainedIssueIds(backlog.issues);
+    const startableRuns = plan.startable.map((id) => {
+      const issue = backlog.issues.find((i) => i.id === id)!;
+      return { issueId: id, slug: issue.slug, chained: solo.has(id) };
+    });
+    const iso = await applyIsolation(repo, startableRuns);
+    expect(iso.parallel).toBe(true);
+    expect(iso.placements).toHaveLength(3);
+    expect(iso.placements.every((p) => p.branch !== null)).toBe(true);
+    for (const id of plan.startable) {
+      const issue = backlog.issues.find((i) => i.id === id)!;
+      expect(existsSync(worktreePathFor(repo, issue.slug))).toBe(true);
+    }
+    expect(isParallel(repo)).toBe(true);
   });
 
   // ---------------------------------------------------------------------------

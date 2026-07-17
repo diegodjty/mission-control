@@ -117,7 +117,21 @@ export function isParkedHitl(
  *    batch that all `depends_on` a finished foundation issue from being forced
  *    solo — genuine independents still parallelize (issue 111 out-of-scope note).
  *
- * PURE and derived from `BacklogIssue.dependsOn`/`status` alone, so the
+ * **HITL-aggregator edges are exempt (issue 135).** An edge whose DEPENDENT is
+ * `hitl: true` never forces either endpoint solo. Every `/to-issues` batch ends
+ * with an HITL batch-QA-walkthrough issue that `depends_on` every other issue in
+ * the batch and stays not-done for the entire drain (a human verifies it last).
+ * Its edges exist for ELIGIBILITY ordering — never claim the walkthrough early —
+ * not BUILD ordering: it produces no code a dependency builds on, so keeping its
+ * dependencies solo would serialize the whole batch behind a walkthrough that
+ * never lands. Skipping such edges lets the mutually-independent batch issues
+ * fan out again (the redesign batch 122–130 regressed to strictly serial because
+ * 131's aggregator edges poisoned them). This changes solo-chaining ONLY:
+ * `eligibleForRun` is untouched, so the aggregator still cannot start before all
+ * its dependencies are done. Genuine build chains between non-HITL issues stay
+ * solo-chained exactly as before.
+ *
+ * PURE and derived from `BacklogIssue.dependsOn`/`status`/`hitl` alone, so the
  * coordinator, the isolation marking, and the tests agree by construction.
  */
 export function soloChainedIssueIds(issues: BacklogIssue[]): Set<number> {
@@ -125,6 +139,10 @@ export function soloChainedIssueIds(issues: BacklogIssue[]): Set<number> {
   const solo = new Set<number>();
   for (const issue of issues) {
     if (!notDoneIds.has(issue.id)) continue;
+    // An HITL dependent's edges are eligibility-only, not build edges (issue
+    // 135): an aggregator/batch-QA issue produces no code its dependencies build
+    // on, so it forces neither itself nor them solo. Skip all its out-edges.
+    if (issue.hitl) continue;
     for (const dep of issue.dependsOn) {
       // An edge counts only when BOTH endpoints are still in play (not-done):
       // then both must stay solo so the dependency's work reaches the
