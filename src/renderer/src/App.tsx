@@ -2464,9 +2464,9 @@ export function App(): JSX.Element {
         surfaceNarrative('run-completed', narrativeKeyFor(rec.id), 'synthesize', text);
       } else {
         // A blocked/parked block's substance rides its lifecycle surface
-        // instead (the blocking HITL park notice; the blocked alert + the
-        // drain-halted narrative fact), so the block itself stays a history
-        // line — never a second chat message for the same Run.
+        // instead — the blocking HITL park notice, or the BLOCKED park's
+        // Run-narrative chat message (issue 137) — so the full block text stays a
+        // history line here, never a second chat message for the same Run.
         surfaceNarrative('run-blocked-alert', `synthesize:${rec.id}`, 'synthesize', text);
       }
       // Cross-Run synthesis (issue 38, acceptance a): a block that reports doc-drift
@@ -2634,14 +2634,16 @@ export function App(): JSX.Element {
       // chat PTY via the authority line (ADR-0011/0012, unchanged by ADR-0014);
       // its delivered park notice also marks the Run as seen by this session,
       // so the on-ask digest (issue 61) doesn't re-list it. Every other alert
-      // (blocked / stranded / needs-attention) routes through the narrative
-      // table — a history-strip line (its drain-halt fact is the chat message).
-      // Either way it is surfaced once, so a stuck or human-gated drain never
-      // stalls silently — and the pump keeps a chat-tier notification queued
-      // across Dispatcher session replacement/death until it is really
-      // submitted (issue 60), so "surfaced once" never becomes "lost in transit".
-      // ADR-0011: discard-and-continue is not a blocking gate; the user discards a
-      // blocked/stranded Run from the Map's Discard control, so no proposal here.
+      // routes through the narrative table: a BLOCKED park (issue 137) is now a
+      // Run-narrative CHAT message (the drain no longer halts on it, so its park
+      // is the chat fact — never a silent skip), while stranded / needs-attention
+      // stay history-strip lines. Either way it is surfaced once, so a stuck or
+      // human-gated drain never stalls silently — and the pump keeps a chat-tier
+      // notification queued across Dispatcher session replacement/death until it
+      // is really submitted (issue 60), so "surfaced once" never becomes "lost in
+      // transit". ADR-0011: none of these widens the blocking gate — the user
+      // unsticks a blocked Run and discards a stranded one from the Map's own
+      // controls, so no proposal here.
       if (event.kind === 'hitl-waiting') {
         if (surfaceEvent(key, actionForLifecycle(event.kind), reaction.notification)) {
           dispatcherSessionSeen.current.add(event.runId);

@@ -69,9 +69,12 @@ Results travel **only** through Receipt files (ADR-0013) — the terminal is nev
 parsed. The **summon moments now fire OS notifications** (issue 138): an HITL
 park, a blocked park, a merge conflict, and the drain stopping/finishing each
 ping natively so you can walk away; a click focuses the Window on that Project's
-attention surface. *Changes queued:* Workers go headless behind **Feeds**
-(139–140), hung Runs are killed at `run_timeout` (141), blocked Runs park instead
-of halting the drain (137).
+attention surface. A Run that reports **blocked** now parks (issue 137) — its
+issue and its dependents wait for you while the drain keeps scheduling everything
+else, stopping only when nothing is running and nothing is eligible; only a
+Worker that dies with no Receipt still halts conservatively. *Changes queued:*
+Workers go headless behind **Feeds** (139–140), hung Runs are killed at
+`run_timeout` (141).
 
 ## 3. Merge lifecycle
 

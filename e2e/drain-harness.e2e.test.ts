@@ -21,9 +21,13 @@
  *   3. Zero ghosts +       — a full mixed drain ingests zero unclassifiable
  *      park continuation     records AND continues past the parked HITL issue
  *                            (issue 64): every eligible issue runs, 05 stays
- *                            `wip`, exactly one hitl-waiting delivery. 3b/3c:
- *                            a declared-blocked Worker and a die-mid-exit
- *                            Worker (no Receipt, no flip) still halt.
+ *                            `wip`, exactly one hitl-waiting delivery. 3b: a
+ *                            declared-blocked Worker PARKS (issue 137) — the
+ *                            drain continues past it, the rest complete, it ends
+ *                            no-eligible, and it surfaces (one blocked-run
+ *                            Attention item + a Run-narrative chat message). 3c:
+ *                            a die-mid-exit Worker (no Receipt, no flip) still
+ *                            halts conservatively.
  *   4. Parallel mode       — Receipts ingested LIVE from worktrees pre-merge;
  *                            a clean merge lands the Receipt files on main.
  *   5. Misbehavior         — stray Receipt on main is ADOPTED and the merge
@@ -148,6 +152,7 @@ import {
 } from '../src/shared/receipt-audit';
 import { isRealCapture } from '../src/shared/dispatcher-noise-floor';
 import { parseReceipt } from '../src/shared/receipt-parser';
+import { deriveAttention } from '../src/shared/attention-hub-model';
 import type { RunLogRecord } from '../src/shared/ipc-contract';
 import {
   seedSandbox,
@@ -623,52 +628,118 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Scenario 3b — the conservative halts issue 64 must NOT relax: a Worker that
-  // DECLARES `outcome: blocked` still stops the drain with today's report —
-  // even while its session LINGERS at the prompt (issue 65: a blocked Worker
-  // also never exits, so the Run must end `blocked` on the declared Receipt
-  // alone, not wait for a session death that never comes).
+  // Scenario 3b — issue 137: a Worker that DECLARES `outcome: blocked` PARKS.
+  // Pre-137 this halted the whole drain (run-blocked) and every unrelated issue
+  // starved until the human restarted. Now the blocked issue parks awaiting the
+  // human, its dependents stay excluded via eligibility, and the drain keeps
+  // scheduling everything else — ending only when nothing eligible remains. The
+  // block never goes quiet: it surfaces as a blocked-run Attention item and a
+  // Run-narrative chat message, and the drain-end journal reports "N blocked
+  // awaiting you" instead of a premature run-blocked stop. (3c below proves the
+  // conservative halt still stands for a Worker that dies with NO Receipt.)
+  //
+  // A focused 4-issue drain over independent issues 02/04/06/07: 04 declares
+  // blocked, the other three complete. Cap 1 (serial), re-planning with the REAL
+  // coordinator after each Run against the on-disk backlog + declared Receipts.
   // ---------------------------------------------------------------------------
-  it('Scenario 3b: a lingering Worker declaring outcome: blocked still halts the drain', async () => {
+  it('Scenario 3b: a declared-blocked Worker parks; the other three complete, the drain ends no-eligible, one attention item (issue 137)', async () => {
     ingestFrom(sandbox.issuesDir);
 
-    // 02 completes normally; 03 (unblocked by it) then declares blocked.
-    const two = sandboxIssue(2);
-    await runFakeWorker({ repo, issue: two, exit: 'completed' });
-    await commitFinishedMain(repo, two.slug);
-    const rec2 = await waitForReceipt(2);
-    const terminal: ActiveRun[] = [{ issueId: 2, status: 'finished', receiptOutcome: rec2.outcome }];
+    const DRAIN_IDS = [2, 4, 6, 7];
+    const exits = new Map<number, WorkerExit>([
+      [2, 'completed'],
+      [4, 'blocked'],
+      [6, 'completed'],
+      [7, 'completed'],
+    ]);
+    const terminal: ActiveRun[] = [];
+    const started: number[] = [];
+    let stop: DrainPlan['drain'] | null = null;
+    for (let round = 0; round < 8; round++) {
+      const live = await readBacklog(repo);
+      const issues = live.issues.filter((i) => DRAIN_IDS.includes(i.id));
+      const plan = planDrain({ issues, maxConcurrent: 1, activeRuns: terminal });
+      if (plan.drain.stop) {
+        stop = plan.drain;
+        break;
+      }
+      const id = plan.startable[0];
+      if (id === undefined) break;
+      started.push(id);
+      const issue = sandboxIssue(id);
+      // Linger mode: the Worker writes its exit, then sits at its prompt — a
+      // blocked Worker never dies either (issue 65), so the Run must turn
+      // terminal on the declared Receipt alone.
+      const trace = await runFakeWorker({ repo, issue, exit: exits.get(id) ?? 'completed', linger: true });
+      const record = await waitForReceipt(id);
+      const after = await readBacklog(repo);
+      const status = deriveRunStatus({
+        sessionAlive: trace.sessionAlive,
+        stoppedByUser: false,
+        issueStatus: after.issues.find((i) => i.id === id)?.status ?? null,
+        receiptOutcome: record.outcome,
+      });
+      if (status === 'finished') await commitFinishedMain(repo, issue.slug);
+      terminal.push({ issueId: id, status, receiptOutcome: latestReceiptOutcomeFor(records, id) });
+    }
 
-    let backlog = await readBacklog(repo);
-    expect(planDrain({ issues: backlog.issues, maxConcurrent: 1, activeRuns: terminal }).startable[0]).toBe(3);
-    const trace3 = await runFakeWorker({ repo, issue: sandboxIssue(3), exit: 'blocked', linger: true });
-    expect(trace3.sessionAlive).toBe(true);
+    // The block PARKED — it never halted the drain. Every issue ran, and the
+    // drain ended because nothing eligible remained, never with run-blocked.
+    expect(started).toEqual([2, 4, 6, 7]);
+    expect(stop).not.toBeNull();
+    expect(stop!.reason).toBe('no-eligible');
+    expect(stop!.blockedParkedIssueIds).toEqual([4]);
 
-    // Walkthrough item "Blocked exit": the blocked report lands as a Receipt
-    // (`outcome: blocked`) — one classified record, carrying the reason.
-    const rec3 = await waitForReceipt(3);
-    expect(rec3.outcome).toBe('blocked');
-    expect(isReceiptRecord(rec3)).toBe(true);
-    expect(rec3.detail).toContain('I stopped because');
+    // The other three completed; 04 parked `wip` on a declared-blocked Receipt.
+    const backlog = await readBacklog(repo);
+    for (const id of [2, 6, 7]) {
+      expect(backlog.issues.find((i) => i.id === id)?.status).toBe('done');
+    }
+    expect(backlog.issues.find((i) => i.id === 4)?.status).toBe('wip');
+    expect(latestReceiptOutcomeFor(records, 4)).toBe('blocked');
 
-    backlog = await readBacklog(repo);
-    const status = deriveRunStatus({
-      sessionAlive: trace3.sessionAlive,
-      stoppedByUser: false,
-      issueStatus: backlog.issues.find((i) => i.id === 3)?.status ?? null,
-      receiptOutcome: rec3.outcome,
+    // (a) The block does NOT go quiet — exactly ONE blocked-run Attention item,
+    // derived from the on-disk Receipt (the real cross-project surface input).
+    const completionsDir = join(repo, 'issues', 'completions');
+    const receiptNames = (await readdir(completionsDir)).filter((f) => f.endsWith('.md'));
+    const receipts = await Promise.all(
+      receiptNames.map(async (f) => parseReceipt(await readFile(join(completionsDir, f), 'utf8'))),
+    );
+    const attention = deriveAttention({
+      project: 'sandbox',
+      backlog,
+      receipts,
+      coreProposedPresent: false,
+      humanSetup: null,
+      journal: [],
+      lastSeen: null,
     });
-    expect(status).toBe('blocked');
-    terminal.push({ issueId: 3, status, receiptOutcome: latestReceiptOutcomeFor(records, 3) });
+    const blockedItems = attention.items.filter((i) => i.kind === 'blocked-run');
+    expect(blockedItems).toHaveLength(1);
+    expect(blockedItems[0].issueId).toBe(4);
 
-    // The re-plan HALTS: declared blocked is a genuine stop, never a park —
-    // nothing further starts, and the un-started issues are reported.
-    const plan = planDrain({ issues: backlog.issues, maxConcurrent: 1, activeRuns: terminal });
-    expect(plan.drain.stop).toBe(true);
-    expect(plan.drain.reason).toBe('run-blocked');
-    expect(plan.drain.blockedIssueId).toBe(3);
-    expect(plan.startable).toEqual([]);
-    expect(plan.queued).toEqual([4, 5, 6, 7]);
+    // (b) ...and a Run-narrative CHAT message (ADR-0014): the drain no longer
+    // halts on a block, so the blocked park IS the conversation fact.
+    expect(narrativeChannelFor(narrativeKindForLifecycle('blocked'))).toBe('chat');
+
+    // (c) The drain-end journal reports "N blocked awaiting you" (not a
+    // run-blocked stop) and lists the blocked issue by slug with its reason.
+    const memoryRoot = join(sandbox.scratch, 'workbench', 'proj', 'memory');
+    await mkdir(memoryRoot, { recursive: true });
+    await Promise.all(appends);
+    const persisted = await store.read(repo);
+    const journal = await writeDrainJournal({
+      memoryRoot,
+      endedAt: '2026-07-17T18:00:00.000Z',
+      reason: stop!.message,
+      records: persisted,
+      notables: [],
+    });
+    expect(journal.written).toBe(true);
+    const entry = await readFile(journal.path!, 'utf8');
+    expect(entry).toContain('no eligible issue remains');
+    expect(entry).toContain('1 blocked awaiting you (issue 4)');
+    expect(entry).toContain(`${sandboxIssue(4).slug}: blocked`);
   });
 
   // ---------------------------------------------------------------------------

@@ -98,6 +98,37 @@ export function isParkedHitl(
 }
 
 /**
+ * Whether a blocked Run is a declared-blocked **park** (issue 137) rather than a
+ * genuinely-unknown halt. A Worker that hits a blocker only the human can clear
+ * writes a Receipt declaring `outcome: blocked` and leaves its issue not-done;
+ * ADR-0013's declare-don't-imply makes that a fact of its own. The drain treats
+ * it exactly as it already treats a parked HITL Run (`isParkedHitl`, issue 64's
+ * precedent): it does NOT halt — the blocked issue parks awaiting the human, its
+ * dependents stay excluded naturally via eligibility (their dependency never
+ * reached `done`), and everything else keeps scheduling. The blocked Run does
+ * not go quiet — it surfaces as an Attention item and a Run-narrative message —
+ * but it no longer stops the whole drain.
+ *
+ * The distinction reads DECLARED state only, nothing else:
+ *   - status `blocked` AND the Receipt declares `blocked` ⇒ a park.
+ *   - status `blocked` with NO Receipt (`receiptOutcome` null/absent) ⇒ the
+ *     Worker died mid-exit with genuinely-unknown state — NOT a park; today's
+ *     conservative stop-and-report stands.
+ * A LEFTOVER blocked Run (issue 132) is never THIS drain's park to report — a
+ * stale Pane from a prior drain is out of scope here exactly as it is for the
+ * halt — so it is excluded too.
+ */
+export function isBlockedPark(
+  run: Pick<ActiveRun, 'status' | 'receiptOutcome' | 'leftover'>,
+): boolean {
+  return (
+    !run.leftover &&
+    run.status === 'blocked' &&
+    (run.receiptOutcome ?? null) === 'blocked'
+  );
+}
+
+/**
  * The issue ids that must run SOLO on the integration branch because they sit on
  * a dependency chain being drained (issue 111, option 2). An issue is
  * solo-chained when it shares a dependency edge — in EITHER direction (it
@@ -146,8 +177,22 @@ export interface DrainDecision {
   stop: boolean;
   /** The reason, or null while the drain is still live. */
   reason: DrainStopReason | null;
-  /** When `reason` is 'run-blocked', the issue id whose Run reported blocked. */
+  /**
+   * When `reason` is 'run-blocked', the issue id whose Run halted the drain — a
+   * Run that ended `blocked` with NO Receipt (the genuinely-unknown conservative
+   * case, issue 137). A declared-blocked park never lands here; see
+   * `blockedParkedIssueIds`.
+   */
   blockedIssueId: number | null;
+  /**
+   * Issue ids whose Run declared `outcome: blocked` and PARKED (issue 137): the
+   * drain skipped each and kept scheduling, and each now awaits the human to
+   * unstick it. Populated on EVERY plan (live or stopped), ascending and
+   * deduped, so the UI stop message, the drain-end journal, and the Attention
+   * surface can report "N blocked awaiting you" instead of a premature
+   * run-blocked halt. Empty when nothing parked blocked.
+   */
+  blockedParkedIssueIds: number[];
   /** A human-readable one-liner for the UI ("Stopped: …"), or '' while live. */
   message: string;
 }
@@ -188,6 +233,19 @@ export interface DrainInput {
  */
 function isOccupyingSlot(run: ActiveRun): boolean {
   return run.status === 'running' && !run.leftover;
+}
+
+/**
+ * The trailing "— N blocked awaiting you (issue(s) …)" clause the drain-end stop
+ * message carries when the drain ran to completion but some Runs parked blocked
+ * (issue 137). Empty when nothing parked blocked, so a clean drain reads exactly
+ * as before. The blocked ids' one-line reasons live in the journal's per-Run
+ * list; the stop message just names who is waiting.
+ */
+function blockedAwaitingClause(ids: readonly number[]): string {
+  if (ids.length === 0) return '';
+  const noun = ids.length === 1 ? 'issue' : 'issues';
+  return ` — ${ids.length} blocked awaiting you (${noun} ${ids.join(', ')})`;
 }
 
 /**
@@ -285,11 +343,13 @@ export function drainAvailability(
  *  - **Startable/queued** are the eligible issues (per `eligibleForRun`) that do
  *    NOT already have a Run, in ascending id order. The first `freeSlots` are
  *    startable; the rest queue. `freeSlots = cap − (running Runs)`.
- *  - **Drain stop** — a Run that reported `blocked` stops the drain immediately
- *    (no new Runs start; in-flight Runs finish on their own) — UNLESS it is a
- *    parked HITL Run (`isParkedHitl`, issue 64), which the drain skips and
- *    continues past. Otherwise the drain is complete when nothing is running
- *    and nothing is eligible.
+ *  - **Drain stop** — a Run that ended `blocked` with NO Receipt (a Worker that
+ *    died mid-exit, state genuinely unknown) stops the drain immediately (no new
+ *    Runs start; in-flight Runs finish on their own). A Run whose Receipt
+ *    DECLARES `outcome: blocked` (`isBlockedPark`, issue 137) does NOT stop the
+ *    drain — like a parked HITL Run (`isParkedHitl`, issue 64) it parks and the
+ *    drain continues past it, reported in `blockedParkedIssueIds`. Otherwise the
+ *    drain is complete when nothing is running and nothing is eligible.
  *  - When the drain is stopping, `startable` is emptied — the whole point of a
  *    stop is to open no further Panes. `queued` still reports what was left
  *    un-started, for the UI to explain.
@@ -310,20 +370,34 @@ export function planDrain(input: DrainInput): DrainPlan {
     .filter((issue) => !activeIds.has(issue.id) && eligibleForRun(issue, input.issues))
     .map((issue) => issue.id);
 
-  // Only a GENUINELY blocked Run halts the drain. A parked HITL Run — its
-  // Receipt declares `needs-verification` (or its HITL-marked issue ended `wip`
-  // with a Receipt) — is a success state (issue 64): the drain skips its issue
-  // (it stays in `activeIds`) and keeps scheduling everything else. A LEFTOVER
-  // blocked Run from a prior drain (issue 132) likewise never halts THIS drain —
-  // a stale Pane from yesterday is not the current drain's concern, and letting
-  // it stop a freshly-started drain was part of the phantom-slot bug.
   const issueById = new Map(input.issues.map((i) => [i.id, i]));
+
+  // The declared-blocked PARKS (issue 137): non-leftover Runs whose Receipt
+  // declares `outcome: blocked`. They no longer halt the drain — each parks
+  // awaiting the human while everything else keeps scheduling — but they are
+  // reported so the stop message, the drain-end journal, and the Attention
+  // surface can say "N blocked awaiting you" instead of a premature stop.
+  // Ascending + deduped (defensive; one Run per issue in practice).
+  const blockedParkedIssueIds = [
+    ...new Set(input.activeRuns.filter(isBlockedPark).map((r) => r.issueId)),
+  ].sort((a, b) => a - b);
+
+  // Only a GENUINELY blocked Run halts the drain: one that ended `blocked` with
+  // NO Receipt (the Worker died mid-exit, state unknown — issue 137's
+  // conservative case). A declared-blocked PARK (`isBlockedPark`, issue 137) and
+  // a parked HITL Run (`isParkedHitl`, issue 64) are both success-adjacent states
+  // the drain skips and keeps scheduling past — their issues stay in `activeIds`,
+  // their dependents stay excluded by eligibility. A LEFTOVER blocked Run from a
+  // prior drain (issue 132) likewise never halts THIS drain — a stale Pane from
+  // yesterday is not the current drain's concern, and letting it stop a
+  // freshly-started drain was part of the phantom-slot bug.
   const blocked =
     input.activeRuns.find(
       (r) =>
         r.status === 'blocked' &&
         !r.leftover &&
-        !isParkedHitl(r, issueById.get(r.issueId)),
+        !isParkedHitl(r, issueById.get(r.issueId)) &&
+        !isBlockedPark(r),
     ) ?? null;
 
   let drain: DrainDecision;
@@ -334,6 +408,7 @@ export function planDrain(input: DrainInput): DrainPlan {
       stop: true,
       reason: 'mid-merge',
       blockedIssueId: null,
+      blockedParkedIssueIds,
       message:
         'Stopped: main is mid-merge — resolve the conflict or abort the merge before draining.',
     };
@@ -342,17 +417,24 @@ export function planDrain(input: DrainInput): DrainPlan {
       stop: true,
       reason: 'run-blocked',
       blockedIssueId: blocked.issueId,
+      blockedParkedIssueIds,
       message: `Stopped: the Run on issue ${blocked.issueId} reported blocked.`,
     };
   } else if (runningCount === 0 && eligible.length === 0) {
+    // The drain ran to completion: nothing running, nothing eligible. When some
+    // Runs parked blocked along the way (issue 137), the drain still FINISHED —
+    // it did not halt on them — so the message stays "no eligible issue remains"
+    // (which `classifyDrainStop` reads as a finished drain) and appends who is
+    // awaiting the human, rather than reporting a run-blocked stop.
     drain = {
       stop: true,
       reason: 'no-eligible',
       blockedIssueId: null,
-      message: 'Stopped: no eligible issue remains.',
+      blockedParkedIssueIds,
+      message: `Stopped: no eligible issue remains${blockedAwaitingClause(blockedParkedIssueIds)}.`,
     };
   } else {
-    drain = { stop: false, reason: null, blockedIssueId: null, message: '' };
+    drain = { stop: false, reason: null, blockedIssueId: null, blockedParkedIssueIds, message: '' };
   }
 
   // Fill the free slots in ascending id order, but honor the single
