@@ -26,6 +26,7 @@ import {
 import type { Backlog, IssueStatus } from '../../shared/backlog-model';
 import type {
   AttentionSnapshot,
+  NavigateAttentionMessage,
   DispatcherTarget,
   LauncherProject,
   ProjectCardView,
@@ -1599,6 +1600,25 @@ export function App(): JSX.Element {
     },
     [attention.workbenchRoot, attemptProjectChange, openAttentionTarget],
   );
+
+  // An OS notification was clicked (issue 138). Main focused this Window and
+  // sent us where to land; route it through the SAME guarded click-through the
+  // Inbox uses (issue 80/125) — so a notification click is never less safe than
+  // an Inbox click (the interrupt guard still fires when a live Run would be
+  // left behind), and lands on the Project's attention surface with the issue
+  // selected. The workbench root rides in the message (authoritative from main).
+  useEffect(() => {
+    const off = window.mc.onNavigateAttention((msg: NavigateAttentionMessage) => {
+      const path = workbenchProjectPath(msg.workbenchRoot, msg.project);
+      if (path === null) return;
+      attemptProjectChange({
+        path,
+        label: msg.project,
+        proceed: () => void openAttentionTarget(path, msg.project, msg.issueId, null),
+      });
+    });
+    return off;
+  }, [attemptProjectChange, openAttentionTarget]);
 
   // A Launcher home-grid card was clicked (issue 121). The pure `decideCardOpen`
   // picks one of three outcomes so this stays a thin dispatcher: open in place
