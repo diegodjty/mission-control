@@ -28,12 +28,16 @@ Exception (issue 89): issue FILES only — the detail panel can edit (parser-val
 _Avoid_: dashboard, board.
 
 **Pane** (a.k.a. cockpit):
-One embedded, fully-interactive Claude Code session — the same TUI you'd get in a terminal — rendered inside Mission Control. This is where work happens and where permission prompts are answered live.
+One embedded, fully-interactive Claude Code session — the same TUI you'd get in a terminal — rendered inside Mission Control. The surface for *interactive* work: manual single Runs, Planning, Just talk, HITL verification, and take-overs of headless Runs. Drain Runs are headless by default and watched via **Feeds** (ADR-0001 amendment, 2026-07-17).
 _Avoid_: terminal (ambiguous), agent, worker.
 
 **Run**:
-One issue being worked in one **Pane** — a single fresh Claude Code session claiming and completing a single issue.
+One issue being worked by one fresh Claude Code session claiming and completing a single issue. A drain Run executes **headless** and is watched through a **Feed**; a manual Run gets an interactive **Pane**.
 _Avoid_: job, task (task = the issue itself, not the act of working it).
+
+**Feed**:
+The read-only live view of a **headless Run**, rendered from its event stream (current activity, elapsed time, last assistant message). You *watch* a Feed; you *talk to* a **Pane**. The raw stream tail is retained for debug peeking only — Receipts remain the sole capture input (ADR-0013).
+_Avoid_: Pane (interactive), terminal, log (the Run log is the Receipt feed, not this).
 
 **Artifacts**:
 The on-disk files the **Map** reads: `issues/NN-slug.md` (status/depends_on frontmatter), the project CONFIG, git history, and **Receipts** (the on-disk carrier of the completion blocks the afk-issue-runner emits). Pipeline artifacts live in the **Workbench** (ADR-0015); a legacy in-repo `issues/` layout remains supported (QA sandbox, external skill users).
@@ -43,7 +47,7 @@ The ecosystem's data layer: ONE private git repo (`~/Workbench/`) holding every 
 _Avoid_: vault (that's Obsidian's word for its viewer window, not the system).
 
 **Execution view**:
-The Mission Control surface for running a backlog — the **Map** plus parallel **Panes** plus the **Merge** action.
+The Mission Control surface for running a backlog — the **Map** plus parallel **Runs** (**Feeds** for headless drain Runs, **Panes** for interactive ones) plus the **Merge** action.
 
 **Planning view** (v1 per ADR-0016):
 The Mission Control surface for the planning stages: a normal **Pane** running `grill-with-docs`/`to-prd`/`to-issues` beside a live markdown preview of the documents as they are written (workbench PRD/issues + repo CONTEXT/ADRs, file-watched), with stage buttons launching each step. Deliberately thin — not a bespoke structured chat.
@@ -90,7 +94,7 @@ A **clean, conflict-free Merge auto-proceeds** (refines ADR-0002's "human-trigge
 - The **Map** reads **Artifacts**; **Panes** produce changes to **Artifacts** (issue status flips, code, completion blocks), which the **Map** then reflects.
 - The **Launcher** (home) is the Project chooser in front of the **Map**; the per-project entry verbs (**＋ Start something**: **Grill a feature** / **Simple issue**) live on the **Map**, whose empty state *is* that chooser (ADR-0019).
 - Concurrent **Runs** are capped by a **max-concurrent** setting.
-- **Mission Control owns the isolation lifecycle:** a lone **Run** works on `main` (solo, no worktree); the moment there are 2+ concurrent **Runs**, it enables parallel mode and gives each **Run** its own **worktree**, then offers a **Merge** action once they finish.
+- **Mission Control owns the isolation lifecycle:** a lone **Run** works on `main` (solo, no worktree); the moment there are 2+ concurrent **Runs**, it enables parallel mode and gives each **Run** its own **worktree**; the **auto-merge lane** integrates each finished branch as it completes (ADR-0021). An issue is startable only when its dependencies are `done` **and integrated** — a done-but-unmerged dependency holds dependents in a visible "waiting on merge of NN" (solo-chaining is retired).
 - The **Dispatcher** drives **Workers** (Runs) via the deterministic **Run Coordinator** for scheduling; it consumes **Completion blocks** (the **Run log**), not raw Pane output. Auto on reversible mechanics, human-approved on scope (see **Dispatcher authority**).
 - **Dispatcher input contract:** a one-time seed (backlog + PRD/CONTEXT) + a live stream of **{Completion blocks read from Receipts, terminal lifecycle events (started/finished/blocked/stranded/needs-attention/finished-without-receipt), doc-drift flags}** — and **never raw Pane output**. Lifecycle events let it react mid-drain (e.g. "05 stranded — discard and continue?") without ingesting any implementation transcript.
 - **Dispatcher lifecycle:** **per-Project, on-demand** — spun up when a drain starts (or when explicitly opened), lives for that drain/work session, dismissable; not an always-on daemon. One Dispatcher per Project, hosted by the Window that owns it.
@@ -98,11 +102,11 @@ A **clean, conflict-free Merge auto-proceeds** (refines ADR-0002's "human-trigge
 - **Dispatcher UI:** a **Dispatcher chat panel** (you converse with it) beside the **Map**, with the **Run log** as a feed of Completion-block cards; worker Panes are one click away to peek. "Talk to one orchestrator" instead of "watch N terminals."
 
 **Merge** (action):
-A Map-level button that appears when parallel **Runs** complete; it integrates their `afk/NN-slug` branches (via `afk-merge.sh`) and reports any conflicts. Human-triggered, never automatic.
-_Avoid_: sync, integrate.
+Everyday integration belongs to the **auto-merge lane** (ADR-0021): finished, Receipt-backed `afk/NN-slug` branches merge continuously in **finish order** (via `afk-merge.sh`) whenever main is idle — a clean auto-merge is silent+passive; a conflict gates as a blocking approval and pauses the lane. The Map-level **Merge button** remains for the exceptions only: resolving/aborting a conflict, merging adopted strays (never auto-merged), and forcing a sweep.
+_Avoid_: sync, integrate; "human-triggered" (that was pre-ADR-0021).
 
 **Merge preview**:
-The background-computed prediction of what pressing **Merge** now would do, per finished-unmerged `afk/` branch. Simulated over the **full merge sequence in current merge order** (ascending issue id — the order `mergeReadiness` already fixes), never pairwise-against-main: pairwise can badge branch 2-of-N "clean" and still conflict at press time, which defeats the feature. The simulation **stops at the first predicted conflict** — later branches read "blocked behind NN", because that is what `afk-merge.sh` actually does. Purely advisory: the Merge and Abort affordances are unchanged.
+The background-computed prediction of what the next merge would do, per finished-unmerged `afk/` branch. Simulated over the **full merge sequence in current merge order** (**finish order** — first finished, first merged, per ADR-0021), never pairwise-against-main: pairwise can badge branch 2-of-N "clean" and still conflict at merge time, which defeats the feature. The simulation **stops at the first predicted conflict** — later branches read "blocked behind NN", because a conflict pauses the **auto-merge lane**. Advisory to the human; the lane consults the verdict as its go/no-go (badges never reorder anything).
 Read-only means: a preview never touches **refs, worktrees, or the index**; unreachable object-database writes (`merge-tree --write-tree` / `commit-tree` chaining, later gc-pruned) are acceptable by design. Requires git ≥ 2.38 (`merge-tree --write-tree`); on older git there are **no badges plus one passive note**, no fallback merge machinery.
 The badge predicts **the outcome of pressing Merge, restricted to per-branch, stable facts**. Verdicts: `clean` / `conflicts (files…)` / `blocked behind NN` / `won't merge — adds install artifacts` / `recalculating`. The issue-98 artifact-hygiene refusal IS folded in (per-offender only — innocent siblings keep their real merge verdicts; the batch-level refusal stays a press-time message). NOT modeled: CHOKEPOINT union auto-resolution (badge is conservative on legacy hand-written confs) and transient repo states (dirty main, wrong branch — point-in-time facts, not branch properties).
 **Staleness:** every preview is stamped with the (default-branch tip, ordered finished-branch tips) it was computed against; the existing ~1.5 s scan tick compares stamps — a mismatch flips affected badges to `recalculating` (never a stale verdict) and queues **one coalesced recompute per repo** through the per-repo serializer. A repo that is **mid-merge suspends its previews** ("merge in progress", not `recalculating`) until main is clean again.
@@ -124,7 +128,7 @@ _Avoid_: dry-run (`afk-merge.sh --dry-run` does not detect conflicts), merge che
 
 ## Open (not yet resolved)
 
-- **Merge preview** follow-ups, deliberately deferred by ADR-0018: wip early-warning previews, auto-rebase of finished branches after each merge (needs its own grill — history rewrite on branches Receipts reference), and conflict-aware merge ordering (the sequence simulation already produces the data).
+- **Merge preview** follow-ups: wip early-warning previews remain deferred (ADR-0018). Conflict-aware merge ordering and auto-rebase-after-each-merge are **mostly mooted by ADR-0021** (finish-order merging collapses the divergence window those existed to manage) — revisit only if conflict gates stay frequent after it lands.
 - Detailed design of the **Planning view** (split-screen interview + live docs) — direction set, specifics deferred.
 - Portfolio overview **Window** (all Projects + stages on one page) — partially delivered by the project-first **Launcher** (ADR-0019, the at-a-glance grid of cards with stage badges); a dedicated cross-project *analytics* Window remains a later additive view, not v1.
 - How the **Map** gets live updates — file-watch on `issues/` vs. polling. Implementation-level; defer to build-time.
