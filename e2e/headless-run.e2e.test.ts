@@ -36,6 +36,7 @@ import type {
   PtyExitMessage,
   RunLogRecord,
   RunSessionCapturedMessage,
+  RunFeedUpdateMessage,
 } from '../src/shared/ipc-contract';
 import { seedSandbox, sandboxIssue, waitFor, type Sandbox } from './sandbox';
 
@@ -185,6 +186,46 @@ describe('headless Run tracer (issue 139) — real child process, real modules',
   });
 
   // ---------------------------------------------------------------------------
+  // Issue 140 AC2 (main-side) — the event stream is FOLDED in main (via the pure
+  // reducer) into Feed content and pushed on RunFeedUpdate: a live activity line
+  // from a tool event, the last assistant message, and the terminal result with
+  // its usage payload intact. The renderer consumes these snapshots and never
+  // parses an event; the DOM render itself needs Electron (declared manual-only).
+  // ---------------------------------------------------------------------------
+  it('folds the stream into Feed content (activity, last message, result+usage) and pushes it', async () => {
+    const issue = sandboxIssue(2);
+    const finished = '2026-07-17T12:00:00.000Z';
+    configureFakeWorker({ sessionId: 'sess-headless-feed', slug: issue.slug, id: 2, finished });
+
+    const exits: PtyExitMessage[] = [];
+    const updates: RunFeedUpdateMessage[] = [];
+    manager = new HeadlessSessionManager({
+      onExit: (msg) => exits.push(msg),
+      onSessionCaptured: () => {},
+      onFeedUpdate: (msg) => updates.push(msg),
+    });
+    const spawn = manager.spawn({ cols: 80, rows: 24, run: headlessRunTarget(2) });
+
+    // Content updates are broadcast, keyed to this spawn's internal session id.
+    await waitFor(() => updates.length > 0, 'Feed content pushed');
+    expect(updates.every((u) => u.sessionId === spawn.sessionId)).toBe(true);
+
+    await waitFor(() => exits.length > 0, 'headless child exits');
+
+    // The final folded snapshot carries every content field the Feed renders.
+    const finalContent = updates[updates.length - 1].content;
+    // Activity line derived from the Bash tool_use turn ("running npm test").
+    expect(finalContent.activity).toBe('running npm test');
+    expect(finalContent.activityTool).toBe('Bash');
+    // Last assistant prose survived the later tool-only turn (never blanked).
+    expect(finalContent.lastMessage).toBe(`Working ${issue.slug}…`);
+    // Terminal result extracted, `usage` intact VERBATIM (issue 143 consumes it).
+    expect(finalContent.result?.subtype).toBe('success');
+    expect(finalContent.result?.isError).toBe(false);
+    expect(finalContent.result?.usage).toEqual({ input_tokens: 1200, output_tokens: 340 });
+  });
+
+  // ---------------------------------------------------------------------------
   // AC1 (park path) — a headless Worker that PARKS flows through the same seam
   // unchanged: the session id is still captured, the issue stays `wip`, and the
   // Receipt declares `needs-verification` (the drain would park it, not halt).
@@ -227,7 +268,7 @@ describe('headless Run tracer (issue 139) — real child process, real modules',
   // Manual-only (need the live Electron shell / a real `claude` binary): named,
   // never silently skipped.
   // ---------------------------------------------------------------------------
-  it.skip('manual-only: a drain Run renders a Feed strip (status + elapsed), not an xterm, with no input surface (AC2)', () => {});
+  it.skip('manual-only: a drain Run renders the Feed strip (activity + elapsed + last message), not an xterm, with no input surface (issue 139 AC2 / issue 140 AC2 — the DOM render; the fold is covered above)', () => {});
   it.skip('manual-only: a manual single Run still opens an interactive Pane — no regression (AC4)', () => {});
   it.skip('manual-only: the real `claude -p --output-format stream-json --verbose` binary streams a system/init session_id', () => {});
 });

@@ -514,6 +514,10 @@ const headlessManager = new HeadlessSessionManager({
     if (runSessionProject.delete(msg.sessionId)) broadcastRegistryChanged();
   },
   onSessionCaptured: (msg) => broadcast(IpcChannel.RunSessionCaptured, msg),
+  // The folded Feed content (issue 140): activity line, last assistant message,
+  // terminal result. Broadcast to every Window; each Run's Feed self-filters by
+  // the internal sessionId. The renderer never sees a raw event.
+  onFeedUpdate: (msg) => broadcast(IpcChannel.RunFeedUpdate, msg),
 });
 
 // One Backlog Watcher for the app; keyed per renderer WebContents so a Window

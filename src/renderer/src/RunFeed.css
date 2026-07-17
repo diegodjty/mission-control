@@ -80,6 +80,70 @@
   color: var(--fg-mute, #93a1ad);
 }
 
+/* The live activity line (issue 140): what the headless Run is doing right now,
+   folded from its tool events in main. A small pulsing dot marks that it is live. */
+.run-feed__activity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  font-size: 13px;
+  color: var(--fg-soft, #b6c2cc);
+}
+
+.run-feed__activity-spinner {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--teal, #4fd1c5);
+  animation: run-feed-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes run-feed-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.run-feed__activity-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The last assistant prose message (issue 140), clamped so long output never
+   grows the tile — the full text is available via the raw-stream peek. */
+.run-feed__message {
+  margin: 0;
+  max-width: 100%;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--fg-mute, #93a1ad);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* The terminal result once the Run exits (issue 140): success or error. */
+.run-feed__result {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.run-feed__result--ok {
+  color: var(--green, #58c98a);
+}
+
+.run-feed__result--error {
+  color: var(--red, #e06c75);
+}
+
 .run-feed__session {
   font-size: 11px;
   color: var(--fg-faint, #6b7783);

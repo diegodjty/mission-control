@@ -71,6 +71,7 @@ import {
   type PtySpawnResult,
   type PtyWriteMessage,
   type RunSessionCapturedMessage,
+  type RunFeedUpdateMessage,
 } from '../shared/ipc-contract';
 
 const api: MissionControlApi = {
@@ -250,6 +251,14 @@ const api: MissionControlApi = {
     const handler = (_e: IpcRendererEvent, msg: RunSessionCapturedMessage): void => listener(msg);
     ipcRenderer.on(IpcChannel.RunSessionCaptured, handler);
     return () => ipcRenderer.removeListener(IpcChannel.RunSessionCaptured, handler);
+  },
+
+  onRunFeedUpdate: (
+    listener: (msg: RunFeedUpdateMessage) => void,
+  ): (() => void) => {
+    const handler = (_e: IpcRendererEvent, msg: RunFeedUpdateMessage): void => listener(msg);
+    ipcRenderer.on(IpcChannel.RunFeedUpdate, handler);
+    return () => ipcRenderer.removeListener(IpcChannel.RunFeedUpdate, handler);
   },
 };
 

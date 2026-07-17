@@ -14,6 +14,7 @@ import type { IsolationRun } from './isolation-policy';
 import type { PipelineStage } from './project-registry';
 import type { AfkBranchFacts } from './worktree-scan';
 import type { BranchPreview } from './merge-preview';
+import type { FeedContent } from './headless-feed';
 
 /** Channel names. Grouped by direction for clarity. */
 export const IpcChannel = {
@@ -82,6 +83,17 @@ export const IpcChannel = {
    * peek/debug only and is NEVER a capture input (ADR-0013 untouched).
    */
   RunSessionCaptured: 'run:session-captured',
+  /**
+   * main → renderer (broadcast): a headless Run's Feed CONTENT changed (issue
+   * 140). Main folds the stream-json events (in the headless adapter, via the
+   * pure `headless-feed` reducer) into a `FeedContent` snapshot — the derived
+   * activity line, the last assistant message, and the terminal result (usage
+   * intact for issue 143) — and pushes it here whenever it changes. The renderer
+   * self-filters by the internal `sessionId` and renders the snapshot directly:
+   * it consumes Feed state ONLY and never parses an event itself. The raw stream
+   * still stays in main for peek/debug (ADR-0013 untouched).
+   */
+  RunFeedUpdate: 'run:feed-update',
   /**
    * renderer → main (invoke): reconcile isolation for the current active Run
    * set — create/remove worktrees, toggle parallel mode — and resolve each
@@ -473,6 +485,18 @@ export interface RunSessionCapturedMessage {
   sessionId: SessionId;
   /** The claude session id parsed from the stream (for resume/take-over). */
   claudeSessionId: string;
+}
+
+/**
+ * A headless Run's folded Feed content (issue 140), broadcast whenever it
+ * changes. The renderer's Feed self-filters by `sessionId` and renders the
+ * snapshot directly — no event parsing in the renderer.
+ */
+export interface RunFeedUpdateMessage {
+  /** The MC-internal spawn session id (routes this to the right Feed). */
+  sessionId: SessionId;
+  /** The reduced Feed content: activity line, last message, terminal result. */
+  content: FeedContent;
 }
 
 export interface BacklogLoadRequest {
@@ -1441,6 +1465,13 @@ export interface MissionControlApi {
    * `claudeSessionId` on the Run. Returns an unsubscribe function.
    */
   onRunSessionCaptured(listener: (msg: RunSessionCapturedMessage) => void): () => void;
+  /**
+   * Subscribe to headless Runs' Feed-content updates (issue 140): fired whenever
+   * a headless Run's folded content (activity line, last assistant message,
+   * terminal result) changes. The renderer's Feed self-filters by the internal
+   * `sessionId` and renders the snapshot directly. Returns an unsubscribe function.
+   */
+  onRunFeedUpdate(listener: (msg: RunFeedUpdateMessage) => void): () => void;
 }
 
 declare global {

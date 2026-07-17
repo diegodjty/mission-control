@@ -2,7 +2,12 @@ import { useEffect, useRef, useState } from 'react';
 import './RunFeed.css';
 import type { RunTarget } from '../../shared/ipc-contract';
 import type { RunStatus } from '../../shared/run-state';
-import { deriveFeedState, formatElapsed } from '../../shared/headless-feed';
+import {
+  deriveFeedState,
+  formatElapsed,
+  EMPTY_FEED_CONTENT,
+  type FeedContent,
+} from '../../shared/headless-feed';
 
 interface RunFeedProps {
   /** The headless Run target (`headless: true`) this Feed watches. */
@@ -35,6 +40,13 @@ interface RunFeedProps {
  * The raw stream never reaches here — it is buffered in main for peek/debug only
  * (ADR-0013). The elapsed clock is a renderer-side timer feeding the pure
  * `deriveFeedState`/`formatElapsed` helpers.
+ *
+ * The live CONTENT (issue 140) — a derived activity line, the last assistant
+ * message, and the terminal result — arrives already folded on RunFeedUpdate:
+ * main reduces the event stream (via the pure `headless-feed` reducer) and
+ * pushes snapshots here. This component NEVER parses an event; it self-filters
+ * updates by its own spawn session id and renders the snapshot. It remains, by
+ * construction, read-only: no input surface, no cursor (glossary AC3).
  */
 export function RunFeed({
   run,
@@ -50,6 +62,7 @@ export function RunFeed({
   const [now, setNow] = useState<number>(() => Date.now());
   const [exited, setExited] = useState<boolean>(false);
   const [claudeSessionId, setClaudeSessionId] = useState<string | null>(null);
+  const [content, setContent] = useState<FeedContent>(EMPTY_FEED_CONTENT);
 
   // Latest callbacks via refs so the spawn effect keys only on the Run target
   // (a fresh callback each render must not tear down and respawn the process).
@@ -80,6 +93,13 @@ export function RunFeed({
       setClaudeSessionId(msg.claudeSessionId);
       onClaudeSessionRef.current?.(msg.claudeSessionId);
     });
+    // The folded Feed content (issue 140): main pushes a fresh snapshot whenever
+    // the activity line, last message, or terminal result changes. Self-filter by
+    // this spawn's internal session id — the raw stream is never parsed here.
+    const offFeed = window.mc.onRunFeedUpdate((msg) => {
+      if (msg.sessionId !== sessionId) return;
+      setContent(msg.content);
+    });
 
     // cols/rows are irrelevant to a headless child (no TTY) but the request
     // shape requires them; the manager ignores them.
@@ -105,6 +125,7 @@ export function RunFeed({
       disposed = true;
       offExit();
       offCaptured();
+      offFeed();
       if (sessionId) window.mc.killPty({ sessionId });
       sessionIdRef.current = null;
     };
@@ -126,8 +147,13 @@ export function RunFeed({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stopSignal]);
 
-  const feed = deriveFeedState({ startedAt, now, exited, sessionId: claudeSessionId });
+  const feed = deriveFeedState({ startedAt, now, exited, sessionId: claudeSessionId, content });
   const label = feed.status === 'starting' ? 'starting…' : status;
+
+  // While the Run is live, the activity line is what it is DOING right now; once
+  // it exits, the terminal result supersedes it (a stale "editing …" would lie).
+  const showActivity = feed.activity !== null && feed.status !== 'exited';
+  const result = feed.result;
 
   return (
     <div className="run-feed" role="status" aria-live="polite">
@@ -141,6 +167,22 @@ export function RunFeed({
           Watching a headless Run — there is no terminal to type into.
         </span>
       </div>
+      {showActivity && (
+        <div className="run-feed__activity" title={feed.activity ?? undefined}>
+          <span className="run-feed__activity-spinner" aria-hidden="true" />
+          <span className="run-feed__activity-text">{feed.activity}</span>
+        </div>
+      )}
+      {feed.lastMessage !== null && (
+        <p className="run-feed__message">{feed.lastMessage}</p>
+      )}
+      {result !== null && (
+        <div
+          className={`run-feed__result run-feed__result--${result.isError ? 'error' : 'ok'}`}
+        >
+          {result.isError ? '✕' : '✓'} {result.subtype ?? (result.isError ? 'error' : 'done')}
+        </div>
+      )}
       {claudeSessionId !== null && (
         <div className="run-feed__session" title="claude session id — for resume / take over">
           session <code>{claudeSessionId}</code>

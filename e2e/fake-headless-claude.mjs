@@ -35,6 +35,19 @@ emit({
   session_id: sessionId,
   message: { role: 'assistant', content: [{ type: 'text', text: `Working ${slug}…` }] },
 });
+// A tool_use turn so the Feed model derives a live ACTIVITY line (issue 140):
+// `Bash` with a command folds to `running npm test`. The renderer shows this
+// while the Run is live; the e2e asserts main folded it and broadcast it.
+emit({
+  type: 'assistant',
+  session_id: sessionId,
+  message: {
+    role: 'assistant',
+    content: [
+      { type: 'tool_use', name: 'Bash', input: { command: 'npm test', description: 'run tests' } },
+    ],
+  },
+});
 
 // 2. The on-disk work. A blocked/park Worker leaves the claim `wip`; a completed
 //    one flips through to `done` and writes a deliverable.
@@ -76,5 +89,16 @@ if (writeReceipt && receiptPath) {
   );
 }
 
-emit({ type: 'result', subtype: 'success', session_id: sessionId, is_error: false, num_turns: 2, total_cost_usd: 0.01 });
+// The terminal result carries a `usage` payload VERBATIM (issue 143 consumes it;
+// issue 140 asserts it survives the fold intact).
+emit({
+  type: 'result',
+  subtype: 'success',
+  session_id: sessionId,
+  is_error: false,
+  num_turns: 2,
+  total_cost_usd: 0.01,
+  result: `done ${slug}`,
+  usage: { input_tokens: 1200, output_tokens: 340 },
+});
 // Let the process exit naturally so buffered stdout is fully flushed first.

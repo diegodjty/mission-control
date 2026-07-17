@@ -60,7 +60,7 @@ sequenceDiagram
   C->>C: planDrain — startable = eligible + deps done
   C->>C: cut + provision worktree (copy node_modules)
   C->>W: spawn headless claude -p (stream-json, no pty; NODE_ENV=development)
-  W-->>C: session id captured from stream (Feed: status + elapsed)
+  W-->>C: stream folded in main → Feed (activity · elapsed · last message · result); session id captured
   W->>F: flip issue open→wip (the claim)
   W->>W: work · verify gate
   W->>F: flip wip→done, write Receipt (before final message)
@@ -74,10 +74,13 @@ notifications** (issue 138): an HITL park, a blocked park, a merge conflict, and
 the drain stopping/finishing each ping natively so you can walk away; a click
 focuses the Window on that Project's attention surface. *Landed (139):* drain
 Runs execute **headless** (`claude -p --output-format stream-json`, no pty),
-watched via a minimal **Feed** (status + elapsed), with the session id captured
-from the stream; a manual single Run keeps its interactive **Pane**. *Queued:*
-the richer Feed model + telemetry (140), hung Runs killed at `run_timeout` (141),
-blocked Runs park instead of halting the drain (137).
+watched via a **Feed** rather than a terminal, with the session id captured from
+the stream; a manual single Run keeps its interactive **Pane**. *Landed (140):*
+main folds the event stream (pure `headless-feed` reducer) into Feed **content** —
+a live activity line, the last assistant message, and the terminal result (usage
+kept intact for 143) — pushed on `RunFeedUpdate`; the renderer consumes snapshots
+and never parses an event. *Queued:* hung Runs killed at `run_timeout` (141), Run
+telemetry — tokens/cost/duration (143), take-over in a Pane (144).
 
 ## 3. Merge lifecycle
 

@@ -18,7 +18,14 @@ import { randomUUID } from 'node:crypto';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { resolveHeadlessRunCommand } from './resolve-run-command';
 import { buildWorkerSpawnEnv } from './spawn-env';
-import { createHeadlessStreamParser, type HeadlessStreamParser } from '../shared/headless-feed';
+import {
+  createHeadlessStreamParser,
+  reduceFeedContent,
+  EMPTY_FEED_CONTENT,
+  type HeadlessStreamParser,
+  type HeadlessEvent,
+  type FeedContent,
+} from '../shared/headless-feed';
 import type { SpawnContext } from './pty-session-manager';
 import type {
   PtyDataMessage,
@@ -26,6 +33,7 @@ import type {
   PtySpawnRequest,
   PtySpawnResult,
   RunSessionCapturedMessage,
+  RunFeedUpdateMessage,
   SessionId,
 } from '../shared/ipc-contract';
 
@@ -34,18 +42,29 @@ interface HeadlessSession {
   parser: HeadlessStreamParser;
   /** Whether the captured session id has already been reported once. */
   captured: boolean;
+  /**
+   * The Feed content folded from this Run's stream so far (issue 140). Events
+   * are reduced HERE, in main; the renderer receives snapshots and never parses.
+   */
+  content: FeedContent;
 }
 
 export interface HeadlessSessionManagerCallbacks {
   /**
    * Raw stream chunks, for a caller that wants to observe them. Mission Control
    * does NOT wire this to the renderer — the raw stream stays in main (peek via
-   * `getRunOutput`); a headless Run's Feed shows status + elapsed, not bytes.
+   * `getRunOutput`); a headless Run's Feed shows folded content, not raw bytes.
    */
   onData?: (msg: PtyDataMessage) => void;
   onExit: (msg: PtyExitMessage) => void;
   /** Fired once per Run when its claude session id is parsed from the stream. */
   onSessionCaptured: (msg: RunSessionCapturedMessage) => void;
+  /**
+   * Fired whenever a Run's folded Feed content changes (issue 140) — the
+   * activity line, last assistant message, or terminal result. Mission Control
+   * broadcasts it to the renderer, whose Feed renders the snapshot directly.
+   */
+  onFeedUpdate?: (msg: RunFeedUpdateMessage) => void;
 }
 
 // Tail-truncate the raw stream at this many chars — same bound as the PTY tail
@@ -93,7 +112,12 @@ export class HeadlessSessionManager {
     }) as ChildProcessWithoutNullStreams;
 
     const parser = createHeadlessStreamParser();
-    const session: HeadlessSession = { proc, parser, captured: false };
+    const session: HeadlessSession = {
+      proc,
+      parser,
+      captured: false,
+      content: EMPTY_FEED_CONTENT,
+    };
     this.sessions.set(sessionId, session);
     this.runOutput.set(sessionId, '');
 
@@ -105,11 +129,9 @@ export class HeadlessSessionManager {
 
     const ingest = (data: string): void => {
       this.append(sessionId, data);
-      for (const _ of parser.push(data)) {
-        // Events are consumed only for their side effect (session-id capture);
-        // this slice renders no per-event Feed activity (that is a later issue).
-        void _;
-      }
+      // Fold every completed event into the Feed content HERE (issue 140), so
+      // the renderer only ever consumes a reduced snapshot — never an event.
+      this.foldEvents(sessionId, session, parser.push(data));
       this.reportSessionId(sessionId, session);
       this.callbacks.onData?.({ sessionId, data });
     };
@@ -129,8 +151,9 @@ export class HeadlessSessionManager {
     });
 
     proc.on('close', (code, signal) => {
-      // Flush any trailing partial line, capturing a late-arriving session id.
-      parser.flush();
+      // Flush any trailing partial line, folding a late-arriving result event
+      // (and capturing a late-arriving session id) before the Run is torn down.
+      this.foldEvents(sessionId, session, parser.flush());
       this.reportSessionId(sessionId, session);
       this.sessions.delete(sessionId);
       const exitCode = typeof code === 'number' ? code : signal ? 128 : 1;
@@ -138,6 +161,28 @@ export class HeadlessSessionManager {
     });
 
     return { sessionId, file };
+  }
+
+  /**
+   * Fold newly-parsed events into the Run's Feed content and, when the content
+   * actually changed, push the snapshot (issue 140). The pure reducer returns
+   * the SAME reference on a no-op event, so `!==` is a cheap change test — a
+   * quiet stream (system pings, tool results) broadcasts nothing.
+   */
+  private foldEvents(
+    sessionId: SessionId,
+    session: HeadlessSession,
+    events: readonly HeadlessEvent[],
+  ): void {
+    let changed = false;
+    for (const event of events) {
+      const next = reduceFeedContent(session.content, event);
+      if (next !== session.content) {
+        session.content = next;
+        changed = true;
+      }
+    }
+    if (changed) this.callbacks.onFeedUpdate?.({ sessionId, content: session.content });
   }
 
   /** Report the captured claude session id exactly once for this Run. */
