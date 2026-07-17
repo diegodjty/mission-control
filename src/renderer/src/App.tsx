@@ -237,6 +237,66 @@ function slugOf(fileName: string): string {
   return fileName.replace(/\.md$/, '');
 }
 
+/** The status-dot tone for a Run's derived status (issue 129 tile header): the
+ * at-a-glance liveness colour on each tile, the same dot idiom the Map uses for
+ * its issues (issue 127). Maps to the `.app__tile-dot--*` tokens in Pane.css. */
+function dotTone(status: RunStatus): 'amber' | 'green' | 'red' | 'teal' | 'neutral' {
+  switch (status) {
+    case 'running':
+      return 'amber';
+    case 'finished':
+      return 'green';
+    case 'blocked':
+      return 'red';
+    case 'parked':
+      return 'teal';
+    case 'stopped':
+    default:
+      return 'neutral';
+  }
+}
+
+/** The maximize / restore glyph for a tile's per-tile control (issue 129, the
+ * approved `pane` mock). Inline SVG stroked in `currentColor` so it follows the
+ * active Atlas theme; arrows point outward to maximize, inward to restore. */
+function MaximizeIcon({ maximized }: { maximized: boolean }): JSX.Element {
+  return maximized ? (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <polyline points="4 14 10 14 10 20" />
+      <polyline points="20 10 14 10 14 4" />
+      <line x1="14" y1="10" x2="21" y2="3" />
+      <line x1="10" y1="14" x2="3" y2="21" />
+    </svg>
+  ) : (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <polyline points="15 3 21 3 21 9" />
+      <polyline points="9 21 3 21 3 15" />
+      <line x1="21" y1="3" x2="14" y2="10" />
+      <line x1="3" y1="21" x2="10" y2="14" />
+    </svg>
+  );
+}
+
 /**
  * What the Planning view (issue 83) is planning: the chosen project's two
  * planning roots plus its label. Per-Project state — cleared on a switch.
@@ -3894,6 +3954,10 @@ export function App(): JSX.Element {
               const status = runStatusOf(r);
               const id = r.target.issueId;
               const slug = slugOf(r.target.issueFileName);
+              // The header shows the issue slug WITHOUT its numeric prefix (the
+              // number is already the "Run NN" / issue-id cue); `slug` itself
+              // keeps the prefix because it names the afk/<slug> branch below.
+              const descriptor = slug.replace(/^\d+-/, '');
               const isStranded = strandedIds.includes(id);
               const isCommitFailed = commitFailedIds.includes(id);
               const isFinishedUnmerged =
@@ -3943,9 +4007,17 @@ export function App(): JSX.Element {
                   <div
                     className="app__tile-head"
                     onClick={() => toggleMaximize(r.target.issueId)}
-                    title={isMax ? 'Click to restore the grid' : 'Click to maximize'}
+                    title={r.target.issueTitle}
                   >
-                    <span className={`run-status run-status--${status}`}>{status}</span>
+                    <span
+                      className={`app__tile-dot app__tile-dot--${dotTone(status)}`}
+                      title={status}
+                      aria-label={`Run status: ${status}`}
+                    />
+                    <span className="app__tile-run">Run {id}</span>
+                    <span className="app__tile-id">{id}</span>
+                    <span className="app__tile-sep">·</span>
+                    <span className="app__tile-slug">{descriptor}</span>
                     {isCommitFailed && (
                       <span
                         className="run-status run-status--commit-failed"
@@ -3966,10 +4038,6 @@ export function App(): JSX.Element {
                         stranded
                       </span>
                     )}
-                    <span className="app__tile-id">
-                      {String(r.target.issueId).padStart(2, '0')}
-                    </span>
-                    <span className="app__tile-title">{r.target.issueTitle}</span>
                     <span className="app__tile-controls">
                       {status === 'running' ? (
                         <button
@@ -4011,6 +4079,18 @@ export function App(): JSX.Element {
                           </button>
                         </>
                       )}
+                      <button
+                        className="app__tile-max"
+                        title={isMax ? 'Restore the grid' : 'Maximize this tile'}
+                        aria-label={isMax ? 'Restore the grid' : 'Maximize this tile'}
+                        aria-pressed={isMax}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleMaximize(r.target.issueId);
+                        }}
+                      >
+                        <MaximizeIcon maximized={isMax} />
+                      </button>
                     </span>
                   </div>
                   <Pane
@@ -4030,8 +4110,13 @@ export function App(): JSX.Element {
                 style={{ display: maximizedRun !== null ? 'none' : 'flex' }}
               >
                 <div className="app__tile-head">
-                  <span className="run-status run-status--running">talk</span>
-                  <span className="app__tile-title">Just talk · {talk.label}</span>
+                  <span
+                    className="app__tile-dot app__tile-dot--teal"
+                    title="talk"
+                    aria-label="Just-talk session"
+                  />
+                  <span className="app__tile-run">Just talk</span>
+                  <span className="app__tile-slug">{talk.label}</span>
                   <span className="app__tile-controls">
                     <button
                       className="app__tile-dismiss"

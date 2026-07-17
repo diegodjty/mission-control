@@ -598,226 +598,10 @@ body {
 /* The Dispatcher panel's styles live in its own per-view stylesheet,
    Dispatcher.css (issue 130) — imported by DispatcherPanel.tsx. */
 
-/* ---- Run controls ---- */
-
-.app__run {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.app__run-title {
-  color: var(--fg-mute);
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 40vw;
-}
-
-.run-status {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  padding: 2px 8px;
-  border-radius: 999px;
-  border: 1px solid var(--border-strong);
-}
-
-.run-status--running {
-  color: var(--amber-soft);
-  border-color: var(--amber-border);
-  background: var(--amber-bg);
-}
-
-.run-status--finished {
-  color: var(--green);
-  border-color: var(--green-border);
-  background: var(--green-bg);
-}
-
-.run-status--blocked {
-  color: var(--red-soft);
-  border-color: var(--red-border);
-  background: var(--red-bg);
-}
-
-.run-status--stopped {
-  color: var(--fg-mute);
-  border-color: var(--border-strong);
-}
-
-/* A parked HITL Run (issue 65): the Worker finished its part and the Pane sits
-   at its prompt awaiting the human's verification — success-waiting, not an
-   error, so calm blue rather than blocked red. */
-.run-status--parked {
-  color: var(--teal);
-  border-color: var(--teal-border);
-  background: var(--teal-bg);
-}
-
-.run-stop {
-  background: var(--red-bg);
-  color: var(--red-soft);
-  border: 1px solid var(--red-border);
-  border-radius: 6px;
-  padding: 3px 12px;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-/* Stranded / commit-failed isolated Runs (issue 22): amber-red "needs
-   attention", distinct from the plain terminal states and from mergeable work. */
-.run-status--stranded {
-  color: var(--amber);
-  border-color: var(--amber-border);
-  background: var(--amber-bg);
-}
-
-.run-status--commit-failed {
-  color: var(--red-soft);
-  border-color: var(--red-border);
-  background: var(--red-bg);
-}
-
-.run-discard {
-  background: var(--amber-bg);
-  color: var(--amber);
-  border: 1px solid var(--amber-border);
-  border-radius: 6px;
-  padding: 3px 12px;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.run-discard--tile {
-  padding: 1px 8px;
-  font-size: 11px;
-}
-
-.pane {
-  flex: 1 1 auto;
-  min-height: 0;
-  padding: 6px;
-}
-
-.pane .xterm {
-  height: 100%;
-}
-
-/* ---- Tiled Run grid (issue 12) ---- */
-
-/* Header summary for the Pane view: tile count, or the maximized Run + a
-   restore control. */
-.app__paneinfo {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-}
-
-.run-restore {
-  background: var(--surface-2);
-  color: var(--teal);
-  border: 1px solid var(--teal-border);
-  border-radius: 6px;
-  padding: 3px 12px;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-/* The grid fills the Pane area; its columns/rows come from the pure layout
-   function (inline styles). display is toggled grid/none by the view switch. */
-.app__grid {
-  flex: 1 1 auto;
-  min-width: 0;
-  min-height: 0;
-  gap: 8px;
-  padding: 8px;
-}
-
-/* Past 4 Runs the grid scrolls (fixed-ish row height) instead of shrinking
-   tiles until nothing is readable. */
-.app__grid--scroll {
-  overflow-y: auto;
-  grid-auto-rows: minmax(220px, 1fr);
-}
-
-.app__tile {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  overflow: hidden;
-  background: var(--bg0);
-}
-
-.app__tile--max {
-  border-color: var(--teal-border);
-}
-
-.app__tile-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 9px;
-  font-size: 12px;
-  background: var(--bg1);
-  border-bottom: 1px solid var(--border);
-  cursor: pointer;
-  flex: 0 0 auto;
-}
-
-.app__tile-head:hover {
-  background: var(--bg1);
-}
-
-.app__tile-id {
-  color: var(--fg);
-  font-variant-numeric: tabular-nums;
-}
-
-.app__tile-title {
-  flex: 1 1 auto;
-  min-width: 0;
-  color: var(--fg-mute);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.app__tile-controls {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.run-stop--tile {
-  padding: 1px 8px;
-  font-size: 11px;
-}
-
-.app__tile-dismiss {
-  background: transparent;
-  color: var(--fg-mute);
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
-  padding: 1px 8px;
-  font-size: 11px;
-  line-height: 1.4;
-  cursor: pointer;
-}
-
-.app__tile-dismiss:hover {
-  color: var(--red-soft);
-  border-color: var(--red-border);
-}
+/* The Pane (cockpit) view's styles — the tiled Run grid, per-tile headers (the
+   status dot, Run/issue labels, and maximize control), the run controls, and
+   the embedded terminal — live in their own per-view stylesheet, Pane.css
+   (issue 129) — imported by Pane.tsx. */
 
 /* --- Inbox (issue 80, ADR-0016): a quiet place you look, never a notifier -- */
 
@@ -1134,9 +918,9 @@ body {
    ===================================================================== */
 
 /* ---- floating surfaces read as glass over the ambient stage ----
-   (The Launcher's front-door CTA and its glass project rows now live in the
-   Launcher's own per-view stylesheet, Launcher.css — issue 128.) */
-.app__tile,
+   (The Launcher's front-door CTA and its glass project rows now live in
+   Launcher.css — issue 128; the run tiles' glass + maximized ring now live in
+   Pane.css — issue 129.) */
 .attention__item {
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
@@ -1153,12 +937,6 @@ body {
   transform: translateY(-1px);
   border-color: var(--border-teal);
   box-shadow: 0 14px 36px rgba(0, 0, 0, 0.4), 0 0 0 1px var(--teal-soft);
-}
-
-/* run tiles: a soft teal ring when maximized/focused */
-.app__tile--max {
-  border-color: var(--border-teal);
-  box-shadow: 0 0 0 1px var(--teal-soft), 0 18px 44px rgba(0, 0, 0, 0.5);
 }
 
 /* ---- focus rings: a teal halo on every text control in the app ---- */

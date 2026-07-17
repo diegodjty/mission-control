@@ -1,0 +1,315 @@
+/* =====================================================================
+   Pane (cockpit) view — per-view stylesheet (issue 129, PRD-ui-redesign)
+
+   Rebuilt on the approved Atlas mock (issue 122: scenes `pane` / `pane-narrow`)
+   and the primitives layer (issue 123). Terminal behaviour (node-pty + xterm,
+   ADR-0005) and the pure tiled-grid model (`src/shared/pane-grid.ts`, issue 12)
+   are unchanged — this is a re-skin of the cockpit's chrome, not its logic.
+
+   Every colour/shadow/easing is an Atlas design token declared in index.css
+   `:root` (+ its `[data-theme="light"]` overrides), so BOTH themes render
+   correctly by construction — this file adds no raw colours. The embedded
+   terminal reads the same `--bg1`/`--fg` tokens at spawn time (Pane.tsx), so a
+   light-theme app never frames a black terminal.
+
+   Extracted out of the one shared stylesheet so the parallel view rebuilds
+   (127–130) don't collide in it (per the issue's first task) — imported by
+   Pane.tsx. Narrow-width reflow keys off the shell root's `data-narrow`
+   attribute (issue 126, src/shared/breakpoints.ts), the same mechanism the
+   shell uses.
+   ===================================================================== */
+
+/* ---- The embedded terminal (one xterm per tile) --------------------------- */
+
+.pane {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 6px;
+}
+
+.pane .xterm {
+  height: 100%;
+}
+
+/* ---- Pane-view header summary (shell header statusArea) -------------------
+   Tile count while tiled, or the maximized Run's title + a restore control. */
+.app__paneinfo {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.app__run-title {
+  color: var(--fg-mute);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 40vw;
+}
+
+.run-restore {
+  background: var(--surface-2);
+  color: var(--teal);
+  border: 1px solid var(--teal-border);
+  border-radius: 6px;
+  padding: 3px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* ---- Tiled Run grid (issue 12) -------------------------------------------
+   The grid fills the Pane area; its column/row COUNTS come from the pure layout
+   function (`gridShape`) as inline styles on the element. `display` is toggled
+   grid/none by the view switch. */
+.app__grid {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  gap: 8px;
+  padding: 8px;
+}
+
+/* Past 4 Runs the grid scrolls (fixed-ish row height) instead of shrinking
+   tiles until a terminal is unreadable. */
+.app__grid--scroll {
+  overflow-y: auto;
+  grid-auto-rows: minmax(220px, 1fr);
+}
+
+.app__tile {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg0);
+}
+
+.app__tile--max {
+  border-color: var(--teal-border);
+}
+
+/* ---- Tile header: names the Run and its issue, scannable across a grid ----
+   Mock `pane`: [status dot] Run NN  NN · issue-slug ........ [Run controls] */
+.app__tile-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 9px;
+  font-size: 12px;
+  background: var(--bg1);
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.app__tile-head:hover {
+  background: var(--bg1);
+}
+
+/* Leading status dot — the at-a-glance liveness signal (mock), same idiom as
+   the Map's issue dot (issue 127). Tone maps from the Run's derived status. */
+.app__tile-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--fg-mute);
+}
+
+.app__tile-dot--amber {
+  background: var(--amber);
+  box-shadow: 0 0 8px var(--amber-border);
+}
+
+.app__tile-dot--green {
+  background: var(--green);
+}
+
+.app__tile-dot--red {
+  background: var(--red);
+}
+
+.app__tile-dot--teal {
+  background: var(--teal);
+  box-shadow: 0 0 8px var(--glow);
+}
+
+.app__tile-dot--neutral {
+  background: var(--fg-faint);
+}
+
+/* "Run NN" — the Run's identity, the bold anchor of the header. */
+.app__tile-run {
+  flex: 0 0 auto;
+  color: var(--fg);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* The issue number, dimmed and tabular so a column of tiles aligns. */
+.app__tile-id {
+  flex: 0 0 auto;
+  color: var(--fg-mute);
+  font-variant-numeric: tabular-nums;
+}
+
+.app__tile-sep {
+  flex: 0 0 auto;
+  color: var(--fg-faint);
+}
+
+/* The issue slug in mono — the human-readable "which issue" cue. Truncates
+   with ellipsis so a long slug never forces the header (or the app) to scroll. */
+.app__tile-slug {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--fg-mute);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- Exceptional-state pills (issue 22): loud, labelled badges that stand
+   apart from the quiet status dot because they need a human's attention. ---- */
+.run-status {
+  flex: 0 0 auto;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+}
+
+.run-status--stranded {
+  color: var(--amber);
+  border-color: var(--amber-border);
+  background: var(--amber-bg);
+}
+
+.run-status--commit-failed {
+  color: var(--red-soft);
+  border-color: var(--red-border);
+  background: var(--red-bg);
+}
+
+/* ---- Per-tile controls, right-aligned; maximize is the last (outermost) ---- */
+.app__tile-controls {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.run-stop {
+  background: var(--red-bg);
+  color: var(--red-soft);
+  border: 1px solid var(--red-border);
+  border-radius: 6px;
+  padding: 3px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.run-stop--tile {
+  padding: 1px 8px;
+  font-size: 11px;
+}
+
+.run-discard {
+  background: var(--amber-bg);
+  color: var(--amber);
+  border: 1px solid var(--amber-border);
+  border-radius: 6px;
+  padding: 3px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.run-discard--tile {
+  padding: 1px 8px;
+  font-size: 11px;
+}
+
+.app__tile-dismiss {
+  background: transparent;
+  color: var(--fg-mute);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 1px 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.app__tile-dismiss:hover {
+  color: var(--red-soft);
+  border-color: var(--red-border);
+}
+
+/* Maximize / restore — the mock's consistent per-tile control, an explicit
+   icon button (not just a click target) so it reads as obvious on every tile.
+   The icon is inline SVG stroked in currentColor, so it follows the theme. */
+.app__tile-max {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 22px;
+  padding: 0;
+  color: var(--fg-mute);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.app__tile-max:hover {
+  color: var(--teal);
+  border-color: var(--teal-border);
+  background: var(--surface-2);
+}
+
+.app__tile-max svg {
+  display: block;
+}
+
+/* ---- Atlas identity pass — tiles read as glass over the ambient stage, with
+   a soft teal ring when maximized. Mirrors the trailing identity layer in
+   index.css; kept after the base tile rules so these refinements win on tie. */
+.app__tile {
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-radius: 15px;
+  box-shadow: var(--shadow-card);
+}
+
+.app__tile--max {
+  border-color: var(--border-teal);
+  box-shadow: 0 0 0 1px var(--teal-soft), 0 18px 44px rgba(0, 0, 0, 0.5);
+}
+
+/* ---- Narrow width (≤ --bp-narrow, 900px): the grid drops to one fluid column.
+   The Pane reflows at the NARROW tier, not `compact` (640px) like the other
+   views, because two side-by-side terminals need far more width than two cards
+   to stay usable — the approved `pane-narrow` mock is single-column already at
+   ~720px. The column/row COUNTS are set inline from the pure grid model, so this
+   override uses !important to win over that inline template (the model itself is
+   unchanged); a media query can't read the --bp token, so the shell toggles
+   `data-narrow` on the root (see src/shared/breakpoints.ts). Each terminal
+   re-fits automatically when its tile changes width (Pane.tsx ResizeObserver). */
+.app[data-narrow='true'] .app__grid {
+  grid-template-columns: 1fr !important;
+  grid-template-rows: none !important;
+  grid-auto-rows: minmax(220px, 1fr);
+  overflow-y: auto;
+}
