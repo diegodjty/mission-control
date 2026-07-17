@@ -1435,6 +1435,81 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // Scenario 12 — issue 136: a parallel drain in a repo WITH node_modules present
+  // provisions each worktree's deps from the main checkout (no network install),
+  // and — because the provisioned node_modules stays git-ignored — produces NO
+  // artifact-hygiene refusal and NO node_modules content on any afk/ branch. This
+  // closes the recurring "won't merge — adds install artifacts" failure at the
+  // isolation boundary. Drives the REAL applyIsolation adapter, real fake Workers,
+  // the real preview scan, and the real afk-merge.sh.
+  // ---------------------------------------------------------------------------
+  it('Scenario 12 (issue 136): a parallel drain provisions node_modules into each worktree — no artifact refusal, no node_modules on any afk/ branch', async () => {
+    const supported = await probeMergeTreeSupport();
+    expect(supported, 'git ≥ 2.38 required for merge previews').toBe(true);
+
+    // A real Node repo commits a .gitignore that ignores node_modules; the main
+    // checkout then holds an installed node_modules (untracked, ignored).
+    await writeFile(join(repo, '.gitignore'), 'node_modules\n');
+    await git(repo, 'add', '.gitignore');
+    await git(repo, 'commit', '-m', 'ignore node_modules');
+    await mkdir(join(repo, 'node_modules', 'left-pad'), { recursive: true });
+    await writeFile(
+      join(repo, 'node_modules', 'left-pad', 'index.js'),
+      'module.exports = () => "installed";\n',
+    );
+
+    const six = sandboxIssue(6);
+    const seven = sandboxIssue(7);
+
+    // A parallel drain cuts a worktree per Run — provisioning runs as part of it.
+    const iso = await applyIsolation(repo, [
+      { issueId: 6, slug: six.slug },
+      { issueId: 7, slug: seven.slug },
+    ]);
+    expect(iso.parallel).toBe(true);
+    const wt6 = worktreePathFor(repo, six.slug);
+    const wt7 = worktreePathFor(repo, seven.slug);
+
+    // AC1 (e2e): each worktree's deps are present WITHOUT a network install.
+    expect(existsSync(join(wt6, 'node_modules', 'left-pad', 'index.js'))).toBe(true);
+    expect(existsSync(join(wt7, 'node_modules', 'left-pad', 'index.js'))).toBe(true);
+
+    // Well-behaved Workers finish and commit on their afk/ branches (git add -A).
+    await runFakeWorker({ repo, worktree: wt6, issue: six });
+    await runFakeWorker({ repo, worktree: wt7, issue: seven });
+    expect((await readIsolatedIssueStatus(repo, six.slug)).status).toBe('done');
+    expect((await readIsolatedIssueStatus(repo, seven.slug)).status).toBe('done');
+
+    // The provisioned node_modules never entered tracked scope on either branch —
+    // .gitignore kept `git add -A` from staging it (issue 98 hazard, closed).
+    for (const wt of [wt6, wt7]) {
+      const tracked = (await git(wt, 'ls-files')).split('\n');
+      expect(tracked.some((p) => p.split('/').includes('node_modules'))).toBe(false);
+      // The worktree tree is clean too — provisioning dirtied nothing.
+      expect((await git(wt, 'status', '--porcelain')).trim()).toBe('');
+    }
+
+    // So the merge preview finds NO artifact verdict (the "adds install
+    // artifacts" refusal never fires) — both branches badge a clean sequence.
+    const scan = await pollScan(
+      realPreviewDeps(supported),
+      (s) => s.previews.length === 2 && s.previews.every((p) => isSettledVerdict(p.verdict)),
+      'issue-136 provisioned previews settle',
+    );
+    expect(scan.previews.some((p) => p.verdict?.kind === 'artifact')).toBe(false);
+    expect(scan.previews.every((p) => p.verdict?.kind === 'clean')).toBe(true);
+
+    // And the REAL afk-merge.sh integrates both cleanly — no artifact refusal —
+    // leaving main with NO node_modules tracked.
+    const result = await mergeRuns(repo, [six.slug, seven.slug], { scriptPath: SCRIPT });
+    expect(result.ok).toBe(true);
+    expect(result.conflicted).toBe(false);
+    expect(result.merged.slice().sort()).toEqual([six.slug, seven.slug].slice().sort());
+    const mainTracked = (await git(repo, 'ls-files')).split('\n');
+    expect(mainTracked.some((p) => p.split('/').includes('node_modules'))).toBe(false);
+  });
+
+  // ---------------------------------------------------------------------------
   // Scenario 10 — issue 113: merge targets the branch you're on, and landing on a
   // protected branch STOPS for the "big warning". Drives the REAL afk-merge.sh
   // (with MC's `--into` current-branch targeting) and the assembled guard exactly

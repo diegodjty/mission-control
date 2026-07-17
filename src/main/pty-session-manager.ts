@@ -14,6 +14,7 @@ import {
   type TalkWorkbenchDest,
 } from './resolve-run-command';
 import { resolveDispatcherCommand } from './dispatcher-session';
+import { buildWorkerSpawnEnv } from './spawn-env';
 import type {
   PtyDataMessage,
   PtyExitMessage,
@@ -114,7 +115,14 @@ export class PtySessionManager {
       cols: Math.max(1, req.cols || 80),
       rows: Math.max(1, req.rows || 24),
       cwd,
-      env: process.env as Record<string, string>,
+      // A Worker (Run) is spawned with NODE_ENV forced to `development`
+      // (issue 136): MC may run under NODE_ENV=production (a packaged build),
+      // and a bare install a Worker still runs would otherwise prune the
+      // devDeps its build/test toolchain lives in. Non-Worker sessions
+      // (Dispatcher, talk, plain shell) keep the inherited env unchanged.
+      env: (isRun
+        ? buildWorkerSpawnEnv(process.env)
+        : process.env) as Record<string, string>,
     });
 
     proc.onData((data) => {
