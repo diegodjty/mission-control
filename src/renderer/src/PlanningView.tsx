@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import './Planning.css';
 import { Pane } from './Pane';
 import type { PlanningDoc, PlanningStage } from '../../shared/planning-model';
 import {
@@ -181,24 +182,14 @@ export function PlanningView({
   return (
     <div className="planning">
       <div className="planning__left">
-        <div className="planning__stagebar">
-          <span className="planning__stagelabel">Plan {label}:</span>
-          {PLANNING_STAGES.map(({ stage, label: stageLabel, hint }) => (
-            <button
-              key={stage}
-              className="planning__stage"
-              onClick={() => {
-                onStage(stage);
-                // A prefix stage (Grill) leaves the line unsubmitted — hand
-                // the keyboard to the terminal so the user finishes the
-                // sentence and presses Enter themselves (issue 91).
-                if (!stageInvocation(stage).submit) setPaneFocusSignal((n) => n + 1);
-              }}
-              title={hint}
-            >
-              {stageLabel}
-            </button>
-          ))}
+        {/* Left panel header — names the live planning session (the mock's
+            "Run · planning" header). The dot mirrors the Map's liveness dot. */}
+        <div className="planning__panehead">
+          <span className="planning__panetitle">
+            <span className="planning__dot" aria-hidden="true" />
+            Planning
+          </span>
+          <span className="planning__panelabel">{label}</span>
         </div>
         <div className="planning__pane">
           <Pane
@@ -212,6 +203,31 @@ export function PlanningView({
       </div>
 
       <div className="planning__preview">
+        {/* Right panel header — the live doc preview title plus the stage
+            controls, placed here per the mock's layout. The stages keep their
+            real labels/behaviour (Grill/PRD/Issues type their skill invocation
+            into the LEFT session through the parent's submit pump). */}
+        <div className="planning__previewhead">
+          <span className="planning__previewtitle">Live doc preview</span>
+          <div className="planning__stagebar">
+            {PLANNING_STAGES.map(({ stage, label: stageLabel, hint }) => (
+              <button
+                key={stage}
+                className="planning__stage"
+                onClick={() => {
+                  onStage(stage);
+                  // A prefix stage (Grill) leaves the line unsubmitted — hand
+                  // the keyboard to the terminal so the user finishes the
+                  // sentence and presses Enter themselves (issue 91).
+                  if (!stageInvocation(stage).submit) setPaneFocusSignal((n) => n + 1);
+                }}
+                title={hint}
+              >
+                {stageLabel}
+              </button>
+            ))}
+          </div>
+        </div>
         <div className="planning__doclist">
           <div className="planning__doclist-head">Documents · newest change first</div>
           {docs.length === 0 && (

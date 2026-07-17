@@ -1,4 +1,6 @@
+import './Dispatcher.css';
 import { Pane } from './Pane';
+import { Badge, type BadgeTone, Button } from './components';
 import type { DispatcherTarget } from '../../shared/ipc-contract';
 import {
   partitionActivities,
@@ -75,7 +77,9 @@ function ActivityRow({
         ? ' dispatcher__activity--rejected'
         : '';
 
-  // The tag that labels which side of the authority line this row is on.
+  // The tag that labels which side of the authority line this row is on, and
+  // its Badge tone (shared primitive): the authority/state carries the colour,
+  // so the row reads consistently with the Map's status chips beside it.
   const tag = autonomous
     ? 'Autonomous'
     : activity.status === 'approved'
@@ -83,32 +87,41 @@ function ActivityRow({
       : activity.status === 'rejected'
         ? 'Rejected'
         : 'Needs approval';
+  const tone: BadgeTone = autonomous
+    ? 'neutral'
+    : activity.status === 'approved'
+      ? 'green'
+      : activity.status === 'rejected'
+        ? 'red'
+        : 'amber';
 
   return (
     <li className={`dispatcher__activity ${kindClass}${stateClass}`}>
       <div className="dispatcher__activity-line">
-        <span className="dispatcher__activity-tag" data-kind={autonomous ? 'auto' : 'proposed'}>
-          {autonomous ? '● ' : '◆ '}
-          {tag}
-        </span>
+        {/* Leading status dot (tinted by the row's authority/state modifier) —
+            the Map's at-a-glance `.issue__dot` language. */}
+        <span className="dispatcher__activity-dot" aria-hidden="true" />
         <span className="dispatcher__activity-label">{activity.label}</span>
+        <Badge tone={tone} className="dispatcher__activity-tag">
+          {tag}
+        </Badge>
       </div>
       {pending && (
         <div className="dispatcher__activity-actions">
-          <button
-            className="dispatcher__approve"
+          <Button
+            variant="primary"
             title="Approve — the Dispatcher will run this action"
             onClick={() => onApprove?.(activity.id)}
           >
             Approve
-          </button>
-          <button
-            className="dispatcher__reject"
+          </Button>
+          <Button
+            variant="ghost"
             title="Reject — drop this action; the Dispatcher continues"
             onClick={() => onReject?.(activity.id)}
           >
             Reject
-          </button>
+          </Button>
         </div>
       )}
     </li>
@@ -159,6 +172,9 @@ export function DispatcherPanel({
       style={width !== undefined ? { flex: `0 0 ${width}px`, width } : undefined}
     >
       <div className="dispatcher__head">
+        {/* Liveness dot beside the title — the mock's "● Dispatcher"; the
+            orchestrator session is live while this panel is mounted. */}
+        <span className="dispatcher__dot" aria-hidden="true" />
         <span className="dispatcher__title">Dispatcher</span>
         <span className="dispatcher__meta">
           {ingestedCount && ingestedCount > 0
@@ -166,13 +182,14 @@ export function DispatcherPanel({
             : 'driving the drain'}
         </span>
         {onDismiss && (
-          <button
+          <Button
+            variant="ghost"
             className="dispatcher__dismiss"
             title="Dismiss the Dispatcher (ends the orchestrator session)"
             onClick={() => onDismiss()}
           >
             Dismiss
-          </button>
+          </Button>
         )}
       </div>
       {acts.length > 0 && (

@@ -1,0 +1,446 @@
+/* =====================================================================
+   Planning view — per-view stylesheet (issue 130, PRD-ui-redesign)
+
+   Rebuilt on the approved Atlas mock (issue 122: scenes `planning` /
+   `planning-narrow`) and the primitives layer (issue 123). Every colour,
+   shadow, and easing is an Atlas design token declared in index.css `:root`
+   (+ its `[data-theme="light"]` overrides), so BOTH themes render correctly by
+   construction — this file adds no raw colours.
+
+   Behaviour is unchanged (ADR-0016 / issue 83): the LEFT panel is the warm
+   planning Pane (kept mounted by App.tsx; its file-watch survives navigation),
+   the RIGHT panel is the live, recency-ordered doc preview, and the stage
+   controls type the /grill-with-docs, /to-prd, /to-issues invocations into the
+   session through the parent's submit pump. The stage control is placed in the
+   doc-preview header per the mock's layout; it keeps its REAL labels
+   (Grill…/PRD/Issues) — see the Receipt's doc-drift note (the mock's placeholder
+   labels "Draft/Review/Approve" describe a document lifecycle the shipped view
+   does not implement).
+
+   Extracted out of the one shared stylesheet so the parallel view rebuilds
+   (127–130) don't collide in it (the issue's first task). Narrow-width reflow
+   keys off the shell root's `data-compact` attribute (issue 126,
+   src/shared/breakpoints.ts) — the same mechanism Map.css uses; no @media here
+   so the `--bp-*` tokens stay the single breakpoint source of truth.
+   ===================================================================== */
+
+/* Two panels floating side by side on the ambient stage with a gap of
+   background between them (the mock's card treatment). min-*:0 so they shrink
+   inside the app__slot without ever forcing the app frame to scroll sideways. */
+.planning {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  gap: 14px;
+  padding: 14px;
+  overflow: hidden;
+}
+
+/* ---- Shared card chrome for both panels ---------------------------------- */
+.planning__left,
+.planning__preview {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+
+/* The Pane gets slightly more room than the preview, per the mock's split. */
+.planning__left {
+  flex: 1 1 55%;
+}
+
+.planning__preview {
+  flex: 1 1 45%;
+}
+
+/* ---- Panel headers (left: the session; right: the live doc preview) ------ */
+.planning__panehead,
+.planning__previewhead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+
+/* The right header carries the title on the left and the stage control on the
+   right — the mock's "Live doc preview · [stage control]" row. */
+.planning__previewhead {
+  justify-content: space-between;
+}
+
+.planning__panetitle,
+.planning__previewtitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--fg);
+  white-space: nowrap;
+}
+
+/* Leading status dot — the same at-a-glance liveness language the Map's issue
+   rows use (`.issue__dot--teal`): the planning session is live while mounted. */
+.planning__dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--teal);
+  box-shadow: 0 0 8px var(--glow);
+}
+
+.planning__panelabel {
+  min-width: 0;
+  color: var(--fg-mute);
+  font-size: 12px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.planning__pane {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.planning__pane .pane {
+  flex: 1;
+  min-height: 0;
+}
+
+/* ---- Stage controls: a segmented pill, consistent with the app primitives.
+   Each pill is a momentary action (types a skill invocation into the session),
+   so there is no persistent "selected" segment — hover carries the affordance. */
+.planning__stagebar {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+.planning__stage {
+  background: none;
+  border: none;
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-mute);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 140ms var(--ease-out), background 140ms var(--ease-out);
+}
+
+.planning__stage:hover {
+  color: var(--teal);
+  background: var(--surface-2);
+}
+
+/* ---- Doc list: recency-ordered; the real pinning / follow-latest behaviour,
+   styled as a compact strip beneath the preview header. ---- */
+.planning__doclist {
+  flex: 0 0 auto;
+  max-height: 34%;
+  overflow-y: auto;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.planning__doclist-head {
+  margin-bottom: 8px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-mute);
+}
+
+.planning__docs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.planning__doc {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 5px 9px;
+  color: var(--fg);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 140ms var(--ease-out), border-color 140ms var(--ease-out);
+}
+
+.planning__doc:hover {
+  background: var(--surface-2);
+}
+
+.planning__doc--active {
+  background: var(--surface-2);
+  border-color: var(--border-teal);
+}
+
+.planning__doc-label {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Doc-group chips reuse the badge tone vocabulary (pill radius, tokened tones)
+   so they read as part of the same primitive family as the rest of the app. */
+.planning__badge {
+  flex: none;
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.planning__badge--workbench {
+  background: var(--teal-bg);
+  border-color: var(--teal-border);
+  color: var(--teal);
+}
+
+.planning__badge--issue {
+  background: var(--green-bg);
+  border-color: var(--green-border);
+  color: var(--green-soft);
+}
+
+.planning__badge--repo {
+  background: var(--amber-bg);
+  border-color: var(--amber-border);
+  color: var(--amber-soft);
+}
+
+.planning__follow {
+  margin-top: 8px;
+  background: none;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--fg-mute);
+  font-size: 11px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.planning__follow:hover {
+  color: var(--fg);
+  border-color: var(--border-teal);
+}
+
+/* ---- The rendered document ---------------------------------------------- */
+.planning__doc-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 18px;
+}
+
+.planning__error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--red);
+}
+
+/* Frontmatter chips: an issue file's status / depends_on / hitl at a glance. */
+.planning__frontmatter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.planning__fm {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-size: 11px;
+}
+
+.planning__fm-key {
+  color: var(--fg-mute);
+}
+
+.planning__fm-key::after {
+  content: ':';
+}
+
+.planning__fm-value {
+  color: var(--fg);
+  font-family: Menlo, Monaco, 'Courier New', monospace;
+}
+
+.planning__render {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--fg-soft);
+}
+
+.planning__render code {
+  background: var(--surface-2);
+  border-radius: 4px;
+  padding: 0 5px;
+  font-family: Menlo, Monaco, 'Courier New', monospace;
+  font-size: 12px;
+}
+
+.planning__h {
+  font-weight: 600;
+  margin: 16px 0 6px;
+  color: var(--fg);
+}
+
+.planning__h--1 {
+  font-size: 19px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+}
+
+.planning__h--2 {
+  font-size: 15px;
+}
+
+.planning__h--3 {
+  font-size: 13px;
+}
+
+.planning__h--4 {
+  font-size: 12px;
+  color: var(--fg-mute);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.planning__para {
+  margin: 7px 0;
+}
+
+.planning__code {
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  font-family: Menlo, Monaco, 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 10px 0;
+  white-space: pre;
+}
+
+.planning__quote {
+  margin: 10px 0;
+  padding: 2px 12px;
+  border-left: 3px solid var(--border-teal);
+  color: var(--fg-soft);
+}
+
+.planning__rule {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 14px 0;
+}
+
+.planning__list {
+  margin: 6px 0;
+  padding-left: 22px;
+}
+
+.planning__list li {
+  margin: 3px 0;
+}
+
+.planning__task {
+  list-style: none;
+  margin-left: -18px;
+}
+
+.planning__checkbox {
+  margin-right: 6px;
+  color: var(--teal);
+}
+
+/* Empty states get the breathing diamond, matching the shell's other empties
+   (the mock's "live doc renders here as the session writes" affordance). */
+.planning__empty {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-mute);
+  text-align: center;
+}
+
+.planning__empty::before {
+  content: '';
+  display: block;
+  width: 46px;
+  height: 46px;
+  margin: 0 auto 20px;
+  transform: rotate(45deg);
+  border: 1.4px solid var(--teal);
+  border-radius: 9px;
+  box-shadow: 0 0 26px var(--glow), inset 0 0 18px var(--teal-soft);
+  animation: mcBreathe 7s ease-in-out infinite;
+}
+
+/* =====================================================================
+   Narrow-width reflow (issue 126 breakpoints; mock scene `planning-narrow`).
+   `data-compact` (≤640px) is set on the shell root by the AppShell: the two
+   panels stack into a single fluid column (the Pane on top keeping a usable
+   terminal height, the doc preview below), and the column scrolls vertically —
+   never horizontally.
+   ===================================================================== */
+.app[data-compact='true'] .planning {
+  flex-direction: column;
+  padding: 12px;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.app[data-compact='true'] .planning__left {
+  flex: 0 0 auto;
+  min-height: 300px;
+}
+
+.app[data-compact='true'] .planning__preview {
+  flex: 1 1 auto;
+}
+
+/* Title over the stage control when the header can't hold both on one line. */
+.app[data-compact='true'] .planning__previewhead {
+  flex-wrap: wrap;
+  gap: 8px;
+}
