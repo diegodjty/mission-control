@@ -58,6 +58,9 @@ import {
 } from '../shared/launcher-model';
 import { removeRegistryProject } from '../shared/workbench-model';
 import { needsYouByProject } from '../shared/attention-hub-model';
+import { classifyDrainStop } from '../shared/attention-notifications';
+import { NotificationController } from './notification-controller';
+import { showNotifications, type NotificationTarget } from './notification-adapter';
 import { isAllowedPlanningDoc } from '../shared/planning-model';
 import {
   claimEventsBetween,
@@ -72,6 +75,7 @@ import {
   IpcChannel,
   type AttentionMarkSeenResult,
   type AttentionSnapshot,
+  type NavigateAttentionMessage,
   type AfkScanRequest,
   type AfkScanResult,
   type AfkDiscardRequest,
@@ -380,6 +384,36 @@ function broadcastRegistryChanged(): void {
   }
 }
 
+/**
+ * A native OS notification was clicked (issue 138): bring Mission Control
+ * forward and land on the clicked Project's attention surface. Focus (or, only
+ * when none is open, create) ONE Window, raise the app from the background,
+ * then send it the navigate message the renderer turns into the normal Inbox
+ * click-through (issue 80). Targeting a single Window means exactly one Window
+ * navigates — never every open Window at once.
+ */
+function focusAndNavigate(target: NotificationTarget): void {
+  const open = BrowserWindow.getAllWindows().filter((w) => !w.webContents.isDestroyed());
+  const win = BrowserWindow.getFocusedWindow() ?? open[0] ?? createWindow();
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+  // macOS keeps the app alive behind other apps; steal focus so the click
+  // actually brings the Window forward rather than only un-minimizing it.
+  app.focus({ steal: true });
+  const message: NavigateAttentionMessage = {
+    workbenchRoot: WORKBENCH_ROOT,
+    project: target.project,
+    issueId: target.issueId,
+  };
+  const send = (): void => {
+    if (!win.webContents.isDestroyed()) win.webContents.send(IpcChannel.NavigateAttention, message);
+  };
+  // A just-created Window isn't ready to receive yet; wait for its first load.
+  if (win.webContents.isLoading()) win.webContents.once('did-finish-load', send);
+  else send();
+}
+
 /** Project list from a given Window's perspective (ownership relative to it). */
 function projectViewsFor(windowId: string): ProjectView[] {
   return registry.projects.map((p) => {
@@ -484,6 +518,14 @@ let runLogStore: RunLogStore;
 // Instantiated in `whenReady`; torn down on quit (NOT on window-all-closed —
 // on macOS the app outlives its Windows, and the Inbox must keep watching).
 let attentionWatcher: AttentionWatcher | null = null;
+
+// OS notifications when the drain needs the human (issue 138): the ONE app-level
+// controller deciding — via the pure `shared/attention-notifications` tier
+// filter + dedupe — which attention/lifecycle events earn a native OS ping (HITL
+// parks, blocked parks, merge conflicts, terminal drain moments) and which never
+// do. Driven from the SINGLE attention watch (so N Windows never ping N times)
+// plus the merge/drain-journal edges below. Instantiated in `whenReady`.
+let notificationController: NotificationController | null = null;
 
 // The workbench root the attention watch (and Inbox click-through) keys on.
 const WORKBENCH_ROOT = join(homedir(), 'Workbench');
@@ -857,16 +899,16 @@ function registerIpc(): void {
   // response to the user clicking Merge.
   ipcMain.handle(
     IpcChannel.MergeRuns,
-    (event, req: MergeRunsRequest): Promise<MergeRunsResult> => {
+    async (event, req: MergeRunsRequest): Promise<MergeRunsResult> => {
       const denied = ownershipError(event, req.projectPath);
       if (denied) {
-        return Promise.resolve({
+        return {
           ok: false,
           conflicted: false,
           merged: [],
           message: denied,
           output: '',
-        });
+        };
       }
       const repo = requestRepoFor(req.projectPath, req.repoPath);
       const identity = identityFor(req.projectPath);
@@ -885,9 +927,21 @@ function registerIpc(): void {
         // handler's user-initiated Merge (both route through here).
         protectedBranchGuard: { confirmed: req.confirmProtectedLand ?? false },
       };
-      return repoSerializer.run(normalizeProjectKey(repo), () =>
+      const result = await repoSerializer.run(normalizeProjectKey(repo), () =>
         mergeRuns(repo, req.slugs, mergeOpts),
       );
+      // OS notification when a Merge hits a conflict only the human can resolve
+      // (issue 138). Workbench Projects only — a legacy Project has no attention
+      // surface for the click-through to land on. Deduped on the conflicting set,
+      // so a merge-as-you-go retry of the same branches does not re-ping.
+      if (result.conflicted && identity?.kind === 'workbench') {
+        notificationController?.mergeConflicted(
+          basename(identity.key),
+          req.slugs,
+          result.conflictingFiles ?? [],
+        );
+      }
+      return result;
     },
   );
 
@@ -1183,6 +1237,16 @@ function registerIpc(): void {
       if (identity === null || identity.kind !== 'workbench') {
         return { written: false, path: null, error: null };
       }
+      // OS notification: the drain reached a terminal moment (issue 138) — one
+      // ping per drain end, whatever the stop reason. Fired here, independent of
+      // the journal write below, so a write failure never suppresses the human's
+      // "the drain is over — come look". `classifyDrainStop` reads the drain's
+      // stop message: "no eligible issue remains" ⇒ finished, else stopped.
+      notificationController?.drainEnded(
+        basename(identity.key),
+        classifyDrainStop(req.reason),
+        req.reason,
+      );
       const outcome = await writeDrainJournal({
         memoryRoot: join(identity.key, 'memory'),
         endedAt: new Date().toISOString(),
@@ -1578,11 +1642,23 @@ app.whenReady().then(async () => {
   // first derivation already filters against them (issue 80).
   attentionLastSeen = new AttentionLastSeenStore(app.getPath('userData'));
   await attentionLastSeen.load();
+  // OS notifications when the drain needs the human (issue 138): the pure
+  // decision + dedupe live in `shared/attention-notifications`; the thin adapter
+  // shows the native `Notification` and routes a click through `focusAndNavigate`.
+  notificationController = new NotificationController({
+    show: (intents) => showNotifications(intents, focusAndNavigate),
+  });
   // Background cross-project attention watch (issue 79): starts with the app,
   // independent of any Window, and stays inert when ~/Workbench doesn't exist.
   attentionWatcher = new AttentionWatcher({
     workbenchRoot: WORKBENCH_ROOT,
-    onChange: (snapshot) => broadcast(IpcChannel.AttentionChanged, snapshot),
+    onChange: (snapshot) => {
+      broadcast(IpcChannel.AttentionChanged, snapshot);
+      // The blocking-tier parks (HITL / blocked) ping from HERE — the single
+      // attention watch — so they fire once regardless of how many Windows are
+      // open. The controller seeds on the first snapshot (no launch burst).
+      notificationController?.attentionChanged(snapshot.items);
+    },
     lastSeenFor: (project) => attentionLastSeen.get(project),
     // For the self-heal detector's `~/`-path expansion (issue 95, ADR-0017).
     homeDir: homedir(),

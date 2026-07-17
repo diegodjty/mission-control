@@ -25,16 +25,19 @@ flowchart LR
     WATCH["Watchers: backlog · receipt · attention · planning"]
     GITA["Worktree adapter + merge + preview"]
     WB["Workbench git (auto-commit)"]
+    NOTIFY["OS notifications (issue 138)"]
   end
   subgraph S["Shared pure modules (all decisions)"]
     COORD["run-coordinator"]
     ISO["isolation policy"]
-    MODELS["receipt · launcher · attention models"]
+    MODELS["receipt · launcher · attention · notification models"]
   end
   APP <-->|"window.mc bridge"| HUB
   HUB --> PTY & GITA & WB
-  WATCH --> HUB
+  WATCH --> HUB & NOTIFY
   HUB --> COORD & ISO & MODELS
+  HUB -->|"merge conflict · drain end"| NOTIFY
+  NOTIFY -.->|"click: focus + navigate"| APP
 ```
 
 Decisions are pure functions in `src/shared/` (each with a sibling test);
@@ -62,9 +65,12 @@ sequenceDiagram
 ```
 
 Results travel **only** through Receipt files (ADR-0013) — the terminal is never
-parsed. *Changes queued:* Workers go headless behind **Feeds** (139–140), hung
-Runs are killed at `run_timeout` (141), blocked Runs park instead of halting the
-drain (137), and the summon moments get OS notifications (138).
+parsed. The **summon moments now fire OS notifications** (issue 138): an HITL
+park, a blocked park, a merge conflict, and the drain stopping/finishing each
+ping natively so you can walk away; a click focuses the Window on that Project's
+attention surface. *Changes queued:* Workers go headless behind **Feeds**
+(139–140), hung Runs are killed at `run_timeout` (141), blocked Runs park instead
+of halting the drain (137).
 
 ## 3. Merge lifecycle
 

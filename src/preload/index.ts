@@ -8,6 +8,7 @@ import {
   IpcChannel,
   type AttentionMarkSeenResult,
   type AttentionSnapshot,
+  type NavigateAttentionMessage,
   type BacklogChangedMessage,
   type BacklogLoadRequest,
   type BacklogLoadResult,
@@ -166,6 +167,14 @@ const api: MissionControlApi = {
 
   markAttentionSeen: (): Promise<AttentionMarkSeenResult> =>
     ipcRenderer.invoke(IpcChannel.AttentionMarkSeen),
+
+  onNavigateAttention: (
+    listener: (msg: NavigateAttentionMessage) => void,
+  ): (() => void) => {
+    const handler = (_e: IpcRendererEvent, msg: NavigateAttentionMessage): void => listener(msg);
+    ipcRenderer.on(IpcChannel.NavigateAttention, handler);
+    return () => ipcRenderer.removeListener(IpcChannel.NavigateAttention, handler);
+  },
 
   listLauncherProjects: (): Promise<LauncherListResult> =>
     ipcRenderer.invoke(IpcChannel.LauncherList),

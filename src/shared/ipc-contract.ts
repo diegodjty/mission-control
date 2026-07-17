@@ -197,6 +197,15 @@ export const IpcChannel = {
    */
   AttentionMarkSeen: 'attention:mark-seen',
   /**
+   * main → renderer (send, to ONE Window): a native OS notification was
+   * clicked (issue 138) — focus this Window and land on the named Project's
+   * attention surface (the same click-through the Inbox performs, issue 80).
+   * Sent only to the Window the notification adapter focused, so exactly one
+   * Window navigates. Carries the workbench root + project dir name + optional
+   * issue to select.
+   */
+  NavigateAttention: 'attention:navigate',
+  /**
    * renderer → main (invoke): the Launcher's project list (issue 81,
    * ADR-0016) — every `status: active` workbench-registry project with its
    * truthful backlog counts and last-activity stamp, most recent first, for
@@ -966,6 +975,21 @@ export interface AttentionMarkSeenResult {
 }
 
 /**
+ * Sent to one Window when a native OS notification is clicked (issue 138): open
+ * (or switch to) the named Project through the normal click-through flow and
+ * land on its attention surface. Shaped so the renderer resolves the project
+ * path exactly as the Inbox does (`workbenchProjectPath(workbenchRoot, project)`).
+ */
+export interface NavigateAttentionMessage {
+  /** The workbench root the `project` dir name lives under. */
+  workbenchRoot: string;
+  /** The workbench project directory name to open/focus. */
+  project: string;
+  /** The issue to select on the Project's attention surface, or null. */
+  issueId: number | null;
+}
+
+/**
  * One project as the Launcher's Continue / Quick fix / Just talk actions see
  * it (issue 81, ADR-0016): an active workbench-registry project — open in a
  * Window or not — with its resolved handles and truthful backlog counts.
@@ -1309,6 +1333,12 @@ export interface MissionControlApi {
    * (app userData) and re-derive, so seen journal entries stop surfacing.
    */
   markAttentionSeen(): Promise<AttentionMarkSeenResult>;
+  /**
+   * Subscribe to OS-notification click-throughs (issue 138): fired on the
+   * focused Window when the human clicks a native notification, so the renderer
+   * opens the named Project's attention surface. Returns an unsubscribe function.
+   */
+  onNavigateAttention(listener: (msg: NavigateAttentionMessage) => void): () => void;
   /**
    * The Launcher's project list (issue 81): every active workbench-registry
    * project with truthful backlog counts, most recently active first.
