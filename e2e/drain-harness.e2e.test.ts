@@ -99,6 +99,7 @@ import {
   type ReposScanResult,
 } from '../src/main/merge-preview-scan';
 import { createRepoSerializer } from '../src/shared/repo-serializer';
+import { sweepAutoMergeLane } from '../src/main/auto-merge-lane-executor';
 import { normalizeProjectKey } from '../src/shared/project-registry';
 import { previewBadge, type MergePreviewVerdict } from '../src/shared/merge-preview';
 import { readCoreMemory, writeDrainJournal } from '../src/main/memory-files';
@@ -1924,6 +1925,116 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
     await expect(
       git(repo, 'rev-parse', '--verify', '--quiet', branchFor(seven.slug)),
     ).rejects.toBeTruthy();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Scenario 14 — issue 145 (ADR-0021): the auto-merge lane's walking skeleton.
+  // A Run finishes on ONE clean, Receipt-backed branch and, on the Run-finish
+  // sweep, the branch MERGES ITSELF into main within a single sweep — a silent
+  // + passive `merge` note, NO blocking approval. The lane executor is assembled
+  // exactly as index.ts would wire it: the real preview pipeline (serializer +
+  // coordinator + merge-tree simulation) as the go/no-go, the real `afk-merge.sh`
+  // under the per-repo serializer, and the ingested Receipts as the Run log. The
+  // issue's `done`, the Receipt on disk, and the Run log are unchanged in shape by
+  // the auto-merge (a clean lane merge lands what a manual Merge would, and writes
+  // no journal / no new record). Ordering, pause, and skip are issue 146; the
+  // Merge button path (Scenarios 4/9/10) is untouched.
+  // ---------------------------------------------------------------------------
+  it('Scenario 14 (issue 145): a finished, clean, Receipt-backed branch merges itself in one sweep — passive note, no gate', async () => {
+    const supported = await probeMergeTreeSupport();
+    expect(supported, 'git ≥ 2.38 required for merge previews').toBe(true);
+
+    // A single finished isolated Run: a worktree on afk/06-…, a well-behaved
+    // scripted Worker that commits its work + done flip + Receipt onto the branch.
+    const six = sandboxIssue(6);
+    const wt = worktreePathFor(repo, six.slug);
+    await createWorktree(repo, six.slug, branchFor(six.slug));
+    // Watch the worktree's completions so the Worker's Receipt ingests LIVE — the
+    // Run-finish event that fires the lane sweep.
+    ingestFrom(sandbox.issuesDir, join(wt, 'issues'));
+    await runFakeWorker({ repo, worktree: wt, issue: six });
+    const rec = await waitForReceipt(6);
+    expect(rec.outcome).toBe('completed');
+    expect(rec.id.startsWith(`receipt:${six.slug}:`)).toBe(true);
+
+    // Ground truth: the branch is finished-unmerged and Receipt-backed, and main
+    // is idle (clean tree, not mid-merge). The exact state the lane merges from.
+    const defaultBranch = await detectDefaultBranch(repo);
+    expect(await isMergedIntoDefaultBranch(repo, six.slug, defaultBranch)).toBe(false);
+    const preFacts = await scanAfkBranches(repo);
+    expect(preFacts.find((f) => f.slug === six.slug)?.committedStatus).toBe('done');
+    expect((await git(repo, 'status', '--porcelain')).trim()).toBe('');
+    expect(await isMidMerge(repo)).toBe(false);
+    const baselineRecords = records.length;
+
+    // Warm the REAL preview pipeline until the branch stamps `clean` — the app's
+    // ~1.5 s poll settling the go/no-go verdict before the lane consults it.
+    const previewDeps = realPreviewDeps(supported);
+    await pollScan(
+      previewDeps,
+      (s) => s.previews.length === 1 && s.previews[0].verdict?.kind === 'clean',
+      'issue-145 clean preview settles before the sweep',
+    );
+
+    // Fire ONE lane sweep on the Run-finish, assembled as index.ts would wire it:
+    // the real preview scan as go/no-go, the ingested Receipts as the Run log, the
+    // real afk-merge.sh under the shared per-repo serializer.
+    const laneSerializer = createRepoSerializer();
+    const mergeCalls: string[][] = [];
+    const outcome = await sweepAutoMergeLane({
+      scan: async () => {
+        const s = await scanReposWithPreviews([repo], previewDeps);
+        return { branches: s.branches, previews: s.previews, midMerge: s.midMerge };
+      },
+      isCleanTree: async () => (await git(repo, 'status', '--porcelain')).trim() === '',
+      hasLiveSoloRun: () => false,
+      runLog: records,
+      merge: (slugs) => {
+        mergeCalls.push(slugs);
+        return mergeRuns(repo, slugs, { scriptPath: SCRIPT });
+      },
+      serializer: laneSerializer,
+      serializerKey: normalizeProjectKey(repo),
+    });
+
+    // The branch merged ITSELF in one sweep — a clean auto-merge classified as the
+    // passive `merge` note (silent + note), never a blocking approval.
+    expect(outcome.kind).toBe('swept');
+    if (outcome.kind !== 'swept') throw new Error('lane held instead of merging');
+    expect(outcome.slug).toBe(six.slug);
+    expect(outcome.result.ok).toBe(true);
+    expect(outcome.result.conflicted).toBe(false);
+    expect(outcome.result.merged).toEqual([six.slug]);
+    expect(mergeCalls).toEqual([[six.slug]]); // exactly one merge, the chosen branch
+    expect(outcome.decision).toEqual({
+      kind: 'auto',
+      action: 'merge',
+      note: outcome.result.message,
+    });
+    if (outcome.decision.kind !== 'auto') throw new Error('expected a clean auto-merge decision');
+    // No gate: the `merge` note sits on the passive (non-blocking) tier (ADR-0011).
+    expect(classifyAuthority('merge')).toBe('passive');
+    expect(classifyAuthority(outcome.decision.action)).not.toBe('blocking');
+
+    // The work is on main and the branch is integrated + reclaimed (clean merge).
+    expect(await git(repo, 'ls-files')).toContain(`work/${six.slug}.txt`);
+    expect(await git(repo, 'ls-files')).toContain(`issues/completions/${six.slug}.md`);
+    expect((await git(repo, 'status', '--porcelain')).trim()).toBe('');
+    expect(await isMidMerge(repo)).toBe(false);
+    const postFacts = await scanAfkBranches(repo);
+    expect(postFacts.find((f) => f.slug === six.slug)?.mergedIntoMain ?? true).toBe(true);
+
+    // Unchanged in shape: the issue reads `done` on main (what a manual Merge lands
+    // too), the Receipt survived byte-for-byte (its post-merge copy on main deduped
+    // — no new Run-log record), and the lane wrote no journal artifact.
+    const backlog = await readBacklog(repo);
+    expect(backlog.issues.find((i) => i.id === 6)?.status).toBe('done');
+    const receiptOnMain = await readReceipt(six.slug);
+    expect(parseReceipt(receiptOnMain).outcome).toBe('completed');
+    await sleep(150); // let any (wrong) re-ingest of the merged-in Receipt appear
+    expect(records.filter((r) => r.issueId === 6)).toHaveLength(1);
+    expect(records.length).toBe(baselineRecords);
+    expect(existsSync(join(sandbox.scratch, 'workbench'))).toBe(false); // no journal side effect
   });
 });
 
