@@ -281,11 +281,11 @@ describe('headless Run tracer (issue 139) — real child process, real modules',
   // Issue 142 (consumer half) — a headless Worker that hits a PERMISSION DENIAL
   // parks `blocked` through the SAME seam: it names the denied action in its
   // Receipt, the Run reads `blocked`, an attention item is raised carrying the
-  // denial, and the drain NEVER retries the denied issue. In THIS worktree issue
-  // 137's continue-past-blocked change is not landed (its code is on the unmerged
-  // `afk/137-…` branch), so the drain conservatively STOPS on the blocked Run —
-  // issue 142's "conservative stop until then". Under either rule the denied
-  // issue is off the table (it already has a Run), so no retry is scheduled.
+  // denial, and the drain NEVER retries the denied issue. With issue 137's
+  // continue-past-blocked change landed, a declared-blocked park no longer
+  // halts the drain — it parks (reported in `blockedParkedIssueIds`) while
+  // everything else keeps scheduling. Either way the denied issue is off the
+  // table (it already has a Run), so no retry is scheduled.
   // ---------------------------------------------------------------------------
   it('a denial-blocked headless Worker parks blocked: Receipt names the denial, attention raised, never retried', async () => {
     const issue = sandboxIssue(2); // independent, non-HITL — the first drainable issue
@@ -364,14 +364,17 @@ describe('headless Run tracer (issue 139) — real child process, real modules',
     expect(blockedItem).toBeDefined();
     expect(blockedItem!.text).toContain(deniedAction);
 
-    // Consumer 3 — the drain does NOT retry the denial. The blocked issue already
-    // has a Run, so the coordinator excludes it from BOTH startable and queued
-    // (true under conservative-stop AND under issue 137's continue-past rules).
+    // Consumer 3 — the drain does NOT retry the denial. A declared-blocked park
+    // (`isBlockedPark`, issue 137, now landed) does not halt the drain — it
+    // parks, is reported in `blockedParkedIssueIds`, and everything else keeps
+    // scheduling. Either way the denied issue already has a Run, so the
+    // coordinator excludes it from BOTH startable and queued.
     const activeRuns: ActiveRun[] = [{ issueId: 2, status, receiptOutcome: record.outcome }];
     const plan = planDrain({ issues: backlog.issues, maxConcurrent: 1, activeRuns });
-    expect(plan.drain.stop).toBe(true); // conservative stop (137 unmerged here)
-    expect(plan.drain.reason).toBe('run-blocked');
-    expect(plan.drain.blockedIssueId).toBe(2);
+    expect(plan.drain.stop).toBe(false); // 137: a declared-blocked park keeps the drain going
+    expect(plan.drain.reason).toBe(null);
+    expect(plan.drain.blockedIssueId).toBe(null);
+    expect(plan.drain.blockedParkedIssueIds).toContain(2);
     expect(plan.startable).not.toContain(2);
     expect(plan.queued).not.toContain(2);
 
