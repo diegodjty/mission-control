@@ -46,6 +46,9 @@ import {
   type IssueFileEditRequest,
   type IssueFileDeleteRequest,
   type IssueFileWriteResult,
+  type ChecklistStateGetRequest,
+  type ChecklistStateToggleRequest,
+  type ChecklistStateResult,
   type IssueStatusObserveRequest,
   type IssueStatusObserveResult,
   type MainCommitRequest,
@@ -210,6 +213,12 @@ const api: MissionControlApi = {
 
   deleteIssueFile: (req: IssueFileDeleteRequest): Promise<IssueFileWriteResult> =>
     ipcRenderer.invoke(IpcChannel.IssueFileDelete, req),
+
+  getChecklistState: (req: ChecklistStateGetRequest): Promise<ChecklistStateResult> =>
+    ipcRenderer.invoke(IpcChannel.ChecklistStateGet, req),
+
+  toggleChecklistItem: (req: ChecklistStateToggleRequest): Promise<ChecklistStateResult> =>
+    ipcRenderer.invoke(IpcChannel.ChecklistStateToggle, req),
 
   watchPlanning: (req: PlanningWatchRequest): void => {
     ipcRenderer.send(IpcChannel.PlanningWatch, req);

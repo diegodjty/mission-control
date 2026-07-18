@@ -838,6 +838,60 @@
   margin: 0;
 }
 
+/* ---- Interactive HITL checklist (issue 156). */
+.map__checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--teal-border);
+  border-radius: 8px;
+  background: var(--teal-bg);
+}
+
+.map__checklist-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--teal);
+}
+
+.map__checklist-empty {
+  font-size: 12px;
+  color: var(--fg-soft);
+}
+
+.map__checklist-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.map__checklist-item label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.map__checklist-item input[type='checkbox'] {
+  margin-top: 3px;
+}
+
+.map__checklist-error {
+  font-size: 12px;
+  color: var(--red-soft);
+}
+
+.map__checklist-done {
+  padding-top: 4px;
+}
+
 /* ---- Issue-file Edit / Delete (issue 89): the Map's one write exception. */
 .map__issue-ops {
   display: flex;

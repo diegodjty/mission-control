@@ -28,6 +28,14 @@ import {
   type BranchPreview,
   type MergePreviewVerdict,
 } from '../../shared/merge-preview';
+import { latestReceiptFor } from '../../shared/receipt-audit';
+import {
+  parseChecklist,
+  checklistSourceText,
+  markVerifiedDoneText,
+  type ChecklistItem,
+} from '../../shared/checklist-model';
+import { allChecked } from '../../shared/checklist-state-model';
 
 interface MapProps {
   /**
@@ -296,6 +304,28 @@ export function Map({
     setConfirmingDelete(false);
   }, [selectedId]);
 
+  // Interactive HITL checklist (issue 156): tick off a parked issue's
+  // verification steps in-app instead of driving them by hand outside the
+  // app. Checked flags persist in a main-process store keyed by project +
+  // issue file (loaded fresh whenever the selection changes), and an
+  // all-checked checklist offers a human-initiated "Mark verified & done"
+  // that flips the issue through the existing issue-file edit path.
+  const [checklistChecked, setChecklistChecked] = useState<boolean[]>([]);
+  const [checklistLoaded, setChecklistLoaded] = useState(false);
+  const [checklistBusy, setChecklistBusy] = useState(false);
+  const [checklistError, setChecklistError] = useState<string | null>(null);
+  const [markDoneBusy, setMarkDoneBusy] = useState(false);
+  const [markDoneError, setMarkDoneError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setChecklistChecked([]);
+    setChecklistLoaded(false);
+    setChecklistBusy(false);
+    setChecklistError(null);
+    setMarkDoneBusy(false);
+    setMarkDoneError(null);
+  }, [selectedId]);
+
   // An Inbox click-through focuses its referenced issue (issue 80): select it
   // so the detail panel opens on it. Keyed on the bump too, so clicking the
   // same item again re-focuses even after the user selected something else.
@@ -373,6 +403,110 @@ export function Map({
   }, [reloadKey]);
 
   const selected = backlog?.issues.find((i) => i.id === selectedId) ?? null;
+
+  // The checklist itself: parsed from the selected issue's latest Receipt
+  // `detail` body (a parked HITL Run's "Ready for manual verification" steps),
+  // falling back to the issue file's own body. Non-HITL issues never look at
+  // this — the detail panel gates rendering on `issue.hitl`.
+  const selectedReceipt =
+    selected !== null ? latestReceiptFor(runLog ?? [], selected.id) : null;
+  const checklistItems: ChecklistItem[] = selected
+    ? parseChecklist(checklistSourceText(selectedReceipt?.detail ?? null, selected.body))
+    : [];
+  const checklistItemCount = checklistItems.length;
+
+  // Load the persisted checked flags whenever the selection (or its item
+  // count) changes — a fresh read, same pattern as the issue-file editor's
+  // seed-from-disk, so a stale push never shows a wrong check state.
+  useEffect(() => {
+    if (!selected || !selected.hitl || resolvedPath === null) return;
+    if (checklistItemCount === 0) {
+      setChecklistChecked([]);
+      setChecklistLoaded(true);
+      return;
+    }
+    let cancelled = false;
+    setChecklistLoaded(false);
+    window.mc
+      .getChecklistState({
+        projectPath: resolvedPath,
+        fileName: selected.fileName,
+        itemCount: checklistItemCount,
+      })
+      .then((res) => {
+        if (cancelled) return;
+        setChecklistChecked(res.checked);
+        setChecklistLoaded(true);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setChecklistError(err instanceof Error ? err.message : String(err));
+        setChecklistLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId, resolvedPath, checklistItemCount]);
+
+  async function handleToggleChecklistItem(index: number): Promise<void> {
+    if (!selected || resolvedPath === null) return;
+    setChecklistBusy(true);
+    setChecklistError(null);
+    try {
+      const res = await window.mc.toggleChecklistItem({
+        projectPath: resolvedPath,
+        fileName: selected.fileName,
+        itemCount: checklistItemCount,
+        index,
+      });
+      setChecklistChecked(res.checked);
+    } catch (err) {
+      setChecklistError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setChecklistBusy(false);
+    }
+  }
+
+  // "Mark verified & done" (issue 156): a human sign-off, never a silent
+  // flip — it re-reads the file fresh, flips `status: wip` → `done` and
+  // appends a dated note, then saves through the SAME parser-validated,
+  // auto-committed issue-file edit path issue 89 already exposes.
+  async function markChecklistVerifiedDone(): Promise<void> {
+    if (!selected || resolvedPath === null) return;
+    setMarkDoneBusy(true);
+    setMarkDoneError(null);
+    try {
+      const read = await window.mc.readIssueFile({
+        projectPath: resolvedPath,
+        fileName: selected.fileName,
+      });
+      if (read.content === null) {
+        setMarkDoneError(read.error ?? 'Could not read the issue file.');
+        return;
+      }
+      const dateIso = new Date().toISOString().slice(0, 10);
+      const updated = markVerifiedDoneText(read.content, dateIso);
+      if (updated === null) {
+        setMarkDoneError('This issue is no longer wip — nothing to flip.');
+        return;
+      }
+      const res = await window.mc.editIssueFile({
+        projectPath: resolvedPath,
+        fileName: selected.fileName,
+        content: updated,
+      });
+      if (!res.ok) {
+        setMarkDoneError(res.error ?? 'Save failed.');
+        return;
+      }
+      // The reparsed backlog arrives via the live watch push — nothing to do.
+    } catch (err) {
+      setMarkDoneError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setMarkDoneBusy(false);
+    }
+  }
 
   // Map list order (issue 102): show the latest issues at the top. The shared
   // Backlog Model sorts ascending by id (and eligibility / the lowest-numbered
@@ -863,6 +997,23 @@ export function Map({
                   issues={backlog.issues}
                   finishedUnmergedIds={finishedUnmergedIds ?? []}
                 />
+
+                {/* Interactive HITL checklist (issue 156): only HITL issues
+                    render one — a normal issue shows nothing here. */}
+                {issue.hitl && (
+                  <ChecklistSection
+                    items={checklistItems}
+                    checked={checklistChecked}
+                    loaded={checklistLoaded}
+                    busy={checklistBusy}
+                    error={checklistError}
+                    onToggle={(index) => void handleToggleChecklistItem(index)}
+                    canMarkDone={issue.status === 'wip'}
+                    onMarkDone={() => void markChecklistVerifiedDone()}
+                    markDoneBusy={markDoneBusy}
+                    markDoneError={markDoneError}
+                  />
+                )}
 
                 {/* Edit / Delete (issue 89): the Map's one write exception —
                     issue FILES only. Edit is a raw editor over the whole file
@@ -1456,6 +1607,82 @@ function DependencySection({
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * The interactive HITL checklist (issue 156): the parked issue's steps as
+ * real tickable checkboxes, in order. Renders an empty state — never an
+ * error — when the Receipt/body carries no checklist. All-checked surfaces
+ * "Mark verified & done"; a partially-checked list offers no such flip.
+ */
+function ChecklistSection({
+  items,
+  checked,
+  loaded,
+  busy,
+  error,
+  onToggle,
+  canMarkDone,
+  onMarkDone,
+  markDoneBusy,
+  markDoneError,
+}: {
+  items: ChecklistItem[];
+  checked: boolean[];
+  loaded: boolean;
+  busy: boolean;
+  error: string | null;
+  onToggle: (index: number) => void;
+  canMarkDone: boolean;
+  onMarkDone: () => void;
+  markDoneBusy: boolean;
+  markDoneError: string | null;
+}): JSX.Element {
+  if (items.length === 0) {
+    return (
+      <div className="map__checklist">
+        <div className="map__checklist-empty">
+          No checklist steps found in this issue's Receipt or body.
+        </div>
+      </div>
+    );
+  }
+
+  const allDone = loaded && allChecked(checked, items.length);
+
+  return (
+    <div className="map__checklist">
+      <span className="map__checklist-label">Verification checklist</span>
+      <ul className="map__checklist-items">
+        {items.map((item, index) => (
+          <li key={index} className="map__checklist-item">
+            <label>
+              <input
+                type="checkbox"
+                checked={checked[index] ?? false}
+                disabled={!loaded || busy}
+                onChange={() => onToggle(index)}
+              />
+              {item.text}
+            </label>
+          </li>
+        ))}
+      </ul>
+      {error && <div className="map__checklist-error">{error}</div>}
+      {allDone && canMarkDone && (
+        <div className="map__checklist-done">
+          <button
+            className="map__issue-op map__issue-op--save"
+            onClick={onMarkDone}
+            disabled={markDoneBusy}
+          >
+            {markDoneBusy ? 'Marking verified & done…' : '✓ Mark verified & done'}
+          </button>
+        </div>
+      )}
+      {markDoneError && <div className="map__checklist-error">{markDoneError}</div>}
     </div>
   );
 }
