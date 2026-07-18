@@ -120,6 +120,7 @@ import {
   repoForIssue,
   unknownRepoKeyNote,
   plannedRepoHoldNote,
+  nonGitRootNote,
   type IssueRepoResolution,
 } from '../../shared/run-targeting';
 import {
@@ -3245,8 +3246,11 @@ export function App(): JSX.Element {
 
     let cancelled = false;
 
-    const addRuns = (cwdOf: (issueId: number) => string): void => {
-      const additions = startableIssues.map((issue) => {
+    const addRuns = (
+      cwdOf: (issueId: number) => string,
+      issuesToStart: typeof startableIssues = startableIssues,
+    ): void => {
+      const additions = issuesToStart.map((issue) => {
         // The declared drain-worker tier (issue 154): the issue's `model:`
         // override, else the project CONFIG `worker_model` default, else sonnet
         // — so unattended draining runs cheap instead of inheriting the
@@ -3309,12 +3313,25 @@ export function App(): JSX.Element {
         // (`Map` the identifier is the Map view component here, so use a record.)
         const cwdById: Record<number, string> = {};
         for (const p of result.placements) cwdById[p.issueId] = p.cwd;
+        // A non-isolatable target's concurrency clamp (issue 157, ADR-0017):
+        // 2+ Runs contending for one un-worktree-able tree get only ONE live
+        // placement back; the rest come back in `queuedIssueIds` with no cwd
+        // at all — they must NOT get a Pane this round. Leaving them out of
+        // `runs` keeps them eligible, so the next re-plan (the live Run
+        // finishing frees the slot) picks them up naturally, one at a time.
+        const queued = new Set(result.queuedIssueIds);
+        const toStart = startableIssues.filter((issue) => !queued.has(issue.id));
+        // Surface the "not a git repository" attention item once per path
+        // (issue 157) instead of silently serializing the queue unexplained.
+        for (const path of result.nonGitRoots) {
+          logNote(`non-git-root:${path}`, 'relay', nonGitRootNote(path));
+        }
         // Newly-started Runs spawn in their resolved cwd (a worktree in parallel
         // mode; the issue's own target repo when solo). Already-live Panes keep
         // the cwd they spawned in — a running PTY can't be re-parented; that
         // live solo→parallel re-parent is left to the batch QA walkthrough /
         // Merge slice.
-        addRuns((id) => cwdById[id] ?? repoForIssueId(id));
+        addRuns((id) => cwdById[id] ?? repoForIssueId(id), toStart);
       })
       .catch(() => {
         if (cancelled) return;

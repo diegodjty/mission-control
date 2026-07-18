@@ -798,8 +798,26 @@ export interface ResolvedPlacement {
 export interface IsolationApplyResult {
   /** True when parallel mode is (now) enabled. */
   parallel: boolean;
-  /** Placement per Run, ascending by issueId. */
+  /** Placement per Run, ascending by issueId. Excludes queued Runs — see `queuedIssueIds`. */
   placements: ResolvedPlacement[];
+  /**
+   * Issue ids NOT placed this round because their target is unisolatable and
+   * already holds a live Run (issue 157, ADR-0017's concurrency clamp): no
+   * cwd was resolved for them, so the caller must not start a Pane for them —
+   * they queue for the slot to free, exactly like an over-cap drain Run.
+   * Ascending, deduped across every repo group. Empty for a normal (isolatable)
+   * Run set.
+   */
+  queuedIssueIds: number[];
+  /**
+   * Absolute paths of any target in this application that is contended (2+
+   * Runs, `queuedIssueIds` non-empty for it) AND turns out to be a plain
+   * non-git directory (issue 157, ADR-0017) — the "MC expected to isolate but
+   * can't" surprise, distinct from a project that simply declares no repos by
+   * design. The caller surfaces one attention note per path instead of
+   * silently running the queue unisolated. Deduped; empty in the normal case.
+   */
+  nonGitRoots: string[];
 }
 
 export interface MergeRunsRequest {

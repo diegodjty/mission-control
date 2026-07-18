@@ -95,3 +95,17 @@ export function plannedRepoHoldNote(issueId: number, repoKey: string): string {
     `(declared, not yet created) — held until that repo exists; other issues continue.`
   );
 }
+
+/**
+ * The one-line note surfaced (once) when 2+ Runs contend for a non-isolatable
+ * target that turns out to be a plain non-git directory (issue 157, ADR-0017):
+ * with no repo to cut worktrees from, MC serializes them to one live Run at a
+ * time on the shared tree rather than run them concurrently unisolated — this
+ * says so plainly instead of leaving the queueing unexplained.
+ */
+export function nonGitRootNote(path: string): string {
+  return (
+    `${path} is not a git repository — parallel Runs need version control; ` +
+    '`git init` to enable worktrees.'
+  );
+}

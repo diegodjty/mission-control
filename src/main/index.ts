@@ -1011,7 +1011,7 @@ function registerIpc(): void {
       // Reject a non-owner: a stale renderer must not create/tear down worktrees
       // on a repo the real owner is driving. Empty placements ⇒ no mutation.
       if (ownershipError(event, req.projectPath)) {
-        return { parallel: false, placements: [] };
+        return { parallel: false, placements: [], queuedIssueIds: [], nonGitRoots: [] };
       }
       // Isolation keys on concurrency PER REPO (issue 72, ADR-0015): group the
       // Runs by the repo each targets (a Run without one falls into the
@@ -1054,6 +1054,10 @@ function registerIpc(): void {
         placements: results
           .flatMap((r) => r.placements)
           .sort((a, b) => a.issueId - b.issueId),
+        queuedIssueIds: results
+          .flatMap((r) => r.queuedIssueIds)
+          .sort((a, b) => a - b),
+        nonGitRoots: [...new Set(results.flatMap((r) => r.nonGitRoots))].sort(),
       };
     },
   );

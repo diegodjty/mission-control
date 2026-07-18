@@ -115,12 +115,17 @@ describe('decideIsolation — dependency chains stay solo (issue 111)', () => {
     ]);
   });
 
-  it('an unisolatable target keeps a chained Run solo too (ADR-0017 unchanged)', () => {
+  it('an unisolatable target keeps a chained Run solo too, and clamps to 1 live (issue 157)', () => {
     const d = decideIsolation([chained(3, '03-dependent'), run(4, '04-independent')], {
       isolatable: false,
     });
     expect(d.parallel).toBe(false);
-    expect(d.placements.map((p) => p.placement.kind)).toEqual(['main', 'main']);
+    // Only the lowest issueId (3, chained) is placed live; 4 queues — an
+    // unisolatable target has no worktree to give a 2nd Run either way.
+    expect(d.placements).toEqual([
+      { issueId: 3, slug: '03-dependent', placement: { kind: 'main' } },
+    ]);
+    expect(d.queuedIssueIds).toEqual([4]);
   });
 });
 
@@ -455,10 +460,7 @@ describe('decideIsolation — unisolatable target serializes solo (issue 94, ADR
   it('forces a 2+ Run set solo when the target cannot host worktrees', () => {
     const d = decideIsolation([run(1, '01-a'), run(2, '02-b')], { isolatable: false });
     expect(d.parallel).toBe(false);
-    expect(d.placements.map((p) => p.placement)).toEqual([
-      { kind: 'main' },
-      { kind: 'main' },
-    ]);
+    expect(d.placements.map((p) => p.placement)).toEqual([{ kind: 'main' }]);
   });
 
   it('an unisolatable-target group emits no worktree commands on reconcile', () => {
@@ -471,13 +473,53 @@ describe('decideIsolation — unisolatable target serializes solo (issue 94, ADR
     const d = decideIsolation([run(1, '01-a'), run(2, '02-b')], { isolatable: true });
     expect(d.parallel).toBe(true);
     expect(d.placements.map((p) => p.placement.kind)).toEqual(['worktree', 'worktree']);
+    expect(d.queuedIssueIds).toEqual([]);
+  });
+});
+
+describe('decideIsolation — unisolatable concurrency clamp (issue 157)', () => {
+  it('an isolatable::false set of N Runs yields exactly 1 live placement + N-1 queued, regardless of N', () => {
+    for (const n of [2, 3, 5]) {
+      const runs = Array.from({ length: n }, (_, i) => run(i + 1, `0${i + 1}-issue`));
+      const d = decideIsolation(runs, { isolatable: false });
+      expect(d.parallel).toBe(false);
+      expect(d.placements).toHaveLength(1);
+      expect(d.placements[0]).toEqual({
+        issueId: 1,
+        slug: '01-issue',
+        placement: { kind: 'main' },
+      });
+      expect(d.queuedIssueIds).toEqual(runs.slice(1).map((r) => r.issueId));
+    }
+  });
+
+  it('a lone Run on an unisolatable target is live, nothing queued', () => {
+    const d = decideIsolation([run(9, '09-solo')], { isolatable: false });
+    expect(d.placements).toEqual([
+      { issueId: 9, slug: '09-solo', placement: { kind: 'main' } },
+    ]);
+    expect(d.queuedIssueIds).toEqual([]);
+  });
+
+  it('an empty set on an unisolatable target is empty, nothing queued', () => {
+    const d = decideIsolation([], { isolatable: false });
+    expect(d.parallel).toBe(false);
+    expect(d.placements).toEqual([]);
+    expect(d.queuedIssueIds).toEqual([]);
+  });
+
+  it('an isolatable set is unaffected — no queuing ever happens', () => {
+    const runs = [run(1, 'a'), run(2, 'b'), run(3, 'c'), run(4, 'd'), run(5, 'e')];
+    const d = decideIsolation(runs);
+    expect(d.placements).toHaveLength(5);
+    expect(d.queuedIssueIds).toEqual([]);
   });
 });
 
 describe('decideIsolationByRepo — unisolatable workspace root (issue 94, ADR-0017)', () => {
   const WORKSPACE = '/Users/dev/Developer/billing'; // repo-less project's workspace root
 
-  it('serializes an unisolatable-target group with 2+ Runs solo (no worktrees)', () => {
+  it('serializes an unisolatable-target group with 2+ Runs to exactly 1 live + rest queued (issue 157)', () => {
     const groups = decideIsolationByRepo(
       [
         { issueId: 1, slug: '01-scaffold-api', repoPath: WORKSPACE },
@@ -489,10 +531,8 @@ describe('decideIsolationByRepo — unisolatable workspace root (issue 94, ADR-0
     expect(groups).toHaveLength(1);
     const { decision } = groups[0];
     expect(decision.parallel).toBe(false);
-    expect(decision.placements.map((p) => p.placement)).toEqual([
-      { kind: 'main' },
-      { kind: 'main' },
-    ]);
+    expect(decision.placements.map((p) => p.placement)).toEqual([{ kind: 'main' }]);
+    expect(decision.queuedIssueIds).toEqual([2]);
     // no worktree commands: reconcile against a clean tree is a no-op
     expect(reconcile({ parallel: false, worktreeSlugs: [] }, decision)).toEqual([]);
   });
