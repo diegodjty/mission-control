@@ -10,6 +10,7 @@ import * as pty from 'node-pty';
 import { resolveShell } from './resolve-shell';
 import {
   resolveRunCommand,
+  resolveResumeRunCommand,
   resolveTalkCommand,
   type TalkWorkbenchDest,
 } from './resolve-run-command';
@@ -71,28 +72,35 @@ export class PtySessionManager {
     // Project repo (issue 35). A plain Pane spawns the walking-skeleton shell in
     // $HOME (issue 01).
     const { file, args } = req.run
-      ? resolveRunCommand(process.env, {
-          id: req.run.issueId,
-          fileName: req.run.issueFileName,
-          title: req.run.issueTitle,
-          // The Run's RESOLVED cwd (worktree in parallel mode, repo in solo;
-          // the issue's TARGET repo for a workbench Project, issue 72) — the
-          // prompt spells out the absolute per-Run Receipt path from it
-          // (issue 62), so a Worker's cwd confusion can't misplace the write.
-          cwd: req.run.projectPath,
-          // Workbench Runs carry the explicit workbench paths in the prompt
-          // (ADR-0015's discovery order); absent = legacy, prompt unchanged.
-          workbench: req.run.workbench ?? null,
-          // A workbench project's CORE.md, read at the IPC edge (issue 73);
-          // null for legacy Runs and memory-less projects — nothing injected.
-          memoryCore: context.memoryCore ?? null,
-        },
-        // Model + effort tiering (issues 154/155) fires only when the caller
-        // declared them. The interactive Pane path is manual Runs (headless
-        // drain Runs route to the Headless Session Manager), so `req.run.model`
-        // / `req.run.effort` are unset here and the command stays un-tiered — a
-        // manual Run keeps the interactive default model and effort.
-        { model: req.run.model ?? null, effort: req.run.effort ?? null })
+      ? req.run.resume
+        ? // A TAKE-OVER / post-mortem RESUME (issue 144): re-attach interactively
+          // to the session the headless Run captured, `claude --resume <id>`, in
+          // the same cwd — no fresh Worker seed. Everything else about the Run
+          // (issue, cwd, tracking) is unchanged; only the command differs. A
+          // resume is interactive, so it carries no model/effort tiering.
+          resolveResumeRunCommand(process.env, req.run.resume.claudeSessionId)
+        : resolveRunCommand(process.env, {
+            id: req.run.issueId,
+            fileName: req.run.issueFileName,
+            title: req.run.issueTitle,
+            // The Run's RESOLVED cwd (worktree in parallel mode, repo in solo;
+            // the issue's TARGET repo for a workbench Project, issue 72) — the
+            // prompt spells out the absolute per-Run Receipt path from it
+            // (issue 62), so a Worker's cwd confusion can't misplace the write.
+            cwd: req.run.projectPath,
+            // Workbench Runs carry the explicit workbench paths in the prompt
+            // (ADR-0015's discovery order); absent = legacy, prompt unchanged.
+            workbench: req.run.workbench ?? null,
+            // A workbench project's CORE.md, read at the IPC edge (issue 73);
+            // null for legacy Runs and memory-less projects — nothing injected.
+            memoryCore: context.memoryCore ?? null,
+          },
+          // Model + effort tiering (issues 154/155) fires only when the caller
+          // declared them. This interactive Pane path is manual Runs (headless
+          // drain Runs route to the Headless Session Manager), so `req.run.model`
+          // / `req.run.effort` are unset here and the command stays un-tiered — a
+          // manual Run keeps the interactive default model and effort.
+          { model: req.run.model ?? null, effort: req.run.effort ?? null })
       : req.dispatcher
         ? resolveDispatcherCommand(process.env, {
             projectPath: req.dispatcher.projectPath,

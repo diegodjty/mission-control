@@ -239,6 +239,24 @@
   font-size: 11px;
 }
 
+/* Take over / resume (issue 144): grab a headless Run into an interactive Pane.
+   Teal, matching the Pane/talk cue — this control turns a watched Feed into a
+   session you talk to. */
+.run-takeover {
+  background: var(--teal-bg, transparent);
+  color: var(--teal);
+  border: 1px solid var(--teal-border, var(--border-strong));
+  border-radius: 6px;
+  padding: 3px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.run-takeover--tile {
+  padding: 1px 8px;
+  font-size: 11px;
+}
+
 .app__tile-dismiss {
   background: transparent;
   color: var(--fg-mute);

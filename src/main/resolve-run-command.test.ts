@@ -5,8 +5,10 @@ import {
   receiptPathFor,
   resolveRunCommand,
   resolveHeadlessRunCommand,
+  resolveResumeRunCommand,
   resolveTalkCommand,
   HEADLESS_CLAUDE_FLAGS,
+  RESUME_CLAUDE_FLAG,
 } from './resolve-run-command';
 import {
   CORE_MEMORY_CHAR_CAP,
@@ -257,6 +259,37 @@ describe('drain-worker effort tiering (issue 155)', () => {
       effort: 'max',
     });
     expect(pty.args).not.toContain('--effort');
+  });
+});
+
+describe('resolveResumeRunCommand (issue 144 — take over / post-mortem resume)', () => {
+  it('spawns interactive `claude --resume <session-id>` with NO scoped prompt', () => {
+    const cmd = resolveResumeRunCommand({}, 'sess-abc-123');
+    expect(cmd.file).toBe('claude');
+    expect(cmd.args).toEqual([RESUME_CLAUDE_FLAG, 'sess-abc-123']);
+    // A resume re-attaches to an existing session, so — unlike a fresh Run — it
+    // carries no initial prompt: the session already holds its full context.
+    expect(cmd.args).not.toContain('-p');
+    expect(cmd.args.some((a) => a.includes('afk-issue-runner'))).toBe(false);
+  });
+
+  it('honours CLAUDE_BIN for the executable path', () => {
+    const cmd = resolveResumeRunCommand({ CLAUDE_BIN: '/opt/homebrew/bin/claude' }, 'sess-x');
+    expect(cmd.file).toBe('/opt/homebrew/bin/claude');
+    expect(cmd.args).toEqual([RESUME_CLAUDE_FLAG, 'sess-x']);
+  });
+
+  it('ignores a blank CLAUDE_BIN and falls back to `claude`', () => {
+    const cmd = resolveResumeRunCommand({ CLAUDE_BIN: '   ' }, 'sess-x');
+    expect(cmd.file).toBe('claude');
+  });
+
+  it('honours MC_RUN_CMD as a whole-command override, appending --resume <id> last', () => {
+    // The same command-override seam the e2e take-over test rides: the fake
+    // Worker still receives the resumed session id as its trailing argv.
+    const cmd = resolveResumeRunCommand({ MC_RUN_CMD: 'node ./fake.mjs --flag' }, 'sess-e2e');
+    expect(cmd.file).toBe('node');
+    expect(cmd.args).toEqual(['./fake.mjs', '--flag', RESUME_CLAUDE_FLAG, 'sess-e2e']);
   });
 });
 

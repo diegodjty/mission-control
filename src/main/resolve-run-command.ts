@@ -241,6 +241,45 @@ export function resolveHeadlessRunCommand(
 }
 
 /**
+ * The flag that re-attaches an interactive `claude` to an existing session by
+ * its id (issue 144): `claude --resume <session-id>`. A take-over kills the
+ * headless child and spawns THIS in the same working directory, so the operator
+ * grabs the wheel of the very session the drain was running — same conversation,
+ * same context — rather than starting fresh. Post-mortem resume of a finished
+ * Run uses the identical command; the only difference is there is no live child
+ * to kill first.
+ */
+export const RESUME_CLAUDE_FLAG = '--resume' as const;
+
+/**
+ * Resolve the executable + args for a TAKE-OVER / post-mortem RESUME Pane (issue
+ * 144): an interactive `claude --resume <claudeSessionId>` re-attaching to the
+ * session a headless Run captured. NO scoped prompt is appended — the session
+ * already holds its full context and the operator drives it by hand from here
+ * (the Feed→Pane switch is exactly "stop watching, start talking").
+ *
+ * Same override precedence as every other Run/Talk command, so the e2e's
+ * command-override seam (`MC_RUN_CMD`) and a manual `CLAUDE_BIN` both work:
+ *   1. `MC_RUN_CMD` — whole-command override; `--resume <id>` is appended after
+ *      the override's own argv (mirroring how the scoped prompt is appended for
+ *      a fresh Run), so a scripted fake Worker still receives the session id.
+ *   2. `CLAUDE_BIN` (or bare `claude`) with `--resume <id>` as its arguments.
+ */
+export function resolveResumeRunCommand(
+  env: Record<string, string | undefined>,
+  claudeSessionId: string,
+): ShellCommand {
+  const override = env.MC_RUN_CMD?.trim();
+  if (override) {
+    const parts = override.split(/\s+/);
+    return { file: parts[0], args: [...parts.slice(1), RESUME_CLAUDE_FLAG, claudeSessionId] };
+  }
+
+  const bin = env.CLAUDE_BIN?.trim() || 'claude';
+  return { file: bin, args: [RESUME_CLAUDE_FLAG, claudeSessionId] };
+}
+
+/**
  * The Workbench artifact destination a PLANNING talk session carries (issue
  * 101, ADR-0015): where `/to-prd`, `/to-issues`, and `/grill-with-docs` must
  * write, so they don't fall back to a file backlog in the session's cwd (a

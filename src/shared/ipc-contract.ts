@@ -402,6 +402,18 @@ export interface RunTarget {
    * of the prompt via the run-command builders, alongside `--model`.
    */
   effort?: WorkerEffort | null;
+  /**
+   * Present when this Run is a TAKE-OVER / post-mortem RESUME (issue 144):
+   * instead of a fresh Worker seed, the Pane spawns `claude --resume
+   * <claudeSessionId>`, re-attaching interactively to the SAME claude session
+   * the headless Run captured (issue 139). Set only after a live headless Run is
+   * taken over (its child already killed) or a finished Run is reopened
+   * post-mortem — and always with `headless` false, since a resume is an
+   * interactive Pane, never a Feed. Absent for a normal Run, which spawns its
+   * usual fresh session. The cwd (`projectPath`) is unchanged, so the resumed
+   * session runs in the same working directory (worktree or main).
+   */
+  resume?: { claudeSessionId: string } | null;
 }
 
 /**

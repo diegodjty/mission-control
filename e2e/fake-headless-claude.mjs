@@ -28,6 +28,15 @@ const outcome = env.MC_FAKE_OUTCOME ?? 'completed'; // completed | blocked | nee
 // action (the headless failure contract's producer half) instead of retrying it.
 const deniedAction = env.MC_FAKE_DENIED_ACTION ?? '';
 const writeReceipt = env.MC_FAKE_NO_RECEIPT !== '1';
+// Take-over modes (issue 144):
+//   HANG — declare the session id, then stay alive (a Run mid-flight); it does
+//     NO on-disk work and never exits on its own, so the take-over test can kill
+//     it and observe the child die. Killed via SIGTERM by the manager.
+//   INTERROGATE — a post-mortem resume: emit a little chatter and exit, touching
+//     NOTHING on disk (no claim flip, no Receipt) — the operator is just reading
+//     the finished session back, so the backlog must be left exactly as it was.
+const hang = env.MC_FAKE_HANG === '1';
+const interrogate = env.MC_FAKE_INTERROGATE === '1';
 
 const emit = (obj) => process.stdout.write(`${JSON.stringify(obj)}\n`);
 
@@ -52,6 +61,18 @@ emit({
     ],
   },
 });
+
+// HANG (issue 144): a Run caught mid-flight — session id declared, but it does
+// no on-disk work and never exits. The take-over test kills it and watches the
+// child die. The far-future timer keeps the event loop (and the process) alive.
+if (hang) {
+  setTimeout(() => {}, 3_600_000);
+  // Do NOT fall through to the on-disk work or the terminal result.
+} else if (interrogate) {
+  // Post-mortem resume: touch nothing on disk; just read the session back and
+  // exit cleanly, so the backlog is byte-identical before and after.
+  emit({ type: 'result', subtype: 'success', session_id: sessionId, is_error: false, result: 'post-mortem read' });
+} else {
 
 // 2. The on-disk work. A blocked/park Worker leaves the claim `wip`; a completed
 //    one flips through to `done` and writes a deliverable.
@@ -113,4 +134,6 @@ emit({
   result: `done ${slug}`,
   usage: { input_tokens: 1200, output_tokens: 340 },
 });
+
+}
 // Let the process exit naturally so buffered stdout is fully flushed first.
