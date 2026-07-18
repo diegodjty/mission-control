@@ -3706,12 +3706,229 @@ export function App(): JSX.Element {
       .finally(() => setAborting(false));
   }, [projectPath, aborting]);
 
+  // Headless Runs render as compact Feed cards, not terminal-sized grid tiles
+  // (issue 160) — the tiled grid below is sized for interactive Panes only, so
+  // splitting the two here keeps `gridShape` fed just the Pane count.
+  const feedRuns = runs.filter((r) => r.target.headless);
+  const paneRuns = runs.filter((r) => !r.target.headless);
+
   // Adaptive tiled grid: the pure layout function decides the shape from the
-  // live Run count (issue 12) — plus the Just-talk Pane when one is live
-  // (issue 81), which tiles beside the Runs like any other session. A
+  // live interactive-Pane count (issue 12) — plus the Just-talk Pane when one
+  // is live (issue 81), which tiles beside the Runs like any other session. A
   // maximized tile overrides it with a single cell.
-  const shape = gridShape(runs.length + (talk !== null ? 1 : 0));
+  const shape = gridShape(paneRuns.length + (talk !== null ? 1 : 0));
   const maximizedRun = runs.find((r) => r.target.issueId === maximizedId) ?? null;
+  // A maximized headless Run has no Pane grid cell to occupy, so its board and
+  // the Pane grid each show only the section that actually holds the maximized
+  // tile — the other collapses instead of rendering an empty, padded box.
+  const maximizedIsFeed = maximizedRun !== null && maximizedRun.target.headless;
+
+  // Renders one Run's tile — a compact Feed card (headless) or a terminal
+  // Pane — shared by the Feed board and the Pane grid so take-over (issue 144)
+  // is just a re-render of the same tile with a different body underneath the
+  // unchanged header/controls.
+  const renderRunTile = (r: TrackedRun): JSX.Element => {
+    const status = runStatusOf(r);
+    const id = r.target.issueId;
+    const slug = slugOf(r.target.issueFileName);
+    // Take-over affordance (issue 144): a live headless Run offers
+    // "Take over" (grab it mid-flight as a Pane); a finished one offers
+    // "Resume" (reopen the session post-mortem to interrogate it). Both
+    // need a captured claude session id — null until the init event
+    // lands — and only apply to a headless (Feed) Run.
+    const takeover = takeoverKindFor(status, r.target.headless, r.claudeSessionId);
+    // The header shows the issue slug WITHOUT its numeric prefix (the
+    // number is already the "Run NN" / issue-id cue); `slug` itself
+    // keeps the prefix because it names the afk/<slug> branch below.
+    const descriptor = slug.replace(/^\d+-/, '');
+    const isStranded = strandedIds.includes(id);
+    const isCommitFailed = commitFailedIds.includes(id);
+    const isFinishedUnmerged =
+      (status === 'finished' && isIsolated(r)) || finishedUnmergedIds.includes(id);
+    // Any isolated Run whose worktree/branch still holds work — finished-
+    // but-unmerged (committed), stranded, or commit-failed (uncommitted) —
+    // has work that dismissing would hide, so warn first (issue 22, corr).
+    // Previously only `finished` warned. Cross-checks the on-disk scan so a
+    // Run whose state landed off-screen still triggers it.
+    const worktreeWork = isFinishedUnmerged || isStranded || isCommitFailed;
+    // Stranded / commit-failed Runs can never merge as-is: offer to
+    // discard (force-remove the worktree + delete the branch) so the
+    // batch can proceed (issue 22).
+    const discardable = isStranded || isCommitFailed;
+    const commitError = worktreeCommitErrors[id] ?? null;
+    const requestDismiss = (): void => {
+      const message = isFinishedUnmerged
+        ? `Issue ${String(id).padStart(2, '0')} has finished work on branch afk/${slug} ` +
+          `that hasn't been merged into main yet.\n\nDismiss it anyway? The branch stays ` +
+          `on disk and you can still Merge it from the Map.`
+        : `Issue ${String(id).padStart(2, '0')} has unmerged work in its worktree on ` +
+          `branch afk/${slug}.\n\nDismiss it anyway? Dismissing only hides it here — the ` +
+          `worktree stays on disk. Use Discard to remove the worktree and branch.`;
+      if (worktreeWork && !window.confirm(message)) return;
+      dismissRun(id);
+    };
+    const requestDiscard = (): void => {
+      if (
+        window.confirm(
+          `Discard issue ${String(id).padStart(2, '0')}'s worktree and branch afk/${slug}?` +
+            `\n\nThis force-removes the worktree (uncommitted work is lost) and deletes ` +
+            `the branch. Use this to clear a blocked/stopped/commit-failed Run so the ` +
+            `batch can proceed.`,
+        )
+      ) {
+        discardRun(id, slug);
+      }
+    };
+    const isMax = maximizedRun?.target.issueId === r.target.issueId;
+    const hidden = maximizedRun !== null && !isMax;
+    return (
+      <div
+        key={r.target.issueId}
+        className={`app__tile${isMax ? ' app__tile--max' : ''}${
+          r.target.headless ? ' app__tile--feed' : ''
+        }`}
+        style={{ display: hidden ? 'none' : 'flex' }}
+      >
+        <div
+          className="app__tile-head"
+          onClick={() => toggleMaximize(r.target.issueId)}
+          title={r.target.issueTitle}
+        >
+          <span
+            className={`app__tile-dot app__tile-dot--${dotTone(status)}`}
+            title={status}
+            aria-label={`Run status: ${status}`}
+          />
+          <span className="app__tile-run">Run {id}</span>
+          <span className="app__tile-id">{id}</span>
+          <span className="app__tile-sep">·</span>
+          <span className="app__tile-slug">{descriptor}</span>
+          {isCommitFailed && (
+            <span
+              className="run-status run-status--commit-failed"
+              title={
+                commitError
+                  ? `Auto-commit failed: ${commitError}`
+                  : 'The Run finished but its work could not be committed to the afk/ branch'
+              }
+            >
+              commit failed
+            </span>
+          )}
+          {isStranded && (
+            <span
+              className="run-status run-status--stranded"
+              title="This Run ended without committing done; its worktree is stranded"
+            >
+              stranded
+            </span>
+          )}
+          <span className="app__tile-controls">
+            {status === 'running' ? (
+              <>
+                {takeover === 'live' && (
+                  <button
+                    className="run-takeover run-takeover--tile"
+                    title="Kill this headless Run and take over its session in an interactive Pane (same working directory)"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      takeOverRun(r.target.issueId);
+                    }}
+                  >
+                    Take over
+                  </button>
+                )}
+                <button
+                  className="run-stop run-stop--tile"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    stopRun(r.target.issueId);
+                  }}
+                >
+                  Stop
+                </button>
+              </>
+            ) : (
+              <>
+                {takeover === 'post-mortem' && (
+                  <button
+                    className="run-takeover run-takeover--tile"
+                    title="Reopen this finished Run's session in an interactive Pane to interrogate it (no new Run)"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      takeOverRun(r.target.issueId);
+                    }}
+                  >
+                    Resume
+                  </button>
+                )}
+                {discardable && (
+                  <button
+                    className="run-discard run-discard--tile"
+                    title="Discard this Run's worktree and afk/ branch (force remove)"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      requestDiscard();
+                    }}
+                  >
+                    Discard
+                  </button>
+                )}
+                <button
+                  className="app__tile-dismiss"
+                  title={
+                    worktreeWork
+                      ? 'Dismiss this Run (its worktree/branch still has unmerged work)'
+                      : 'Dismiss this finished Run'
+                  }
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    requestDismiss();
+                  }}
+                >
+                  ✕
+                </button>
+              </>
+            )}
+            <button
+              className="app__tile-max"
+              title={isMax ? 'Restore the grid' : 'Maximize this tile'}
+              aria-label={isMax ? 'Restore the grid' : 'Maximize this tile'}
+              aria-pressed={isMax}
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleMaximize(r.target.issueId);
+              }}
+            >
+              <MaximizeIcon maximized={isMax} />
+            </button>
+          </span>
+        </div>
+        {r.target.headless ? (
+          // A drain Run is headless (issue 139): a read-only Feed strip
+          // (status + elapsed), not a terminal — there is no input to
+          // type into. The claude session id it captures is persisted
+          // on the Run for resume/take-over.
+          <RunFeed
+            run={r.target}
+            status={status}
+            stopSignal={r.stopSignal}
+            onSession={(sid) => handleRunSession(r.target.issueId, sid)}
+            onClaudeSession={(sid) => handleRunClaudeSession(r.target.issueId, sid)}
+            onStatusChange={r.target.issueId === focusedId ? setPaneStatus : undefined}
+            onExit={(_exitCode, cause) => handleRunExit(r.target.issueId, cause)}
+          />
+        ) : (
+          <Pane
+            run={r.target}
+            stopSignal={r.stopSignal}
+            onStatusChange={r.target.issueId === focusedId ? setPaneStatus : undefined}
+            onExit={() => handleRunExit(r.target.issueId)}
+          />
+        )}
+      </div>
+    );
+  };
 
   // --- Atlas shell: header open affordances + command palette (issue 124) ---
 
@@ -4194,256 +4411,75 @@ export function App(): JSX.Element {
           )}
         </div>
 
-        {/* Every tracked Run's Pane stays mounted so its session persists; the
-            adaptive grid (issue 12) tiles them so all live Runs are visible at
-            once instead of hidden behind tabs. Maximizing a tile collapses the
-            grid to one cell and hides (but keeps mounted) the others. A plain
-            shell Pane (issue 01) shows when no Run is tracked. */}
+        {/* Every tracked Run's Pane/Feed stays mounted so its session persists.
+            Headless Runs lay out as a dense Feed board sized to their compact
+            card content (issue 160) — separate from the adaptive terminal grid
+            (issue 12) below it, which tiles only the interactive Panes (+ the
+            Just-talk Pane, issue 81) so live Runs are visible at once instead
+            of hidden behind tabs. Maximizing a tile collapses whichever board
+            holds it to a single full-size cell and hides (but keeps mounted)
+            the rest; the other board collapses away entirely rather than
+            showing an empty padded box. A plain shell Pane (issue 01) shows
+            when no Run is tracked. */}
         {(runs.length > 0 || talk !== null) && (
           <div
-            className={`app__grid${shape.scroll ? ' app__grid--scroll' : ''}`}
-            style={{
-              display: view === 'pane' ? 'grid' : 'none',
-              gridTemplateColumns: maximizedRun
-                ? '1fr'
-                : `repeat(${shape.cols}, minmax(0, 1fr))`,
-              gridTemplateRows:
-                maximizedRun || shape.scroll
-                  ? undefined
-                  : `repeat(${shape.rows}, minmax(0, 1fr))`,
-            }}
+            className="app__board"
+            style={{ display: view === 'pane' ? 'flex' : 'none' }}
           >
-            {runs.map((r) => {
-              const status = runStatusOf(r);
-              const id = r.target.issueId;
-              const slug = slugOf(r.target.issueFileName);
-              // Take-over affordance (issue 144): a live headless Run offers
-              // "Take over" (grab it mid-flight as a Pane); a finished one offers
-              // "Resume" (reopen the session post-mortem to interrogate it). Both
-              // need a captured claude session id — null until the init event
-              // lands — and only apply to a headless (Feed) Run.
-              const takeover = takeoverKindFor(status, r.target.headless, r.claudeSessionId);
-              // The header shows the issue slug WITHOUT its numeric prefix (the
-              // number is already the "Run NN" / issue-id cue); `slug` itself
-              // keeps the prefix because it names the afk/<slug> branch below.
-              const descriptor = slug.replace(/^\d+-/, '');
-              const isStranded = strandedIds.includes(id);
-              const isCommitFailed = commitFailedIds.includes(id);
-              const isFinishedUnmerged =
-                (status === 'finished' && isIsolated(r)) || finishedUnmergedIds.includes(id);
-              // Any isolated Run whose worktree/branch still holds work — finished-
-              // but-unmerged (committed), stranded, or commit-failed (uncommitted) —
-              // has work that dismissing would hide, so warn first (issue 22, corr).
-              // Previously only `finished` warned. Cross-checks the on-disk scan so a
-              // Run whose state landed off-screen still triggers it.
-              const worktreeWork = isFinishedUnmerged || isStranded || isCommitFailed;
-              // Stranded / commit-failed Runs can never merge as-is: offer to
-              // discard (force-remove the worktree + delete the branch) so the
-              // batch can proceed (issue 22).
-              const discardable = isStranded || isCommitFailed;
-              const commitError = worktreeCommitErrors[id] ?? null;
-              const requestDismiss = (): void => {
-                const message = isFinishedUnmerged
-                  ? `Issue ${String(id).padStart(2, '0')} has finished work on branch afk/${slug} ` +
-                    `that hasn't been merged into main yet.\n\nDismiss it anyway? The branch stays ` +
-                    `on disk and you can still Merge it from the Map.`
-                  : `Issue ${String(id).padStart(2, '0')} has unmerged work in its worktree on ` +
-                    `branch afk/${slug}.\n\nDismiss it anyway? Dismissing only hides it here — the ` +
-                    `worktree stays on disk. Use Discard to remove the worktree and branch.`;
-                if (worktreeWork && !window.confirm(message)) return;
-                dismissRun(id);
-              };
-              const requestDiscard = (): void => {
-                if (
-                  window.confirm(
-                    `Discard issue ${String(id).padStart(2, '0')}'s worktree and branch afk/${slug}?` +
-                      `\n\nThis force-removes the worktree (uncommitted work is lost) and deletes ` +
-                      `the branch. Use this to clear a blocked/stopped/commit-failed Run so the ` +
-                      `batch can proceed.`,
-                  )
-                ) {
-                  discardRun(id, slug);
-                }
-              };
-              const isMax = maximizedRun?.target.issueId === r.target.issueId;
-              const hidden = maximizedRun !== null && !isMax;
-              return (
-                <div
-                  key={r.target.issueId}
-                  className={`app__tile${isMax ? ' app__tile--max' : ''}`}
-                  style={{ display: hidden ? 'none' : 'flex' }}
-                >
-                  <div
-                    className="app__tile-head"
-                    onClick={() => toggleMaximize(r.target.issueId)}
-                    title={r.target.issueTitle}
-                  >
-                    <span
-                      className={`app__tile-dot app__tile-dot--${dotTone(status)}`}
-                      title={status}
-                      aria-label={`Run status: ${status}`}
-                    />
-                    <span className="app__tile-run">Run {id}</span>
-                    <span className="app__tile-id">{id}</span>
-                    <span className="app__tile-sep">·</span>
-                    <span className="app__tile-slug">{descriptor}</span>
-                    {isCommitFailed && (
-                      <span
-                        className="run-status run-status--commit-failed"
-                        title={
-                          commitError
-                            ? `Auto-commit failed: ${commitError}`
-                            : 'The Run finished but its work could not be committed to the afk/ branch'
-                        }
-                      >
-                        commit failed
-                      </span>
-                    )}
-                    {isStranded && (
-                      <span
-                        className="run-status run-status--stranded"
-                        title="This Run ended without committing done; its worktree is stranded"
-                      >
-                        stranded
-                      </span>
-                    )}
-                    <span className="app__tile-controls">
-                      {status === 'running' ? (
-                        <>
-                          {takeover === 'live' && (
-                            <button
-                              className="run-takeover run-takeover--tile"
-                              title="Kill this headless Run and take over its session in an interactive Pane (same working directory)"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                takeOverRun(r.target.issueId);
-                              }}
-                            >
-                              Take over
-                            </button>
-                          )}
-                          <button
-                            className="run-stop run-stop--tile"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              stopRun(r.target.issueId);
-                            }}
-                          >
-                            Stop
-                          </button>
-                        </>
-                      ) : (
-                        <>
-                          {takeover === 'post-mortem' && (
-                            <button
-                              className="run-takeover run-takeover--tile"
-                              title="Reopen this finished Run's session in an interactive Pane to interrogate it (no new Run)"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                takeOverRun(r.target.issueId);
-                              }}
-                            >
-                              Resume
-                            </button>
-                          )}
-                          {discardable && (
-                            <button
-                              className="run-discard run-discard--tile"
-                              title="Discard this Run's worktree and afk/ branch (force remove)"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                requestDiscard();
-                              }}
-                            >
-                              Discard
-                            </button>
-                          )}
-                          <button
-                            className="app__tile-dismiss"
-                            title={
-                              worktreeWork
-                                ? 'Dismiss this Run (its worktree/branch still has unmerged work)'
-                                : 'Dismiss this finished Run'
-                            }
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              requestDismiss();
-                            }}
-                          >
-                            ✕
-                          </button>
-                        </>
-                      )}
-                      <button
-                        className="app__tile-max"
-                        title={isMax ? 'Restore the grid' : 'Maximize this tile'}
-                        aria-label={isMax ? 'Restore the grid' : 'Maximize this tile'}
-                        aria-pressed={isMax}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          toggleMaximize(r.target.issueId);
-                        }}
-                      >
-                        <MaximizeIcon maximized={isMax} />
-                      </button>
-                    </span>
-                  </div>
-                  {r.target.headless ? (
-                    // A drain Run is headless (issue 139): a read-only Feed strip
-                    // (status + elapsed), not a terminal — there is no input to
-                    // type into. The claude session id it captures is persisted
-                    // on the Run for resume/take-over.
-                    <RunFeed
-                      run={r.target}
-                      status={status}
-                      stopSignal={r.stopSignal}
-                      onSession={(sid) => handleRunSession(r.target.issueId, sid)}
-                      onClaudeSession={(sid) => handleRunClaudeSession(r.target.issueId, sid)}
-                      onStatusChange={r.target.issueId === focusedId ? setPaneStatus : undefined}
-                      onExit={(_exitCode, cause) => handleRunExit(r.target.issueId, cause)}
-                    />
-                  ) : (
-                    <Pane
-                      run={r.target}
-                      stopSignal={r.stopSignal}
-                      onStatusChange={r.target.issueId === focusedId ? setPaneStatus : undefined}
-                      onExit={() => handleRunExit(r.target.issueId)}
-                    />
-                  )}
-                </div>
-              );
-            })}
-            {/* The Just-talk Pane (issue 81): a warm bare session tiled like a
-                Run but tracked by nothing — closing it is the only lifecycle. */}
-            {talk !== null && (
+            {feedRuns.length > 0 && !(maximizedRun !== null && !maximizedIsFeed) && (
               <div
-                className="app__tile"
-                style={{ display: maximizedRun !== null ? 'none' : 'flex' }}
+                className={`app__feedboard${maximizedIsFeed ? ' app__feedboard--max' : ''}`}
               >
-                <div className="app__tile-head">
-                  <span
-                    className="app__tile-dot app__tile-dot--teal"
-                    title="talk"
-                    aria-label="Just-talk session"
-                  />
-                  <span className="app__tile-run">Just talk</span>
-                  <span className="app__tile-slug">{talk.label}</span>
-                  <span className="app__tile-controls">
-                    <button
-                      className="app__tile-dismiss"
-                      title="End this session and close the Pane"
-                      onClick={endTalk}
-                    >
-                      ✕
-                    </button>
-                  </span>
-                </div>
-                <Pane
-                  talk={talk}
-                  focusSignal={talkFocusSignal}
-                  onSession={handleTalkSession}
-                  onStatusChange={runs.length === 0 ? setPaneStatus : undefined}
-                />
+                {feedRuns.map(renderRunTile)}
+              </div>
+            )}
+            {(paneRuns.length > 0 || talk !== null) && !maximizedIsFeed && (
+              <div
+                className={`app__grid${shape.scroll ? ' app__grid--scroll' : ''}`}
+                style={{
+                  gridTemplateColumns: maximizedRun
+                    ? '1fr'
+                    : `repeat(${shape.cols}, minmax(0, 1fr))`,
+                  gridTemplateRows:
+                    maximizedRun || shape.scroll
+                      ? undefined
+                      : `repeat(${shape.rows}, minmax(0, 1fr))`,
+                }}
+              >
+                {paneRuns.map(renderRunTile)}
+                {/* The Just-talk Pane (issue 81): a warm bare session tiled like a
+                Run but tracked by nothing — closing it is the only lifecycle. */}
+                {talk !== null && (
+                  <div
+                    className="app__tile"
+                    style={{ display: maximizedRun !== null ? 'none' : 'flex' }}
+                  >
+                    <div className="app__tile-head">
+                      <span
+                        className="app__tile-dot app__tile-dot--teal"
+                        title="talk"
+                        aria-label="Just-talk session"
+                      />
+                      <span className="app__tile-run">Just talk</span>
+                      <span className="app__tile-slug">{talk.label}</span>
+                      <span className="app__tile-controls">
+                        <button
+                          className="app__tile-dismiss"
+                          title="End this session and close the Pane"
+                          onClick={endTalk}
+                        >
+                          ✕
+                        </button>
+                      </span>
+                    </div>
+                    <Pane
+                      talk={talk}
+                      focusSignal={talkFocusSignal}
+                      onSession={handleTalkSession}
+                      onStatusChange={runs.length === 0 ? setPaneStatus : undefined}
+                    />
+                  </div>
+                )}
               </div>
             )}
           </div>
