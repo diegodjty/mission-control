@@ -766,7 +766,7 @@ export function Map({
                           ? 'running'
                           : null
                 }
-                state={deriveIssueState(issue, backlog!.issues)}
+                state={deriveIssueState(issue, backlog!.issues, finishedUnmergedIds ?? [])}
                 onSelect={() =>
                   setSelectedId((cur) => (cur === issue.id ? null : issue.id))
                 }
@@ -790,7 +790,11 @@ export function Map({
             return [
               row,
               <li key={`${issue.id}-detail`} className="map__detail">
-                <DependencySection issue={issue} issues={backlog.issues} />
+                <DependencySection
+                  issue={issue}
+                  issues={backlog.issues}
+                  finishedUnmergedIds={finishedUnmergedIds ?? []}
+                />
 
                 {/* Edit / Delete (issue 89): the Map's one write exception —
                     issue FILES only. Edit is a raw editor over the whole file
@@ -1238,6 +1242,14 @@ function IssueRow({
             blocked
           </Badge>
         )}
+        {state.kind === 'waiting-on-merge' && !worked && (
+          <Badge
+            tone="violet"
+            title={`Waiting on the auto-merge lane to land issue ${state.mergeIssueId}`}
+          >
+            waiting on merge of {String(state.mergeIssueId).padStart(2, '0')}
+          </Badge>
+        )}
         {state.kind === 'eligible' && !worked && <Badge tone="teal">ready</Badge>}
         {worktreeRun === 'finished-unmerged' ? (
           <>
@@ -1302,11 +1314,13 @@ function IssueRow({
 function DependencySection({
   issue,
   issues,
+  finishedUnmergedIds = [],
 }: {
   issue: BacklogIssue;
   issues: BacklogIssue[];
+  finishedUnmergedIds?: number[];
 }): JSX.Element | null {
-  const state = deriveIssueState(issue, issues);
+  const state = deriveIssueState(issue, issues, finishedUnmergedIds);
   const downstream = dependents(issue, issues);
 
   if (issue.dependsOn.length === 0 && downstream.length === 0) return null;
@@ -1316,6 +1330,11 @@ function DependencySection({
       {state.kind === 'blocked' && (
         <div className="map__blocked">
           Blocked — waiting on {state.unmet.map((d) => depLabel(d)).join(', ')}
+        </div>
+      )}
+      {state.kind === 'waiting-on-merge' && (
+        <div className="map__blocked">
+          Waiting on merge of {String(state.mergeIssueId).padStart(2, '0')}
         </div>
       )}
       {state.kind === 'eligible' && (
@@ -1395,6 +1414,8 @@ function rowDotTone(
       return 'teal';
     case 'blocked':
       return 'red';
+    case 'waiting-on-merge':
+      return 'violet';
   }
 }
 
@@ -1419,6 +1440,8 @@ function rowDotLabel(
       return 'ready to Run';
     case 'blocked':
       return 'blocked';
+    case 'waiting-on-merge':
+      return `waiting on merge of ${String(state.mergeIssueId).padStart(2, '0')}`;
   }
 }
 

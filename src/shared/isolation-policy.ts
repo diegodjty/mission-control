@@ -47,9 +47,16 @@ export interface IsolationRun {
    * even while parallel mode is on for genuinely-independent concurrent Runs (or
    * for a leftover worktree awaiting merge, `reconcile` below). Only genuinely
    * concurrent AND independent Runs (no dependency edge between them) isolate
-   * into worktrees. The CALLER marks this from the dependency graph
-   * (`soloChainedIssueIds`, run-coordinator) — this module only honors it.
-   * Absent/false ⇒ an independent Run, decided by concurrency exactly as before.
+   * into worktrees. Absent/false ⇒ an independent Run, decided by concurrency
+   * exactly as before.
+   *
+   * Solo-chaining itself is retired (issue 147, ADR-0021): the coordinator no
+   * longer computes a chained set (`soloChainedIssueIds` is gone from
+   * run-coordinator — a dependency's work now reaches main via the auto-merge
+   * lane, so every Run isolates purely by concurrency). No caller marks this
+   * `true` anymore; the field and the placement rule below are kept only for
+   * ADR-0002's own callers that might still pass it, and are candidates for
+   * removal in a later slice.
    */
   chained?: boolean;
 }

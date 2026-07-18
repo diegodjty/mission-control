@@ -150,14 +150,25 @@ describe('summarizeRunGuidance with on-disk worktree scan (issue 21)', () => {
     });
   });
 
-  it('is unaffected by the scan when the in-flight ids are not eligible anyway', () => {
+  it('is unaffected by the scan when the in-flight id names an issue with no dependents', () => {
     const one = mk(1, 'done');
-    const two = mk(2, 'open', [1]); // eligible
-    // A stale scan id for an already-done issue changes nothing.
+    const two = mk(2, 'open'); // eligible, no dependencies at all
+    // 1's finished-unmerged state can't hold back an issue that doesn't depend
+    // on it.
     const guidance = summarizeRunGuidance([one, two], { finishedUnmergedIds: [1] });
     expect(guidance.kind).toBe('eligible');
     if (guidance.kind === 'eligible') {
       expect(guidance.runnable.map((r) => r.id)).toEqual([2]);
     }
+  });
+
+  it('holds a dependent waiting-on-merge rather than reporting it blocked (issue 147, ADR-0021)', () => {
+    // 1 is done but still finished-unmerged; 2's only dependency is 1. 2 is
+    // neither runnable (the lane hasn't landed 1 yet) nor "blocked" in the
+    // actionable sense — the Map already carries its own waiting-on-merge state.
+    const one = mk(1, 'done');
+    const two = mk(2, 'open', [1]);
+    const guidance = summarizeRunGuidance([one, two], { finishedUnmergedIds: [1] });
+    expect(guidance).toEqual({ kind: 'settled', doneCount: 1, wipCount: 0 });
   });
 });

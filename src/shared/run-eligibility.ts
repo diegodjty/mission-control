@@ -19,29 +19,41 @@ function byId(issues: BacklogIssue[]): Map<number, BacklogIssue> {
 }
 
 /**
- * The dependency ids of `issue` that are NOT yet `done` (a missing dependency
- * id counts as unmet — you can't be unblocked by an issue that isn't there).
- * Empty array ⇒ every dependency is satisfied.
+ * The dependency ids of `issue` that are NOT yet `done` **and integrated**
+ * (issue 147, ADR-0021): a missing dependency id counts as unmet, and so does
+ * a dependency whose frontmatter reads `done` but whose `afk/` branch is still
+ * finished-unmerged (`finishedUnmergedIds`, the same on-disk fact afk-scan
+ * already produces for `hasInFlightRun`). Solo-chaining used to paper over this
+ * by forcing such a dependency to commit straight to the integration branch;
+ * now that the auto-merge lane lands branches on its own, a dependent must wait
+ * for the real merge rather than starting from a main still missing its own
+ * prerequisite. Empty array ⇒ every dependency is satisfied.
  */
 export function unmetDependencies(
   issue: BacklogIssue,
   issues: BacklogIssue[],
+  finishedUnmergedIds: readonly number[] = [],
 ): number[] {
   const index = byId(issues);
-  return issue.dependsOn.filter((depId) => index.get(depId)?.status !== 'done');
+  const unmerged = new Set(finishedUnmergedIds);
+  return issue.dependsOn.filter((depId) => {
+    if (index.get(depId)?.status !== 'done') return true;
+    return unmerged.has(depId);
+  });
 }
 
 /**
  * True when a Run can be started on `issue`: it is `open` and all of its
- * dependencies are `done`. `wip` (already claimed) and `done` (finished) issues
- * are never runnable.
+ * dependencies are `done` **and integrated** (issue 147). `wip` (already
+ * claimed) and `done` (finished) issues are never runnable.
  */
 export function eligibleForRun(
   issue: BacklogIssue,
   issues: BacklogIssue[],
+  finishedUnmergedIds: readonly number[] = [],
 ): boolean {
   if (issue.status !== 'open') return false;
-  return unmetDependencies(issue, issues).length === 0;
+  return unmetDependencies(issue, issues, finishedUnmergedIds).length === 0;
 }
 
 /**
@@ -102,5 +114,8 @@ export function runnableNow(
   issues: BacklogIssue[],
   inFlight: InFlightRuns = {},
 ): boolean {
-  return eligibleForRun(issue, issues) && !hasInFlightRun(issue.id, inFlight);
+  return (
+    eligibleForRun(issue, issues, inFlight.finishedUnmergedIds ?? []) &&
+    !hasInFlightRun(issue.id, inFlight)
+  );
 }

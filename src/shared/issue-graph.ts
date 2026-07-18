@@ -49,14 +49,21 @@ export interface UnmetDependency {
 /**
  * The Map-facing state of an issue:
  *  - `done` / `wip` — already finished / already claimed.
- *  - `eligible` — open and every dependency is `done` (a Run can start).
- *  - `blocked` — open but at least one dependency is unmet; `unmet` names them.
+ *  - `eligible` — open and every dependency is `done` AND integrated (a Run
+ *    can start, issue 147).
+ *  - `blocked` — open but at least one dependency is genuinely not `done`;
+ *    `unmet` names them.
+ *  - `waiting-on-merge` — open, every dependency is `done`, but at least one
+ *    is still finished-unmerged on its `afk/` branch (issue 147, ADR-0021): the
+ *    auto-merge lane hasn't landed it on main yet. `mergeIssueId` names the
+ *    lowest such dependency.
  */
 export type IssueMapState =
   | { kind: 'done' }
   | { kind: 'wip' }
   | { kind: 'eligible' }
-  | { kind: 'blocked'; unmet: UnmetDependency[] };
+  | { kind: 'blocked'; unmet: UnmetDependency[] }
+  | { kind: 'waiting-on-merge'; mergeIssueId: number };
 
 /**
  * All dependency edges in the backlog. Edges to a dependency id that isn't in
@@ -112,16 +119,28 @@ export function unmetDetails(
 
 /**
  * Derive the Map-facing state of `issue`. Mirrors the eligibility rule: a `done`
- * or `wip` issue reports that status directly; an `open` issue is `eligible`
- * when it has no unmet dependencies and `blocked` (with the offending
- * dependencies named) otherwise.
+ * or `wip` issue reports that status directly; an `open` issue with a
+ * genuinely not-done dependency is `blocked` (the offending dependencies
+ * named); one whose dependencies are all `done` but at least one is still
+ * `finishedUnmergedIds` (issue 147) is `waiting-on-merge`; otherwise `eligible`.
+ *
+ * `finishedUnmergedIds` is the same on-disk fact afk-scan already produces for
+ * `run-eligibility`'s dependency check — passed through so the Map's row state
+ * and the coordinator's start condition agree by construction.
  */
 export function deriveIssueState(
   issue: BacklogIssue,
   issues: BacklogIssue[],
+  finishedUnmergedIds: readonly number[] = [],
 ): IssueMapState {
   if (issue.status === 'done') return { kind: 'done' };
   if (issue.status === 'wip') return { kind: 'wip' };
   const unmet = unmetDetails(issue, issues);
-  return unmet.length === 0 ? { kind: 'eligible' } : { kind: 'blocked', unmet };
+  if (unmet.length > 0) return { kind: 'blocked', unmet };
+  const unmergedSet = new Set(finishedUnmergedIds);
+  const mergeBlockers = issue.dependsOn.filter((depId) => unmergedSet.has(depId));
+  if (mergeBlockers.length > 0) {
+    return { kind: 'waiting-on-merge', mergeIssueId: Math.min(...mergeBlockers) };
+  }
+  return { kind: 'eligible' };
 }

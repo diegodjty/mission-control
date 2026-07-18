@@ -129,62 +129,47 @@ export function isBlockedPark(
 }
 
 /**
- * The issue ids that must run SOLO on the integration branch because they sit on
- * a dependency chain being drained (issue 111, option 2). An issue is
- * solo-chained when it shares a dependency edge — in EITHER direction (it
- * `depends_on` the other, or the other `depends_on` it) — with another issue
- * that is **not yet `done`**. Both endpoints of such an edge are returned.
- *
- * Why either direction, and why "not-done":
- *  - A DEPENDENT Run must build on its dependency's committed work. That work is
- *    on the integration branch only if the dependency itself ran solo (its
- *    `commitFinishedMain` landed there) rather than on a sibling `afk/NN`
- *    branch. So the DEPENDENCY must be kept solo too — hence both endpoints.
- *  - Edges to an already-`done` issue don't force solo: a dependency finished
- *    before this drain has its work merged into the integration branch already,
- *    and a dependency finished *during* this drain was itself solo-chained while
- *    its dependent was still open, so its work is on the integration branch by
- *    the time the dependent runs. Ignoring done-edges is what keeps a whole
- *    batch that all `depends_on` a finished foundation issue from being forced
- *    solo — genuine independents still parallelize (issue 111 out-of-scope note).
- *
- * **HITL-aggregator edges are exempt (issue 135).** An edge whose DEPENDENT is
- * `hitl: true` never forces either endpoint solo. Every `/to-issues` batch ends
- * with an HITL batch-QA-walkthrough issue that `depends_on` every other issue in
- * the batch and stays not-done for the entire drain (a human verifies it last).
- * Its edges exist for ELIGIBILITY ordering — never claim the walkthrough early —
- * not BUILD ordering: it produces no code a dependency builds on, so keeping its
- * dependencies solo would serialize the whole batch behind a walkthrough that
- * never lands. Skipping such edges lets the mutually-independent batch issues
- * fan out again (the redesign batch 122–130 regressed to strictly serial because
- * 131's aggregator edges poisoned them). This changes solo-chaining ONLY:
- * `eligibleForRun` is untouched, so the aggregator still cannot start before all
- * its dependencies are done. Genuine build chains between non-HITL issues stay
- * solo-chained exactly as before.
- *
- * PURE and derived from `BacklogIssue.dependsOn`/`status`/`hitl` alone, so the
- * coordinator, the isolation marking, and the tests agree by construction.
+ * A dependent held back purely by an unmerged (not-yet-integrated) dependency
+ * (issue 147, ADR-0021). Every OTHER dependency is `done`; the only thing
+ * standing between this issue and startable is the auto-merge lane landing
+ * `mergeIssueId`. Distinct from an issue blocked on genuinely unfinished work
+ * (still `open`/`wip`) — that case is not a merge wait and is not reported here.
  */
-export function soloChainedIssueIds(issues: BacklogIssue[]): Set<number> {
-  const notDoneIds = new Set(issues.filter((i) => i.status !== 'done').map((i) => i.id));
-  const solo = new Set<number>();
+export interface WaitingOnMerge {
+  /** The held dependent's issue id. */
+  issueId: number;
+  /** The lowest not-yet-integrated dependency id it is waiting on. */
+  mergeIssueId: number;
+}
+
+/**
+ * The open issues held back ONLY by an unmerged dependency — the Map's
+ * "waiting on merge of NN" state (issue 147). An issue qualifies when every
+ * dependency is `done` on disk but at least one is still `finishedUnmergedIds`
+ * (its `afk/` branch hasn't landed on main yet, the same fact `eligibleForRun`
+ * now gates on). Reports the LOWEST such dependency id — once the auto-merge
+ * lane lands it, the next sweep either clears the wait or reports the next one.
+ * An issue with a genuinely not-done dependency is excluded: it is blocked on
+ * unfinished work, not a pending merge, and must not read as "almost there".
+ * PURE and derived from `BacklogIssue.dependsOn`/`status` plus the on-disk scan
+ * alone, so the coordinator and the Map agree by construction.
+ */
+export function waitingOnMergeIssues(
+  issues: BacklogIssue[],
+  finishedUnmergedIds: readonly number[] = [],
+): WaitingOnMerge[] {
+  const unmerged = new Set(finishedUnmergedIds);
+  const byId = new Map(issues.map((i) => [i.id, i]));
+  const result: WaitingOnMerge[] = [];
   for (const issue of issues) {
-    if (!notDoneIds.has(issue.id)) continue;
-    // An HITL dependent's edges are eligibility-only, not build edges (issue
-    // 135): an aggregator/batch-QA issue produces no code its dependencies build
-    // on, so it forces neither itself nor them solo. Skip all its out-edges.
-    if (issue.hitl) continue;
-    for (const dep of issue.dependsOn) {
-      // An edge counts only when BOTH endpoints are still in play (not-done):
-      // then both must stay solo so the dependency's work reaches the
-      // integration branch before the dependent builds on it.
-      if (notDoneIds.has(dep)) {
-        solo.add(issue.id);
-        solo.add(dep);
-      }
-    }
+    if (issue.status !== 'open') continue;
+    const notDone = issue.dependsOn.filter((depId) => byId.get(depId)?.status !== 'done');
+    if (notDone.length > 0) continue;
+    const mergeBlockers = issue.dependsOn.filter((depId) => unmerged.has(depId));
+    if (mergeBlockers.length === 0) continue;
+    result.push({ issueId: issue.id, mergeIssueId: Math.min(...mergeBlockers) });
   }
-  return solo;
+  return result.sort((a, b) => a.issueId - b.issueId);
 }
 
 /** Why a drain stopped. */
@@ -222,6 +207,12 @@ export interface DrainPlan {
   queued: number[];
   /** Whether/why the drain should stop. */
   drain: DrainDecision;
+  /**
+   * Open issues held back ONLY by an unmerged dependency (issue 147) — the
+   * Map's "waiting on merge of NN" state. Populated on every plan; empty when
+   * nothing is waiting purely on a merge.
+   */
+  waitingOnMerge: WaitingOnMerge[];
 }
 
 export interface DrainInput {
@@ -240,6 +231,16 @@ export interface DrainInput {
    * callers/tests without merge state get the normal plan.
    */
   midMerge?: boolean;
+  /**
+   * Issue ids whose `afk/` branch is finished (committed `done`) but not yet
+   * merged into main (issue 147, ADR-0021) — the same on-disk fact afk-scan
+   * produces for `run-eligibility`'s `InFlightRuns.finishedUnmergedIds`. A
+   * dependency in this set does NOT satisfy `eligibleForRun`'s dependency check
+   * even though its issue frontmatter reads `done`; the dependent instead shows
+   * up in `waitingOnMerge` until the auto-merge lane lands it. Optional/absent
+   * ⇒ no dependency is held back for being unmerged (legacy/test callers).
+   */
+  finishedUnmergedIds?: readonly number[];
 }
 
 /**
@@ -383,10 +384,17 @@ export function planDrain(input: DrainInput): DrainPlan {
   // inside the same drain.
   const activeIds = new Set(input.activeRuns.map((r) => r.issueId));
 
+  const finishedUnmergedIds = input.finishedUnmergedIds ?? [];
+
   const eligible = [...input.issues]
     .sort((a, b) => a.id - b.id)
-    .filter((issue) => !activeIds.has(issue.id) && eligibleForRun(issue, input.issues))
+    .filter(
+      (issue) =>
+        !activeIds.has(issue.id) && eligibleForRun(issue, input.issues, finishedUnmergedIds),
+    )
     .map((issue) => issue.id);
+
+  const waitingOnMerge = waitingOnMergeIssues(input.issues, finishedUnmergedIds);
 
   const issueById = new Map(input.issues.map((i) => [i.id, i]));
 
@@ -455,31 +463,20 @@ export function planDrain(input: DrainInput): DrainPlan {
     drain = { stop: false, reason: null, blockedIssueId: null, blockedParkedIssueIds, message: '' };
   }
 
-  // Fill the free slots in ascending id order, but honor the single
-  // integration-branch slot (issue 111): a solo-chained Run works directly on
-  // the integration branch, so at most ONE may be live at a time — two would
-  // collide on the shared tree. Independent Runs isolate into their own
-  // worktrees and fill the remaining slots freely. A solo-chained Run that can't
-  // get the slot (one is already running, or an earlier solo-chained pick took
-  // it this tick) queues, exactly like a Run over the cap. No further Panes open
-  // once the drain is stopping.
-  const solo = soloChainedIssueIds(input.issues);
-  let soloSlotTaken = input.activeRuns.some(
-    (r) => isOccupyingSlot(r) && solo.has(r.issueId),
-  );
+  // Fill the free slots in ascending id order — every eligible issue starts in
+  // its own worktree like any other (issue 147, ADR-0021): solo-chaining and its
+  // single integration-branch slot are retired now that a dependency's work
+  // reaches main via the auto-merge lane rather than a shared solo commit. No
+  // further Panes open once the drain is stopping.
   const startable: number[] = [];
   if (!drain.stop) {
     for (const id of eligible) {
       if (startable.length >= freeSlots) break;
-      if (solo.has(id)) {
-        if (soloSlotTaken) continue;
-        soloSlotTaken = true;
-      }
       startable.push(id);
     }
   }
   const startableSet = new Set(startable);
   const queued = drain.stop ? eligible : eligible.filter((id) => !startableSet.has(id));
 
-  return { startable, queued, drain };
+  return { startable, queued, drain, waitingOnMerge };
 }
