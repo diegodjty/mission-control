@@ -5,7 +5,7 @@ import {
   isParkedHitl,
   isBlockedPark,
   drainAvailability,
-  soloChainedIssueIds,
+  waitingOnMergeIssues,
   type ActiveRun,
 } from './run-coordinator';
 import type { BacklogIssue, IssueStatus } from './backlog-model';
@@ -685,153 +685,113 @@ describe('planDrain — refuses to start on a mid-merge main (issue 24)', () => 
   });
 });
 
-describe('soloChainedIssueIds — dependency chains must stay solo (issue 111)', () => {
-  it('marks BOTH endpoints of an edge between two not-done issues', () => {
-    // 3 depends_on 2, both open: the dependency (2) must land its work on the
-    // integration branch (solo) and the dependent (3) must build on it (solo).
-    const solo = soloChainedIssueIds([mk(1, 'done'), mk(2, 'open'), mk(3, 'open', [2])]);
-    expect([...solo].sort((a, b) => a - b)).toEqual([2, 3]);
+describe('planDrain — the integrated start condition (issue 147, ADR-0021)', () => {
+  it('starts a dependent once its dependency is done AND integrated (no finished-unmerged branch)', () => {
+    const issues = [mk(1, 'done'), mk(2, 'open', [1])];
+    const plan = planDrain({ issues, maxConcurrent: 2, activeRuns: [] });
+    expect(plan.startable).toEqual([2]);
+    expect(plan.waitingOnMerge).toEqual([]);
   });
 
-  it('ignores edges to an already-done dependency — the foundation case', () => {
-    // Everything depends_on the finished foundation issue 1; its work is already
-    // on the integration branch, so no dependent is forced solo. This is what
-    // keeps genuine independents parallelizing (issue 111 out-of-scope note).
-    const solo = soloChainedIssueIds([
-      mk(1, 'done'),
-      mk(2, 'open', [1]),
-      mk(3, 'open', [1]),
-    ]);
-    expect(solo.size).toBe(0);
+  it('holds a dependent whose dependency is done but still finished-unmerged — never a start from stale main', () => {
+    const issues = [mk(1, 'done'), mk(2, 'open', [1])];
+    const plan = planDrain({
+      issues,
+      maxConcurrent: 2,
+      activeRuns: [],
+      finishedUnmergedIds: [1],
+    });
+    expect(plan.startable).toEqual([]);
+    expect(plan.queued).toEqual([]); // not eligible at all, not merely queued past the cap
+    expect(plan.waitingOnMerge).toEqual([{ issueId: 2, mergeIssueId: 1 }]);
   });
 
-  it('does not mark two genuinely independent issues', () => {
-    const solo = soloChainedIssueIds([mk(6, 'open'), mk(7, 'open')]);
-    expect(solo.size).toBe(0);
+  it('clears the wait the moment the lane lands the dependency (finishedUnmergedIds empties)', () => {
+    const issues = [mk(1, 'done'), mk(2, 'open', [1])];
+    const held = planDrain({
+      issues,
+      maxConcurrent: 2,
+      activeRuns: [],
+      finishedUnmergedIds: [1],
+    });
+    expect(held.waitingOnMerge).toEqual([{ issueId: 2, mergeIssueId: 1 }]);
+
+    const landed = planDrain({ issues, maxConcurrent: 2, activeRuns: [] });
+    expect(landed.startable).toEqual([2]);
+    expect(landed.waitingOnMerge).toEqual([]);
   });
 
-  it('marks a chain whose dependency is still wip (active in the drain)', () => {
-    const solo = soloChainedIssueIds([mk(2, 'wip'), mk(3, 'open', [2])]);
-    expect([...solo].sort((a, b) => a - b)).toEqual([2, 3]);
+  it('never reports a genuinely not-done dependency as a merge wait', () => {
+    // 2 depends on 1, which is still `open` — a real block, not a pending merge,
+    // even though 1 also happens to be in `finishedUnmergedIds` (defensive: an
+    // unmerged branch behind an issue whose frontmatter never flipped done).
+    const issues = [mk(1, 'open'), mk(2, 'open', [1])];
+    const plan = planDrain({
+      issues,
+      maxConcurrent: 2,
+      activeRuns: [],
+      finishedUnmergedIds: [1],
+    });
+    expect(plan.waitingOnMerge).toEqual([]);
   });
 
-  it('marks a transitive chain across three not-done issues', () => {
-    const solo = soloChainedIssueIds([
-      mk(2, 'open'),
-      mk(3, 'open', [2]),
-      mk(4, 'open', [3]),
-    ]);
-    expect([...solo].sort((a, b) => a - b)).toEqual([2, 3, 4]);
-  });
-
-  // --- HITL-aggregator edges are exempt (issue 135) --------------------------
-
-  it('does not solo-chain a batch behind an HITL aggregator that depends_on every issue (issue 135)', () => {
-    // The /to-issues batch shape: 2, 3, 4 mutually independent; 9 is the HITL
-    // batch-QA walkthrough that `depends_on` all of them and stays not-done for
-    // the whole drain. Its edges are eligibility-only (never claim the
-    // walkthrough early), not build edges — so none of 2/3/4 is forced solo and
-    // they parallelize up to the cap.
-    const solo = soloChainedIssueIds([
-      mk(2, 'open'),
-      mk(3, 'open'),
-      mk(4, 'open'),
-      mk(9, 'open', [2, 3, 4], true), // hitl aggregator
-    ]);
-    expect(solo.size).toBe(0);
-  });
-
-  it('does not solo-chain the HITL aggregator itself via its own edges (issue 135)', () => {
-    // The exempt endpoint includes the aggregator: its edge into a not-done batch
-    // issue marks neither the dependency NOR the aggregator solo.
-    const solo = soloChainedIssueIds([mk(2, 'open'), mk(9, 'open', [2], true)]);
-    expect(solo.size).toBe(0);
-  });
-
-  it('still solo-chains a genuine build chain even when an HITL aggregator also depends on both (issue 135)', () => {
-    // 3 depends_on 2 (a real build edge, neither HITL) AND the HITL aggregator 9
-    // depends_on both. The aggregator's edges are exempt, but the 3→2 build edge
-    // still forces both endpoints solo, exactly as before.
-    const solo = soloChainedIssueIds([
-      mk(2, 'open'),
-      mk(3, 'open', [2]),
-      mk(9, 'open', [2, 3], true),
-    ]);
-    expect([...solo].sort((a, b) => a - b)).toEqual([2, 3]);
-  });
-
-  it('a non-HITL dependent of an HITL issue is NOT exempt — only the dependent-is-HITL edge is (issue 135)', () => {
-    // The exemption keys on the DEPENDENT being HITL, not the dependency. If a
-    // non-HITL issue 3 genuinely `depends_on` an HITL issue 2 (both not-done),
-    // that edge is a real dependent→dependency edge and still solo-chains both.
-    const solo = soloChainedIssueIds([mk(2, 'open', [], true), mk(3, 'open', [2])]);
-    expect([...solo].sort((a, b) => a - b)).toEqual([2, 3]);
-  });
-});
-
-describe('planDrain — chained Runs serialize on the integration branch (issue 111)', () => {
-  it('starts only ONE of two independent chain roots at a time, though both are eligible', () => {
-    // Two independent chains: 1→2 and 3→4. Roots 1 and 3 are both eligible, but
-    // each is solo (a not-done dependent hangs off it), so they'd collide on the
-    // integration branch — only the lower id starts; the other queues, even
-    // though the cap has room. The independent-parallel model is untouched.
-    const issues = [
-      mk(1, 'open'),
-      mk(2, 'open', [1]),
-      mk(3, 'open'),
-      mk(4, 'open', [3]),
-    ];
+  it('every eligible issue starts in its own worktree like any other — no single-slot cap beyond maxConcurrent', () => {
+    // Two independent chains, 1→2 and 3→4: pre-147 this used to solo-chain both
+    // roots onto a single integration-branch slot. Now both roots start freely
+    // up to the cap; 2 and 4 are still dep-blocked (1 and 3 aren't done yet).
+    const issues = [mk(1, 'open'), mk(2, 'open', [1]), mk(3, 'open'), mk(4, 'open', [3])];
     const plan = planDrain({ issues, maxConcurrent: 3, activeRuns: [] });
-    expect(plan.startable).toEqual([1]);
-    expect(plan.queued).toEqual([3]); // 2 and 4 are dep-blocked, not eligible yet
-  });
-
-  it('still starts an independent Run alongside a chain root — independence parallelizes', () => {
-    // 1 is a chain root (2 depends on it → solo); 5 is independent. Both start:
-    // the solo Run takes the integration-branch slot, the independent Run gets
-    // its own worktree. No regression to genuine concurrency.
-    const issues = [mk(1, 'open'), mk(2, 'open', [1]), mk(5, 'open')];
-    const plan = planDrain({ issues, maxConcurrent: 3, activeRuns: [] });
-    expect(plan.startable).toEqual([1, 5]);
+    expect(plan.startable).toEqual([1, 3]);
     expect(plan.queued).toEqual([]);
   });
 
-  it('holds a chain root while a solo-chained Run is already running', () => {
-    // 1→2 is running solo (1 wip, running). 3→4 is another chain whose root 3 is
-    // eligible — but the single integration-branch slot is taken, so 3 waits.
-    const issues = [
-      mk(1, 'wip'),
-      mk(2, 'open', [1]),
-      mk(3, 'open'),
-      mk(4, 'open', [3]),
-    ];
-    const plan = planDrain({ issues, maxConcurrent: 3, activeRuns: [running(1)] });
-    expect(plan.startable).toEqual([]);
-    expect(plan.queued).toEqual([3]);
-  });
-
-  it('does not constrain purely independent Runs (no chains → unchanged behavior)', () => {
-    const issues = [mk(1, 'open'), mk(2, 'open'), mk(3, 'open')];
-    const plan = planDrain({ issues, maxConcurrent: 2, activeRuns: [] });
-    expect(plan.startable).toEqual([1, 2]);
-    expect(plan.queued).toEqual([3]);
-  });
-
-  it('fills the cap with all independent batch issues under an HITL aggregator (issue 135)', () => {
-    // The redesign-batch regression: N mutually-independent issues plus an HITL
-    // batch-QA walkthrough (9) that `depends_on` all of them. Pre-135 the
-    // aggregator's edges solo-chained the whole batch and the drain started ONE
-    // at a time; now all N fan out up to the cap while the aggregator stays
-    // ineligible (its deps aren't done, so it never appears as startable).
-    const issues = [
-      mk(2, 'open'),
-      mk(3, 'open'),
-      mk(4, 'open'),
-      mk(9, 'open', [2, 3, 4], true),
-    ];
+  it('fills the cap with all independent batch issues under an HITL aggregator — no regression to issue 135', () => {
+    // The redesign-batch regression this issue must not reintroduce: N mutually-
+    // independent issues plus an HITL batch-QA walkthrough (9) depends_on all of
+    // them. With solo-chaining retired outright, all N simply fan out up to the
+    // cap (the aggregator was never solo-chain-exempt code path dependent — it's
+    // just ineligible, deps not done).
+    const issues = [mk(2, 'open'), mk(3, 'open'), mk(4, 'open'), mk(9, 'open', [2, 3, 4], true)];
     const plan = planDrain({ issues, maxConcurrent: 3, activeRuns: [] });
     expect(plan.startable).toEqual([2, 3, 4]);
     expect(plan.queued).toEqual([]);
+  });
+
+  it('a lone eligible issue still plans as startable (solo survives only as ADR-0002 lone-Run placement, decided outside the coordinator)', () => {
+    const issues = [mk(1, 'open')];
+    const plan = planDrain({ issues, maxConcurrent: 3, activeRuns: [] });
+    expect(plan.startable).toEqual([1]);
+  });
+});
+
+describe('waitingOnMergeIssues (issue 147)', () => {
+  it('is empty with no finished-unmerged branches', () => {
+    expect(waitingOnMergeIssues([mk(1, 'done'), mk(2, 'open', [1])], [])).toEqual([]);
+  });
+
+  it('reports the dependent held only by an unmerged dependency', () => {
+    const issues = [mk(1, 'done'), mk(2, 'open', [1])];
+    expect(waitingOnMergeIssues(issues, [1])).toEqual([{ issueId: 2, mergeIssueId: 1 }]);
+  });
+
+  it('reports the LOWEST unmerged dependency id when multiple block the same dependent', () => {
+    const issues = [mk(1, 'done'), mk(3, 'done'), mk(2, 'open', [3, 1])];
+    expect(waitingOnMergeIssues(issues, [1, 3])).toEqual([{ issueId: 2, mergeIssueId: 1 }]);
+  });
+
+  it('excludes an issue with a genuinely not-done dependency — that is a block, not a merge wait', () => {
+    const issues = [mk(1, 'open'), mk(2, 'open', [1])];
+    expect(waitingOnMergeIssues(issues, [1])).toEqual([]);
+  });
+
+  it('excludes wip/done issues — the wait only applies to a not-yet-started open issue', () => {
+    const issues = [mk(1, 'done'), mk(2, 'wip', [1]), mk(3, 'done', [1])];
+    expect(waitingOnMergeIssues(issues, [1])).toEqual([]);
+  });
+
+  it('sorts by ascending dependent issue id', () => {
+    const issues = [mk(1, 'done'), mk(5, 'open', [1]), mk(2, 'open', [1])];
+    expect(waitingOnMergeIssues(issues, [1]).map((w) => w.issueId)).toEqual([2, 5]);
   });
 });
 

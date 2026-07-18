@@ -87,7 +87,6 @@ import {
   isMergedIntoDefaultBranch,
   reconcileMergedWorktrees,
   detectDefaultBranch,
-  enableParallel,
   isParallel,
 } from '../src/main/git-worktree-adapter';
 import { mergeRuns, defaultMergeScriptPath } from '../src/main/run-merge';
@@ -119,7 +118,6 @@ import {
 import { eligibleForRun } from '../src/shared/run-eligibility';
 import {
   planDrain,
-  soloChainedIssueIds,
   type ActiveRun,
   type DrainPlan,
 } from '../src/shared/run-coordinator';
@@ -880,90 +878,239 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Scenario 4b (issue 111) — a dependency chain stays SOLO on the integration
-  // branch even while parallel mode is on for an unrelated leftover worktree, so
-  // the dependent Run builds on its dependency's COMMITTED work rather than a
-  // worktree cut from a stale base.
+  // Scenario 4b (issue 147, ADR-0021) — solo-chaining is retired: a dependency
+  // chain now pipelines through worktrees via the auto-merge lane instead of
+  // forcing both endpoints onto a shared integration-branch slot. Part 1: a
+  // dependency `done` but still finished-unmerged holds its dependent in the
+  // "waiting on merge of NN" state; once the lane lands it, the dependent
+  // becomes startable and its fresh worktree contains the dependency's
+  // committed work. Part 2: a lane PAUSED on the dependency (a predicted
+  // conflict) holds the dependent waiting forever — it never starts.
   // ---------------------------------------------------------------------------
-  it('Scenario 4b: a dependency chain stays solo on the integration branch, so the dependent Run observes its dependency\'s committed work (issue 111)', async () => {
-    ingestFrom(sandbox.issuesDir);
+  it('Scenario 4b (issue 147): a dependency chain pipelines through worktrees via the auto-merge lane — the dependent starts on fresh main once the lane lands its dependency', async () => {
+    const supported = await probeMergeTreeSupport();
+    expect(supported, 'git ≥ 2.38 required for merge previews').toBe(true);
 
-    // A leftover worktree from an unrelated pending merge keeps `.afk-parallel`
-    // ON — the exact state that used to force every subsequent Run into a
-    // worktree cut from the (stale) integration-branch HEAD.
-    const leftover = sandboxIssue(7);
-    await createWorktree(repo, leftover.slug, branchFor(leftover.slug));
-    await runFakeWorker({ repo, worktree: worktreePathFor(repo, leftover.slug), issue: leftover });
-    await enableParallel(repo);
-    expect(isParallel(repo)).toBe(true);
-    const leftoverRun = { issueId: 7, slug: leftover.slug }; // finished-unmerged, kept in the set
-
-    // The chain: A = 02, B = 03 (`depends_on: [2]`). The coordinator marks both
-    // as solo-on-integration-branch because they sit on a dependency edge among
-    // not-done issues in the drain.
+    // The chain: A = 02, B = 03 (`depends_on: [2]`).
     const A = sandboxIssue(2);
     const B = sandboxIssue(3);
+
+    // A's Run: an isolated Run in its OWN worktree, like any other issue now
+    // (issue 147 — no more forcing a chain dependency onto the shared checkout).
+    // A well-behaved worktree Worker commits its own work (fake-worker.ts) —
+    // deliverable + done flip — onto its `afk/` branch.
+    await createWorktree(repo, A.slug, branchFor(A.slug));
+    const trace = await runFakeWorker({ repo, worktree: worktreePathFor(repo, A.slug), issue: A });
+    expect(trace.committed).toBe(true);
+
+    // Engineer the exact on-disk shape ADR-0021 gates on: main's own issue
+    // frontmatter reads `done` for A (its status flip is orthogonal to the git
+    // merge — e.g. a workbench project's shared issue store updates the moment
+    // the Worker finishes) while A's `afk/` branch is STILL unmerged. Only the
+    // afk-scan's finished-unmerged fact — not frontmatter alone — can tell this
+    // apart from a genuinely-integrated dependency (ADR-0021 consequence:
+    // "startability now reads a git-derived fact, not just issue frontmatter").
+    await writeFile(join(repo, 'issues', `${A.slug}.md`), issueFileContent(A, 'done'));
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-m', 'e2e: main sees A done ahead of its merge (issue 147 fixture)');
+
+    const facts = await scanAfkBranches(repo);
+    const finishedUnmergedIds = facts
+      .filter((f) => f.committedStatus === 'done' && !f.mergedIntoMain)
+      .map((f) => f.issueId);
+    expect(finishedUnmergedIds).toContain(2);
+
     const backlog = await readBacklog(repo);
-    const solo = soloChainedIssueIds(backlog.issues);
-    expect(solo.has(2)).toBe(true);
-    expect(solo.has(3)).toBe(true);
-    expect(solo.has(7)).toBe(false); // the leftover is independent
+    expect(backlog.issues.find((i) => i.id === 2)?.status).toBe('done');
+    // Scope the plan to the A/B chain — the rest of the seeded sandbox (04, 06,
+    // 07, 08) is unrelated and would otherwise also read startable, obscuring
+    // the assertion below.
+    const chainIssues = backlog.issues.filter((i) => i.id === 2 || i.id === 3);
 
-    // --- A's Run: placed SOLO on the integration branch despite parallel-on ---
-    const isoA = await applyIsolation(repo, [
-      leftoverRun,
-      { issueId: 2, slug: A.slug, chained: solo.has(2) },
-    ]);
-    // The leftover keeps parallel mode on…
-    expect(isoA.parallel).toBe(true);
-    const placeA = isoA.placements.find((p) => p.issueId === 2)!;
-    // …but the chained dependency lands SOLO on the integration branch, NOT a
-    // worktree cut from a stale base — the core fix (pre-111 this was a worktree).
-    expect(placeA.cwd).toBe(repo);
-    expect(placeA.branch).toBeNull();
-    // The unrelated leftover worktree is untouched (its pending merge is safe).
-    expect(existsSync(worktreePathFor(repo, leftover.slug))).toBe(true);
+    // The coordinator holds B: every dependency is `done`, but 2 is still
+    // finished-unmerged — never a start from a main missing its own prerequisite.
+    const held = planDrain({
+      issues: chainIssues,
+      maxConcurrent: 2,
+      activeRuns: [],
+      finishedUnmergedIds,
+    });
+    expect(held.startable).toEqual([]);
+    expect(held.waitingOnMerge).toEqual([{ issueId: 3, mergeIssueId: 2 }]);
 
-    // A does its code work SOLO in the integration checkout and adds a symbol;
-    // Mission Control owns the solo commit, landing it on the integration branch.
-    await runFakeWorker({ repo, issue: A }); // solo: writes work/02-*.txt, flips done
-    const symbolPath = join(repo, 'work', 'shared-symbol.ts');
-    await writeFile(symbolPath, 'export const FROM_A = 111; // symbol A added\n');
-    await waitForReceipt(2);
-    const commitA = await commitFinishedMain(repo, A.slug);
-    expect(commitA.committed).toBe(true);
-    // A's symbol is now on the integration branch (main).
-    expect(await git(repo, 'ls-files')).toContain('work/shared-symbol.ts');
+    // The lane lands A: warm the real preview pipeline, then fire one sweep
+    // exactly as index.ts would wire it.
+    const previewDeps = realPreviewDeps(supported);
+    await pollScan(
+      previewDeps,
+      (s) => s.previews.length === 1 && s.previews[0].verdict?.kind === 'clean',
+      'issue-147 chain: A settles clean',
+    );
+    const laneSerializer = createRepoSerializer();
+    const outcome = await sweepAutoMergeLane({
+      scan: async () => {
+        const s = await scanReposWithPreviews([repo], previewDeps);
+        return { branches: s.branches, previews: s.previews, midMerge: s.midMerge };
+      },
+      isCleanTree: async () => (await git(repo, 'status', '--porcelain')).trim() === '',
+      hasLiveSoloRun: () => false,
+      runLog: [laneReceipt(2, A.slug, '2026-07-17T08:00:00.000Z')],
+      merge: (slugs) => mergeRuns(repo, slugs, { scriptPath: SCRIPT }),
+      serializer: laneSerializer,
+      serializerKey: normalizeProjectKey(repo),
+    });
+    expect(outcome.kind).toBe('swept');
+    if (outcome.kind !== 'swept') throw new Error('lane held instead of merging A');
 
-    // --- B's Run: its base now includes A's committed work ---
-    // 02 is done, so `soloChainedIssueIds` no longer forces 03 solo — but that's
-    // safe precisely because 02 ran solo and its work is on the integration
-    // branch, so 03's worktree (cut from that HEAD) or a solo 03 both see it
-    // (issue 111 AC1's two allowed forms).
+    // B pipelines: it is now startable, the wait cleared, and applying isolation
+    // to it alone gives it a fresh worktree containing A's committed work.
     const backlog2 = await readBacklog(repo);
-    const isoB = await applyIsolation(repo, [
-      leftoverRun,
-      { issueId: 3, slug: B.slug, chained: soloChainedIssueIds(backlog2.issues).has(3) },
-    ]);
-    const placeB = isoB.placements.find((p) => p.issueId === 3)!;
+    const facts2 = await scanAfkBranches(repo);
+    const stillUnmerged = facts2
+      .filter((f) => f.committedStatus === 'done' && !f.mergedIntoMain)
+      .map((f) => f.issueId);
+    expect(stillUnmerged).not.toContain(2);
+    const chainIssues2 = backlog2.issues.filter((i) => i.id === 2 || i.id === 3);
+    const landed = planDrain({
+      issues: chainIssues2,
+      maxConcurrent: 2,
+      activeRuns: [],
+      finishedUnmergedIds: stillUnmerged,
+    });
+    expect(landed.startable).toEqual([3]);
+    expect(landed.waitingOnMerge).toEqual([]);
 
-    // The core assertion (issue 111 AC5): B's Run OBSERVED A's committed change —
-    // A's symbol is present and readable in B's Run cwd, never missing because B
-    // was cut from a base lacking its dependency's work.
-    const seenByB = await readFile(join(placeB.cwd, 'work', 'shared-symbol.ts'), 'utf8');
-    expect(seenByB).toContain('FROM_A');
+    const isoB = await applyIsolation(repo, [{ issueId: 3, slug: B.slug }]);
+    const placeB = isoB.placements.find((p) => p.issueId === 3)!;
     expect(existsSync(join(placeB.cwd, 'work', `${A.slug}.txt`))).toBe(true);
   });
 
+  it('Scenario 4b-paused (issue 147): a lane paused on the dependency holds the dependent waiting — it never starts', async () => {
+    const supported = await probeMergeTreeSupport();
+    expect(supported, 'git ≥ 2.38 required for merge previews').toBe(true);
+
+    // A fresh two-issue chain (11 -> 12) plus an unrelated sibling (09) whose
+    // clean merge moves the tip out from under 11's predicted merge. The
+    // sibling's id is deliberately LOWER than E's: the preview's sequential
+    // simulation runs in ascending-id order (Scenario 16 precedent), so the
+    // sibling must simulate first (clean) with E's conflicting edit simulated
+    // second — independent of the lane's own finish-order merge sequence.
+    const sibling: SandboxIssue = { id: 9, slug: '09-sibling', title: 'Sibling', status: 'open', dependsOn: [], hitl: false };
+    const E: SandboxIssue = { id: 11, slug: '11-e-chain-root', title: 'E chain root', status: 'open', dependsOn: [], hitl: false };
+    const F: SandboxIssue = { id: 12, slug: '12-f-dependent', title: 'F depends on E', status: 'open', dependsOn: [11], hitl: false };
+    for (const name of await readdir(sandbox.issuesDir)) {
+      await rm(join(sandbox.issuesDir, name));
+    }
+    for (const issue of [E, F, sibling]) {
+      await writeFile(join(sandbox.issuesDir, `${issue.slug}.md`), issueFileContent(issue, issue.status));
+    }
+    await writeFile(join(repo, 'conflict-target.txt'), 'top\nMIDDLE\nbottom\n');
+    await git(repo, 'add', '-A');
+    await git(repo, 'commit', '-m', 'e2e: chain-with-conflict fixture (issue 147)');
+
+    async function makeFinishedBranchFor(issue: SandboxIssue, edit: () => Promise<void>): Promise<void> {
+      await git(repo, 'checkout', '-b', branchFor(issue.slug), 'main');
+      await edit();
+      await writeFile(join(repo, 'issues', `${issue.slug}.md`), issueFileContent(issue, 'done'));
+      await git(repo, 'add', '.');
+      await git(repo, 'commit', '-m', `afk: complete ${issue.slug}`);
+      await git(repo, 'checkout', 'main');
+    }
+
+    // The sibling edits the shared line and finishes cleanly; E ALSO edits the
+    // same line — once the sibling lands, E's predicted merge against the new
+    // tip conflicts (the Scenario-16 fixture shape).
+    await makeFinishedBranchFor(sibling, async () => {
+      await writeFile(join(repo, 'conflict-target.txt'), 'top\nFROM-SIBLING\nbottom\n');
+    });
+    await makeFinishedBranchFor(E, async () => {
+      await writeFile(join(repo, 'conflict-target.txt'), 'top\nFROM-E\nbottom\n');
+    });
+    // Main sees E `done` ahead of its merge, same fixture shape as Part 1.
+    await writeFile(join(repo, 'issues', `${E.slug}.md`), issueFileContent(E, 'done'));
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-m', 'e2e: main sees E done ahead of its (paused) merge');
+
+    const laneLog: RunLogRecord[] = [
+      laneReceipt(9, sibling.slug, '2026-07-17T08:00:00.000Z'),
+      laneReceipt(11, E.slug, '2026-07-17T09:00:00.000Z'),
+    ];
+    const previewDeps = realPreviewDeps(supported);
+    const laneSerializer = createRepoSerializer();
+    const laneSweep = () =>
+      sweepAutoMergeLane({
+        scan: async () => {
+          const s = await scanReposWithPreviews([repo], previewDeps);
+          return { branches: s.branches, previews: s.previews, midMerge: s.midMerge };
+        },
+        isCleanTree: async () => (await git(repo, 'status', '--porcelain')).trim() === '',
+        hasLiveSoloRun: () => false,
+        runLog: laneLog,
+        merge: (slugs) => mergeRuns(repo, slugs, { scriptPath: SCRIPT }),
+        serializer: laneSerializer,
+        serializerKey: normalizeProjectKey(repo),
+      });
+
+    await pollScan(
+      previewDeps,
+      (s) => s.previews.length === 2 && s.previews.every((p) => isSettledVerdict(p.verdict)),
+      'issue-147 paused-chain: previews settle',
+    );
+    const first = await laneSweep();
+    expect(first.kind).toBe('swept'); // the sibling lands first (finish order)
+    if (first.kind !== 'swept') throw new Error('expected the sibling to merge first');
+    expect(first.slug).toBe(sibling.slug);
+
+    // With the sibling landed, re-warm the preview: E's predicted merge against
+    // the NEW tip now conflicts.
+    await pollScan(
+      previewDeps,
+      (s) =>
+        s.previews.length === 1 &&
+        isSettledVerdict(s.previews[0].verdict) &&
+        s.previews[0].verdict?.kind === 'conflicts',
+      'issue-147 paused-chain: E predicted to conflict after the sibling lands',
+    );
+    const second = await laneSweep();
+    expect(second.kind).toBe('paused'); // E's predicted conflict against the new tip
+    if (second.kind !== 'paused') throw new Error('expected E to pause the lane');
+    expect(second.slug).toBe(E.slug);
+
+    // F never starts: E is `done` on main but E's branch is STILL
+    // finished-unmerged (the lane paused on it) — F stays waiting-on-merge on
+    // every replan, never among the startable set.
+    const facts = await scanAfkBranches(repo);
+    const finishedUnmergedIds = facts
+      .filter((f) => f.committedStatus === 'done' && !f.mergedIntoMain)
+      .map((f) => f.issueId);
+    expect(finishedUnmergedIds).toContain(11);
+    const backlog = await readBacklog(repo);
+    const plan = planDrain({
+      issues: backlog.issues,
+      maxConcurrent: 2,
+      activeRuns: [],
+      finishedUnmergedIds,
+    });
+    expect(plan.startable).toEqual([]);
+    expect(plan.waitingOnMerge).toEqual([{ issueId: 12, mergeIssueId: 11 }]);
+
+    // A further sweep re-`paused`s (the lane never merges around the conflict)
+    // — the wait persists, exactly as ADR-0021 describes.
+    const third = await laneSweep();
+    expect(third.kind).toBe('paused');
+    if (third.kind !== 'paused') throw new Error('expected the lane to stay paused on E');
+    expect(third.slug).toBe(E.slug);
+  });
+
   // ---------------------------------------------------------------------------
-  // Scenario 4c (issue 135) — a /to-issues batch is three mutually-independent
-  // issues plus one HITL batch-QA walkthrough that `depends_on` all of them and
-  // stays not-done for the whole drain. The aggregator's edges are eligibility-
-  // only, not build edges, so they must NOT solo-chain the batch: a cap-3 drain
-  // fans all three out into their own worktrees on the very first plan tick,
-  // rather than serializing behind a walkthrough that never lands.
+  // Scenario 4c (issue 135, no regression per issue 147) — a /to-issues batch is
+  // three mutually-independent issues plus one HITL batch-QA walkthrough that
+  // `depends_on` all of them and stays not-done for the whole drain. With
+  // solo-chaining retired outright (issue 147), there is no exemption left to
+  // regress: a cap-3 drain simply fans all three out into their own worktrees on
+  // the very first plan tick, exactly as any independent batch would.
   // ---------------------------------------------------------------------------
-  it('Scenario 4c: a cap-3 drain over 3 independents under an HITL aggregator starts 3 parallel worktree Runs in the first tick (issue 135)', async () => {
+  it('Scenario 4c: a cap-3 drain over 3 independents under an HITL aggregator starts 3 parallel worktree Runs in the first tick (issue 135, no regression)', async () => {
     // Replace the seeded backlog with the batch fixture: three independent
     // non-HITL issues + one HITL aggregator depending on all three. Commit it so
     // HEAD (the worktree base) matches the working tree the Backlog Model reads.
@@ -988,23 +1135,17 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
     expect(aggregator.hitl).toBe(true);
     expect(aggregator.dependsOn.sort((a, b) => a - b)).toEqual([2, 4, 6]);
 
-    // Core of the fix: the aggregator's eligibility edges do NOT solo-chain any
-    // endpoint — neither the three independents nor the aggregator itself.
-    expect([...soloChainedIssueIds(backlog.issues)]).toEqual([]);
-
     // First plan tick, cap 3: all three independents are startable; the
     // aggregator is not eligible (deps not done) so it neither starts nor queues.
     const plan = planDrain({ issues: backlog.issues, maxConcurrent: 3, activeRuns: [] });
     expect(plan.startable).toEqual([2, 4, 6]);
     expect(plan.queued).toEqual([]);
 
-    // Isolating those three startable Runs (none chained) cuts THREE worktrees
-    // and turns parallel mode on — the "3 parallel worktree Runs" the AC demands,
-    // instead of the pre-135 single integration-branch Run.
-    const solo = soloChainedIssueIds(backlog.issues);
+    // Isolating those three startable Runs cuts THREE worktrees and turns
+    // parallel mode on — the "3 parallel worktree Runs" the AC demands.
     const startableRuns = plan.startable.map((id) => {
       const issue = backlog.issues.find((i) => i.id === id)!;
-      return { issueId: id, slug: issue.slug, chained: solo.has(id) };
+      return { issueId: id, slug: issue.slug };
     });
     const iso = await applyIsolation(repo, startableRuns);
     expect(iso.parallel).toBe(true);
@@ -1777,8 +1918,7 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
   it('Scenario 11 (issue 132): two leftover phantom Panes from a prior drain do not shrink a fresh drain — all three eligible issues start in parallel', async () => {
     const backlog = await readBacklog(repo);
     // The real sandbox has ≥3 eligible issues (open, deps met), enough to fill
-    // a cap-3 drain. (Some are chain roots — the sandbox's 02/05 — so isolation
-    // places those solo; the point here is the SLOT budget, proven below.)
+    // a cap-3 drain. The point here is the SLOT budget, proven below.
     const eligibleCount = backlog.issues.filter((i) => eligibleForRun(i, backlog.issues)).length;
     expect(eligibleCount).toBeGreaterThanOrEqual(3);
 
@@ -1804,19 +1944,19 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
     expect(plan.startable).toHaveLength(3);
 
     // And the isolation decision the drive loop feeds the adapter flips parallel
-    // ON and cuts a worktree for each genuinely-independent startable Run — the
-    // ".afk-parallel toggled, worktrees created" the report said never happened.
-    const solo = soloChainedIssueIds(backlog.issues);
+    // ON and cuts a worktree for each startable Run — the ".afk-parallel
+    // toggled, worktrees created" the report said never happened. Solo-chaining
+    // is retired (issue 147): every startable Run isolates purely by
+    // concurrency now, no chained exemption.
     const isolationRuns: IsolationRun[] = plan.startable.map((id) => {
       const issue = backlog.issues.find((i) => i.id === id)!;
-      return { issueId: id, slug: issue.slug, chained: solo.has(id) };
+      return { issueId: id, slug: issue.slug };
     });
     const decision = decideIsolation(isolationRuns);
     expect(decision.parallel).toBe(true);
-    // Every independent (non-chained) startable Run lands in its own worktree.
+    // Every startable Run lands in its own worktree.
     for (const placed of decision.placements) {
-      const expectWorktree = !solo.has(placed.issueId);
-      expect(placed.placement.kind).toBe(expectWorktree ? 'worktree' : 'main');
+      expect(placed.placement.kind).toBe('worktree');
     }
     expect(decision.placements.some((p) => p.placement.kind === 'worktree')).toBe(true);
 
@@ -1834,69 +1974,63 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
   // ---------------------------------------------------------------------------
   // Scenario 12 — issue 134: the drive loop must scope its isolation set to
   // LIVE + FINISHED-UNMERGED Runs. The reported bug: it fed EVERY tracked Run in,
-  // including terminal ones lingering on screen. Once a finished CHAINED Run's
-  // dependency edge resolved (so it stops counting as chained), the unscoped set
-  // handed it a spurious worktree cut and kept `.afk-parallel` enabled round
-  // after round. This drives the SAME composition App.tsx wires — the drive
-  // loop's `needsIsolation` scoping (`runNeedsIsolation`) → soloChainedIssueIds →
+  // including terminal ones lingering on screen — a finished Run whose Pane is
+  // still on screen could get a spurious worktree cut and keep `.afk-parallel`
+  // enabled round after round. This drives the SAME composition App.tsx wires —
+  // the drive loop's `needsIsolation` scoping (`runNeedsIsolation`) →
   // decideIsolation → the real applyIsolation adapter — proving the fix on disk.
+  // (Solo-chaining, issue 111's `chained` framing this scenario originally used,
+  // is retired by issue 147 — the terminal-scoping fix stands on its own.)
   // ---------------------------------------------------------------------------
-  it('Scenario 12 (issue 134): a finished chained Run whose edge resolved is scoped out — no spurious worktree, no .afk-parallel stuck on across rounds', async () => {
+  it('Scenario 12 (issue 134): a finished Run lingering on screen is scoped out — no spurious worktree, no .afk-parallel stuck on across rounds', async () => {
     ingestFrom(sandbox.issuesDir);
 
-    // The 02→03 chain from a PRIOR drain round: 02 (the root) ran SOLO on main
-    // (chained) and finished. Flip it `done` on disk so its edge to 03 has now
-    // resolved — the exact state that used to un-chain 02 and expose the bug.
+    // Two independent issues: 02 already finished (terminal, on main); 04 is
+    // live (running, solo on main — a lone Run per ADR-0002).
     const A = sandboxIssue(2); // 02-second-step — finished, terminal, on main
-    const B = sandboxIssue(3); // 03-blocked-on-02 — now unblocked and live
+    const C = sandboxIssue(4); // 04-independent — running, solo on main
     await writeFile(join(repo, 'issues', `${A.slug}.md`), issueFileContent(A, 'done'));
-    const backlog = await readBacklog(repo);
-    const solo = soloChainedIssueIds(backlog.issues);
-    // 02 is done and 03's only dependency is satisfied → NEITHER is chained now.
-    expect(solo.has(2)).toBe(false);
-    expect(solo.has(3)).toBe(false);
 
     // The drive loop's tracked Runs this round, reduced to the two membership
     // facts App.tsx derives per Run (`runStatusOf === 'running'` → live, and
     // `isIsolated` → in a worktree): 02 lingers TERMINAL (finished, solo on main)
-    // while 03 is LIVE (running, solo on main). Neither is in a worktree.
+    // while 04 is LIVE (running, solo on main). Neither is in a worktree.
     const trackedRuns = [
       { issueId: 2, slug: A.slug, live: false, isolated: false }, // finished on main
-      { issueId: 3, slug: B.slug, live: true, isolated: false }, // running on main
+      { issueId: 4, slug: C.slug, live: true, isolated: false }, // running on main
     ];
 
     // --- The fix: scope the tracked Runs through `runNeedsIsolation` (exactly
     // what App.tsx's `needsIsolation` does in the drive loop) ---
     const scoped: IsolationRun[] = trackedRuns
       .filter((r) => runNeedsIsolation(r))
-      .map((r) => ({ issueId: r.issueId, slug: r.slug, chained: solo.has(r.issueId) }));
-    // The terminal solo Run 02 drops out; only the live 03 survives.
-    expect(scoped.map((r) => r.issueId)).toEqual([3]);
+      .map((r) => ({ issueId: r.issueId, slug: r.slug }));
+    // The terminal Run 02 drops out; only the live 04 survives.
+    expect(scoped.map((r) => r.issueId)).toEqual([4]);
     const fixed = decideIsolation(scoped);
     expect(fixed.parallel).toBe(false);
     expect(fixed.placements).toEqual([
-      { issueId: 3, slug: B.slug, placement: { kind: 'main' } },
+      { issueId: 4, slug: C.slug, placement: { kind: 'main' } },
     ]);
 
     // Drive TWO rounds through the REAL adapter on a clean tree: no worktree is
-    // ever cut (not for the finished 02, not for the solo 03) and `.afk-parallel`
+    // ever cut (not for the finished 02, not for the solo 04) and `.afk-parallel`
     // never turns on — nothing accumulates across drain rounds (AC2).
     for (let round = 0; round < 2; round++) {
       const applied = await applyIsolation(repo, scoped);
       expect(applied.parallel).toBe(false);
       expect(existsSync(worktreePathFor(repo, A.slug))).toBe(false);
-      expect(existsSync(worktreePathFor(repo, B.slug))).toBe(false);
+      expect(existsSync(worktreePathFor(repo, C.slug))).toBe(false);
       expect(isParallel(repo)).toBe(false);
     }
 
     // --- Control (the reported bug): feed EVERY tracked Run in, unscoped ---
-    // 02 (now un-chained) joins 03 → two independent Runs → parallel flips ON and
-    // the FINISHED Run 02 is handed a worktree it should never get. This is the
-    // exact regression the scoping above prevents.
+    // 02 joins 04 → two Runs → parallel flips ON and the FINISHED Run 02 is
+    // handed a worktree it should never get. This is the exact regression the
+    // scoping above prevents.
     const unscoped: IsolationRun[] = trackedRuns.map((r) => ({
       issueId: r.issueId,
       slug: r.slug,
-      chained: solo.has(r.issueId),
     }));
     const regressedDecision = decideIsolation(unscoped);
     expect(regressedDecision.parallel).toBe(true);

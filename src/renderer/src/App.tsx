@@ -109,7 +109,6 @@ import {
 import {
   planDrain,
   drainAvailability,
-  soloChainedIssueIds,
   type ActiveRun,
 } from '../../shared/run-coordinator';
 import { takeoverKindFor, takeoverTarget } from '../../shared/run-takeover';
@@ -1916,23 +1915,21 @@ export function App(): JSX.Element {
       }
 
       // The Runs that need isolation once this one joins = the ones still live
-      // (running or in a worktree) plus the new target, deduped by issueId.
-      // Each carries its own target repo so isolation keys per repo (issue 72),
-      // and a `chained` flag so a Run on a dependency chain stays solo on the
-      // integration branch rather than a stale-based worktree (issue 111).
-      const solo = backlog ? soloChainedIssueIds(backlog.issues) : new Set<number>();
+      // (running or in a worktree) plus the new target, deduped by issueId, each
+      // carrying its own target repo so isolation keys per repo (issue 72).
+      // Solo-chaining is retired (issue 147, ADR-0021): a dependency's work now
+      // reaches main via the auto-merge lane, so every Run isolates purely by
+      // concurrency like any other — no `chained` placement exception.
       const active: IsolationRun[] = runs.filter(needsIsolation).map((r) => ({
         issueId: r.target.issueId,
         slug: slugOf(r.target.issueFileName),
         repoPath: repoForIssueId(r.target.issueId),
-        chained: solo.has(r.target.issueId),
       }));
       const issueRepo = repoForIssueId(target.issueId);
       const isolationRuns = isolationRunSetWith(active, {
         issueId: target.issueId,
         slug: slugOf(target.issueFileName),
         repoPath: issueRepo,
-        chained: solo.has(target.issueId),
       });
 
       // Apply the resolved placements: re-point every tracked Run to its cwd —
@@ -3182,7 +3179,18 @@ export function App(): JSX.Element {
       // (drainGeneration null) or one this drain started counts as before.
       leftover: r.drainGeneration !== null && r.drainGeneration < drainSeq.current,
     }));
-    const plan = planDrain({ issues: plannable, maxConcurrent: cap, activeRuns, midMerge });
+    // A dependency's frontmatter can read `done` while its `afk/` branch hasn't
+    // landed on main yet (issue 147, ADR-0021) — `finishedUnmergedIds` is the
+    // on-disk fact that makes the coordinator hold such a dependent as
+    // "waiting on merge of NN" instead of starting it off a main still missing
+    // its own prerequisite.
+    const plan = planDrain({
+      issues: plannable,
+      maxConcurrent: cap,
+      activeRuns,
+      midMerge,
+      finishedUnmergedIds,
+    });
 
     if (plan.drain.stop) {
       setDraining(false);
@@ -3209,30 +3217,25 @@ export function App(): JSX.Element {
     // worktree — live, or finished-unmerged — plus the ones about to start, each
     // carrying its own target repo (issue 72): isolation keys on concurrency PER
     // REPO, so two startable issues in different repos each stay solo in their
-    // own repo while 2+ in one repo get worktrees.
-    // Each also carries a `chained` flag (issue 111): a Run on a dependency
-    // chain in this drain stays SOLO on the integration branch — where its
-    // dependency's committed work lives — rather than a worktree cut from a
-    // stale base, even when parallel mode is on for independent siblings or a
-    // leftover worktree awaiting merge.
+    // own repo while 2+ in one repo get worktrees. Solo-chaining is retired
+    // (issue 147, ADR-0021): every startable issue isolates purely by
+    // concurrency, in a worktree like any other — a dependent's dependency
+    // reaches main via the auto-merge lane, never a shared solo commit.
     // Terminal SOLO Runs (finished/blocked/parked/stopped on `main`) lingering
     // on screen are scoped OUT via `needsIsolation` (issue 134): feeding them in
-    // used to inflate concurrency and, once a finished chained Run's edge
-    // resolved, hand it a spurious worktree cut that kept `.afk-parallel` stuck
-    // on across drain rounds. This is the same set the manual "▶ Run" path uses.
-    const solo = soloChainedIssueIds(plannable);
+    // used to inflate concurrency and hand a spurious worktree cut that kept
+    // `.afk-parallel` stuck on across drain rounds. This is the same set the
+    // manual "▶ Run" path uses.
     const isolationRuns: IsolationRun[] = [
       ...runs.filter(needsIsolation).map((r) => ({
         issueId: r.target.issueId,
         slug: slugOf(r.target.issueFileName),
         repoPath: repoForIssueId(r.target.issueId),
-        chained: solo.has(r.target.issueId),
       })),
       ...startableIssues.map((i) => ({
         issueId: i.id,
         slug: slugOf(i.fileName),
         repoPath: repoForIssueId(i.id),
-        chained: solo.has(i.id),
       })),
     ];
 
@@ -3355,7 +3358,7 @@ export function App(): JSX.Element {
     };
     // `runLog` is a dependency so a Receipt that lands a beat after its session
     // exits re-plans the drain with the park now visible (issue 64).
-  }, [draining, backlog, runs, cap, projectPath, midMerge, runStatusOf, isIsolated, needsIsolation, runLog, surfaceNarrative, writeDrainJournalFor, issueRepoResolutions, repoForIssueId, workbenchPathsForRun, activeProject, logNote]);
+  }, [draining, backlog, runs, cap, projectPath, midMerge, runStatusOf, isIsolated, needsIsolation, runLog, surfaceNarrative, writeDrainJournalFor, issueRepoResolutions, repoForIssueId, workbenchPathsForRun, activeProject, logNote, finishedUnmergedIds]);
 
   // --- Merge readiness (issue 08, ADR-0002; issue 16) ---------------------
   // Whether a human-triggered Merge is offered — and which branches it targets —

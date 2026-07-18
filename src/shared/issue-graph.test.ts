@@ -127,4 +127,25 @@ describe('deriveIssueState', () => {
       unmet: [{ id: 2, title: '2 — issue 2', status: 'wip' }],
     });
   });
+
+  it('is waiting-on-merge when every dependency is done but one is still finished-unmerged (issue 147)', () => {
+    const one = mk(1, 'done');
+    const two = mk(2, 'open', [1]);
+    expect(deriveIssueState(two, [one, two], [1])).toEqual({
+      kind: 'waiting-on-merge',
+      mergeIssueId: 1,
+    });
+  });
+
+  it('is eligible again once the dependency lands (drops out of finishedUnmergedIds)', () => {
+    const one = mk(1, 'done');
+    const two = mk(2, 'open', [1]);
+    expect(deriveIssueState(two, [one, two], [])).toEqual({ kind: 'eligible' });
+  });
+
+  it('prefers blocked over waiting-on-merge — a genuinely not-done dependency is a real block', () => {
+    const one = mk(1, 'open');
+    const two = mk(2, 'open', [1]);
+    expect(deriveIssueState(two, [one, two], [1]).kind).toBe('blocked');
+  });
 });

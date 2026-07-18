@@ -52,6 +52,21 @@ describe('unmetDependencies', () => {
     const one = mk(1, 'open');
     expect(unmetDependencies(one, [one])).toEqual([]);
   });
+
+  it('treats a done-but-finished-unmerged dependency as unmet (issue 147, ADR-0021)', () => {
+    // 1 is `done` on disk, but its `afk/` branch hasn't merged into main yet —
+    // the dependent must wait for the real merge, never start off a main still
+    // missing its own prerequisite.
+    const one = mk(1, 'done');
+    const two = mk(2, 'open', [1]);
+    expect(unmetDependencies(two, [one, two], [1])).toEqual([1]);
+  });
+
+  it('is empty once the dependency is done AND integrated (no longer in finishedUnmergedIds)', () => {
+    const one = mk(1, 'done');
+    const two = mk(2, 'open', [1]);
+    expect(unmetDependencies(two, [one, two], [])).toEqual([]);
+  });
 });
 
 describe('eligibleForRun', () => {
@@ -81,6 +96,18 @@ describe('eligibleForRun', () => {
   it('is not runnable when the issue is already done', () => {
     const one = mk(1, 'done');
     expect(eligibleForRun(one, [one])).toBe(false);
+  });
+
+  it('is not runnable when a done dependency is finished-unmerged — deps must be done AND integrated (issue 147)', () => {
+    const one = mk(1, 'done');
+    const two = mk(2, 'open', [1]);
+    expect(eligibleForRun(two, [one, two], [1])).toBe(false);
+  });
+
+  it('is runnable again once the dependency lands (drops out of finishedUnmergedIds)', () => {
+    const one = mk(1, 'done');
+    const two = mk(2, 'open', [1]);
+    expect(eligibleForRun(two, [one, two], [])).toBe(true);
   });
 });
 
@@ -141,6 +168,12 @@ describe('runnableNow', () => {
     const one = mk(1, 'done');
     const two = mk(2, 'open', [1]);
     expect(runnableNow(two, [one, two], { finishedUnmergedIds: [2] })).toBe(false);
+  });
+
+  it('is NOT runnable when its dependency is done but finished-unmerged (issue 147) — the same scan set gates both', () => {
+    const one = mk(1, 'done');
+    const two = mk(2, 'open', [1]);
+    expect(runnableNow(two, [one, two], { finishedUnmergedIds: [1] })).toBe(false);
   });
 
   it('stays not-runnable when it was never eligible, regardless of the scan', () => {

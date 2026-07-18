@@ -80,22 +80,23 @@ export function summarizeRunGuidance(
   // An open issue that's actually in flight / finished-unmerged in a worktree is
   // neither runnable nor blocked (its real progress lives on its `afk/` branch),
   // so it's omitted here too — the Map row already shows it running/finished
-  // (issue 21).
-  const inFlightIds = new Set<number>([
-    ...(inFlight.worktreeRunningIds ?? []),
-    ...(inFlight.finishedUnmergedIds ?? []),
-  ]);
+  // (issue 21). Likewise a dependent merely `waiting-on-merge` (issue 147, ADR-
+  // 0021 — every dependency is `done`, but the auto-merge lane hasn't landed
+  // one yet) is not "blocked" in the actionable sense: the Map already shows its
+  // own "waiting on merge of NN" state, so it's omitted here too rather than
+  // reported as a dependency the user needs to unblock.
+  const finishedUnmergedIds = inFlight.finishedUnmergedIds ?? [];
+  const inFlightIds = new Set<number>([...(inFlight.worktreeRunningIds ?? []), ...finishedUnmergedIds]);
   const blocked = issues
     .filter((issue) => issue.status === 'open' && !inFlightIds.has(issue.id))
-    .sort(byIdAsc)
-    .map((issue) => {
-      const state = deriveIssueState(issue, issues);
-      return {
-        id: issue.id,
-        title: issue.title,
-        unmet: state.kind === 'blocked' ? state.unmet : [],
-      };
-    });
+    .map((issue) => ({ issue, state: deriveIssueState(issue, issues, finishedUnmergedIds) }))
+    .filter(({ state }) => state.kind !== 'waiting-on-merge')
+    .sort((a, b) => byIdAsc(a.issue, b.issue))
+    .map(({ issue, state }) => ({
+      id: issue.id,
+      title: issue.title,
+      unmet: state.kind === 'blocked' ? state.unmet : [],
+    }));
   if (blocked.length > 0) return { kind: 'blocked', blocked };
 
   // No open issues at all — everything is done and/or wip.
