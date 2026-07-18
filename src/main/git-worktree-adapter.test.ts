@@ -265,11 +265,12 @@ describe('applyIsolation — the full solo↔parallel lifecycle (real git)', () 
     expect((await listWorktreeSlugs(repo)).sort()).toEqual(['03-a', '04-b']);
   });
 
-  it('an unisolatable workspace root: 2+ Runs stay solo there, no worktrees (issue 94, ADR-0017)', async () => {
+  it('an unisolatable workspace root: 2+ Runs clamp to 1 live + rest queued, no worktrees (issue 94/157, ADR-0017)', async () => {
     // A repo-less project's workspace root is a plain (non-git) directory. Two
-    // no-repo Runs must serialize solo IN that directory — never attempt a git
-    // worktree against a non-repo (which would throw) — so a scaffold Run lands
-    // in the workspace root itself.
+    // no-repo Runs must serialize — never attempt a git worktree against a
+    // non-repo (which would throw) — so only the FIRST lands in the workspace
+    // root; the second queues for that slot rather than colliding on it
+    // (issue 157: the missing enforcement behind the serialize-solo promise).
     const workspace = join(scratch, 'workspace');
     await mkdir(workspace, { recursive: true });
 
@@ -282,8 +283,11 @@ describe('applyIsolation — the full solo↔parallel lifecycle (real git)', () 
     expect(result.parallel).toBe(false);
     expect(result.placements).toEqual([
       { issueId: 1, slug: '01-scaffold-api', cwd: workspace, branch: null },
-      { issueId: 2, slug: '02-scaffold-web', cwd: workspace, branch: null },
     ]);
+    expect(result.queuedIssueIds).toEqual([2]);
+    // The workspace root genuinely isn't a git repo — flagged so the queueing
+    // reads as explained (issue 157's attention item), not silent.
+    expect(result.nonGitRoots).toEqual([workspace]);
     // No worktrees cut from the non-git directory, no parallel flag written.
     expect(existsSync(worktreeBase(workspace))).toBe(false);
     expect(isParallel(workspace)).toBe(false);

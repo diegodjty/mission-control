@@ -101,6 +101,16 @@ export function isParallel(projectPath: string): boolean {
 }
 
 /**
+ * Is `path` an actual git repository (a `.git` dir or worktree file present)?
+ * The real-world probe behind ADR-0017's `isolatable` flag (issue 157): a
+ * project may declare/resolve a target as one that SHOULD host worktrees, but
+ * the directory itself was scaffolded and never `git init`'d, so it can't.
+ */
+export function isGitRepoDir(path: string): boolean {
+  return existsSync(join(path, '.git'));
+}
+
+/**
  * Turn parallel mode on by writing the `issues/.afk-parallel` flag. The flag is
  * Mission Control's own machine state, not something to commit, so it is locally
  * git-ignored as it is written (issue 18) — otherwise it shows as an untracked
@@ -609,7 +619,10 @@ export interface ApplyIsolationOptions {
  * When `options.isolatable === false` the target is a repo-less project's
  * workspace root (ADR-0017): the decision is forced solo, so `reconcile` emits
  * no worktree commands against a non-git directory and every Run's cwd is that
- * workspace root.
+ * workspace root. With 2+ Runs in that set, only the first is placed — the
+ * rest come back in `queuedIssueIds` with no cwd at all (issue 157): the
+ * caller must not spawn a Pane for them, since there is no worktree to keep
+ * them off the one shared tree the first Run is already using.
  */
 export async function applyIsolation(
   projectPath: string,
@@ -636,7 +649,22 @@ export async function applyIsolation(
         },
   );
 
-  return { parallel: desired.parallel, placements };
+  // The "MC expected to isolate but can't" surprise (issue 157): a target the
+  // caller marked unisolatable, actually contended (something queued), and
+  // genuinely lacks a `.git` — surfaced so the queueing reads as explained,
+  // not silent. A legitimately repo-less project with only ONE Run in flight
+  // never flags: there is no queue to explain yet.
+  const nonGitRoots =
+    options.isolatable === false && desired.queuedIssueIds.length > 0 && !isGitRepoDir(projectPath)
+      ? [projectPath]
+      : [];
+
+  return {
+    parallel: desired.parallel,
+    placements,
+    queuedIssueIds: desired.queuedIssueIds,
+    nonGitRoots,
+  };
 }
 
 /** The `NN-slug` for a Run, from its issue file name (`NN-slug.md`). */

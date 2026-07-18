@@ -75,8 +75,18 @@ export interface PlacedRun {
 export interface IsolationDecision {
   /** True when 2+ Runs are concurrent ⇒ parallel mode (`issues/.afk-parallel`). */
   parallel: boolean;
-  /** Placement per Run, ascending by issueId. */
+  /** Placement per Run, ascending by issueId. Excludes queued Runs — see `queuedIssueIds`. */
   placements: PlacedRun[];
+  /**
+   * Issue ids left UNPLACED this round because the target is unisolatable
+   * (issue 157, ADR-0017): with no worktrees to cut, 2+ concurrent Runs would
+   * collide on the one shared tree, so only the FIRST (lowest issueId) is
+   * placed live and the rest queue for the slot to free — exactly as an
+   * over-cap Run queues in the drain today, except this clamp holds regardless
+   * of the drain's own concurrency cap. Ascending, deduped. Always empty for an
+   * isolatable target (worktrees make every Run's concurrency safe).
+   */
+  queuedIssueIds: number[];
 }
 
 /** The `afk/NN-slug` branch a Run's worktree lives on. */
@@ -142,7 +152,12 @@ export interface DecideIsolationOptions {
  *
  * When the target is **unisolatable** (`options.isolatable === false`, ADR-0017)
  * the concurrency check is skipped entirely: the decision is always solo, so a
- * repo-less project's workspace root never has worktrees cut from it.
+ * repo-less project's workspace root never has worktrees cut from it. There is
+ * no worktree to give a 2nd+ concurrent Run either, so — the enforcement issue
+ * 157 adds — only the FIRST Run (lowest issueId) is placed live on the shared
+ * tree; every other Run in the set queues (`queuedIssueIds`) for that slot to
+ * free, exactly as an over-cap Run queues in the drain, except this clamp to 1
+ * holds no matter how high the drain's own cap is set.
  */
 export function decideIsolation(
   runs: IsolationRun[],
@@ -150,11 +165,23 @@ export function decideIsolation(
 ): IsolationDecision {
   const isolatable = options.isolatable ?? true;
   const sorted = [...runs].sort((a, b) => a.issueId - b.issueId);
+
+  if (!isolatable) {
+    const [live, ...queued] = sorted;
+    const placements: PlacedRun[] =
+      live === undefined ? [] : [{ issueId: live.issueId, slug: live.slug, placement: { kind: 'main' } }];
+    return {
+      parallel: false,
+      placements,
+      queuedIssueIds: queued.map((r) => r.issueId),
+    };
+  }
+
   // Parallel mode exists to isolate concurrent INDEPENDENT Runs into worktrees.
   // A chained Run never takes a worktree (it stays solo on the integration
   // branch), so parallel is warranted only when 2+ Runs are live AND at least
   // one of them is independent and would actually get a worktree.
-  const parallel = isolatable && sorted.length >= 2 && sorted.some((r) => !r.chained);
+  const parallel = sorted.length >= 2 && sorted.some((r) => !r.chained);
   const placements: PlacedRun[] = sorted.map((run) => ({
     issueId: run.issueId,
     slug: run.slug,
@@ -163,7 +190,7 @@ export function decideIsolation(
         ? { kind: 'worktree', branch: branchFor(run.slug) }
         : { kind: 'main' },
   }));
-  return { parallel, placements };
+  return { parallel, placements, queuedIssueIds: [] };
 }
 
 /** One repo's slice of a per-repo isolation decision (issue 72, ADR-0015). */

@@ -2480,6 +2480,92 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
     expect(await git(repo, 'ls-files')).toContain('file-06.txt'); // the queued branch landed
     expect(await isMidMerge(repo)).toBe(false);
   });
+
+  // ---------------------------------------------------------------------------
+  // Scenario 17 (issue 157): the live 2026-07-18 incident — a repo-less/non-git
+  // workspace root drained with several eligible issues must serialize, never
+  // collide. Drives the REAL `applyIsolation` adapter (no mocking) round after
+  // round against a plain (non-git) directory: at every tick, at most ONE Run
+  // is placed live; the rest come back `queuedIssueIds` with no cwd at all, so
+  // the caller (App.tsx's drive loop) never spawns a second Pane onto the same
+  // shared tree. Each round "finishes" its one live Run by flipping its issue
+  // `done` (standing in for the Worker's own flip), freeing the slot for the
+  // next round — proving the drain completes serially, not concurrently.
+  // ---------------------------------------------------------------------------
+  it('Scenario 17 (issue 157): 5 eligible issues on a non-git workspace root run one at a time, drain completes serially', async () => {
+    const workspace = join(sandbox.scratch, 'no-repo-workspace');
+    const issuesDir = join(workspace, 'issues');
+    await mkdir(issuesDir, { recursive: true });
+    // 5 independent, standalone issues — no repo ever created here (the
+    // claude-usage incident: CONFIG.repos: {} and workspace_root never
+    // `git init`'d), so `workspace` itself has no `.git`.
+    const issues = Array.from({ length: 5 }, (_, i) => ({
+      id: i + 1,
+      slug: `0${i + 1}-scaffold-step`,
+      title: `Scaffold step ${i + 1}`,
+      status: 'open' as const,
+      dependsOn: [],
+      hitl: false,
+    }));
+    for (const issue of issues) {
+      await writeFile(join(issuesDir, `${issue.slug}.md`), issueFileContent(issue, issue.status));
+    }
+    expect(existsSync(join(workspace, '.git'))).toBe(false);
+
+    const liveCountsByRound: number[] = [];
+    const finishedOrder: number[] = [];
+    let rounds = 0;
+    while (finishedOrder.length < issues.length && rounds < issues.length + 2) {
+      rounds++;
+      const backlog = await readBacklog(workspace);
+      // No externally-tracked Runs: each round's "live" set is derived purely
+      // from what's still `open` on disk plus the isolation clamp below — the
+      // over-cap global concurrency (5) would, on its own, call all 5 eligible
+      // AND startable at once; only applyIsolation's issue-157 clamp holds it
+      // to 1, exactly like the real drive loop's isolationRuns → applyIsolation
+      // → filter-queued sequence in App.tsx.
+      const plan = planDrain({ issues: backlog.issues, maxConcurrent: 5, activeRuns: [] });
+      if (plan.startable.length === 0) break;
+      const isolationRuns: IsolationRun[] = plan.startable.map((id) => ({
+        issueId: id,
+        slug: issues.find((i) => i.id === id)!.slug,
+      }));
+      const iso = await applyIsolation(workspace, isolationRuns, { isolatable: false });
+      liveCountsByRound.push(iso.placements.length);
+      expect(iso.placements.length).toBeLessThanOrEqual(1);
+      // The non-git root is genuinely contended whenever 2+ are eligible.
+      if (isolationRuns.length >= 2) {
+        expect(iso.nonGitRoots).toEqual([workspace]);
+      }
+      // Every placement (at most one) lands in the shared workspace root
+      // itself — never a worktree cut from a non-git directory.
+      for (const p of iso.placements) {
+        expect(p.cwd).toBe(workspace);
+        expect(p.branch).toBeNull();
+      }
+      // "Finish" the one live Run this tick (standing in for the real Worker
+      // flipping its issue `done`), freeing the slot for the next round.
+      for (const p of iso.placements) {
+        const issue = issues.find((i) => i.id === p.issueId)!;
+        await writeFile(join(issuesDir, `${issue.slug}.md`), issueFileContent(issue, 'done'));
+        finishedOrder.push(p.issueId);
+      }
+    }
+
+    // The drain completed serially: all 5 finished, one per round, never more
+    // than one live at any tick, and no worktree was ever cut on this root.
+    expect(finishedOrder.sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5]);
+    expect(liveCountsByRound.every((n) => n <= 1)).toBe(true);
+    expect(liveCountsByRound.filter((n) => n === 1)).toHaveLength(5);
+    for (const issue of issues) {
+      expect(existsSync(worktreePathFor(workspace, issue.slug))).toBe(false);
+    }
+    expect(isParallel(workspace)).toBe(false);
+
+    // Confirm the on-disk backlog now reads fully drained.
+    const finalBacklog = await readBacklog(workspace);
+    expect(finalBacklog.issues.every((i) => i.status === 'done')).toBe(true);
+  });
 });
 
 // -----------------------------------------------------------------------------
