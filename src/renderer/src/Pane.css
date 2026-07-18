@@ -60,11 +60,47 @@
   cursor: pointer;
 }
 
+/* ---- Board wrapper (issue 160) --------------------------------------------
+   Stacks the Feed board above the Pane grid so headless and interactive Runs
+   coexist without overlap: the Feed board takes only the height its compact
+   cards need, the Pane grid (flex: 1 1 auto below) fills the rest. */
+.app__board {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ---- Feed board (issue 160) ------------------------------------------------
+   Headless Runs are NOT tiled into the terminal grid below — a full-size
+   terminal cell for a few lines of status is exactly the empty-space bug this
+   fixes. Instead they wrap as compact cards sized to their own content, dense
+   like a status board, not stretched to fill leftover grid area. */
+.app__feedboard {
+  flex: 0 1 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 8px;
+  padding: 8px;
+  overflow-y: auto;
+}
+
+/* A maximized headless Run (issue 144's take-over target before it's taken)
+   is the only visible card in the board — the board then fills the whole
+   Pane area like the grid does for a maximized Pane. */
+.app__feedboard--max {
+  flex: 1 1 auto;
+}
+
 /* ---- Tiled Run grid (issue 12) -------------------------------------------
    The grid fills the Pane area; its column/row COUNTS come from the pure layout
    function (`gridShape`) as inline styles on the element. `display` is toggled
    grid/none by the view switch. */
 .app__grid {
+  display: grid;
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
@@ -92,6 +128,20 @@
 
 .app__tile--max {
   border-color: var(--teal-border);
+}
+
+/* A Feed card in the board: sized to its content (RunFeed has no fixed
+   height), width capped so a status board reads as a dense grid of cards
+   rather than one card per row. Maximizing it (take-over target) drops the
+   cap so it fills the board like a maximized Pane fills the grid. */
+.app__tile--feed {
+  flex: 1 1 320px;
+  max-width: 420px;
+}
+
+.app__tile--feed.app__tile--max {
+  flex: 1 1 100%;
+  max-width: none;
 }
 
 /* ---- Tile header: names the Run and its issue, scannable across a grid ----
