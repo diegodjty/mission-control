@@ -281,6 +281,20 @@ export const IpcChannel = {
    */
   IssueFileDelete: 'issue:delete-file',
   /**
+   * renderer → main (invoke): read the persisted checked flags for one
+   * parked issue's interactive HITL checklist (issue 156) — app-level
+   * userData state, keyed by project + issue file, aligned to the
+   * checklist's current item count. Resolves to a ChecklistStateResult.
+   */
+  ChecklistStateGet: 'checklist:get-state',
+  /**
+   * renderer → main (invoke): toggle one checklist item's checked flag and
+   * persist it (issue 156). Resolves to the resulting (aligned) flags —
+   * ChecklistStateResult — so the UI stays in sync even if a concurrent
+   * toggle raced it.
+   */
+  ChecklistStateToggle: 'checklist:toggle-state',
+  /**
    * renderer → main (send): watch a project's planning roots (issue 83,
    * ADR-0016) — the workbench project dir (top-level PRDs + `issues/`) and
    * the repo's `CONTEXT.md` + `docs/adr/` — for the Planning view's live
@@ -1254,6 +1268,26 @@ export interface IssueFileWriteResult {
   error: string | null;
 }
 
+/** Read or toggle a parked issue's interactive HITL checklist state (issue 156). */
+export interface ChecklistStateGetRequest {
+  /** The Project key the checklist state is scoped under. */
+  projectPath: string;
+  /** The plain `NN-slug.md` file name whose checklist this is. */
+  fileName: string;
+  /** How many items the current checklist parse has (for alignment). */
+  itemCount: number;
+}
+
+export interface ChecklistStateToggleRequest extends ChecklistStateGetRequest {
+  /** The item index to flip. */
+  index: number;
+}
+
+export interface ChecklistStateResult {
+  /** The checked flags, in checklist order, aligned to `itemCount`. */
+  checked: boolean[];
+}
+
 /**
  * Watch (or, with an empty `workbenchDir`, stop watching) a project's planning
  * roots for the Planning view's live doc preview (issue 83, ADR-0016).
@@ -1477,6 +1511,14 @@ export interface MissionControlApi {
    * workbench auto-committed.
    */
   deleteIssueFile(req: IssueFileDeleteRequest): Promise<IssueFileWriteResult>;
+  /**
+   * Read the persisted checked flags for one parked issue's interactive
+   * HITL checklist (issue 156), aligned to the checklist's current item
+   * count.
+   */
+  getChecklistState(req: ChecklistStateGetRequest): Promise<ChecklistStateResult>;
+  /** Toggle one checklist item's checked flag and persist it (issue 156). */
+  toggleChecklistItem(req: ChecklistStateToggleRequest): Promise<ChecklistStateResult>;
   /**
    * Start (or, with an empty `workbenchDir`, stop) the Planning view's live
    * doc watch over the project's planning roots (issue 83).

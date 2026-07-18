@@ -74,6 +74,18 @@ export function latestReceiptOutcomeFor(
   return latestReceiptsByIssue(runLog).get(issueId)?.outcome ?? null;
 }
 
+/**
+ * The latest Receipt record for `issueId`, or null when none exists — the
+ * full record (issue 156's checklist reads its `detail` body), same
+ * newest-`capturedAt`-wins rule as `latestReceiptOutcomeFor`.
+ */
+export function latestReceiptFor(
+  runLog: readonly RunLogRecord[],
+  issueId: number,
+): RunLogRecord | null {
+  return latestReceiptsByIssue(runLog).get(issueId) ?? null;
+}
+
 /** The facts about one tracked Run the missing-Receipt audit needs. */
 export interface AuditedRun {
   issueId: number;

@@ -39,6 +39,7 @@ import { createPreviewCoordinator } from './merge-preview-coordinator';
 import { scanReposWithPreviews } from './merge-preview-scan';
 import { GIT_FLOOR_NOTE } from '../shared/git-version';
 import { RunLogStore } from './run-log-store';
+import { ChecklistStateStore } from './checklist-state-store';
 import { ReceiptWatcher } from './receipt-watcher';
 import { PlanningWatcher } from './planning-watcher';
 import { commitWorkbenchPaths, commitWorkbenchProject } from './workbench-git';
@@ -93,6 +94,9 @@ import {
   type IssueFileReadRequest,
   type IssueFileReadResult,
   type IssueFileWriteResult,
+  type ChecklistStateGetRequest,
+  type ChecklistStateToggleRequest,
+  type ChecklistStateResult,
   type IssueStatusObserveRequest,
   type IssueStatusObserveResult,
   type LauncherListResult,
@@ -555,6 +559,11 @@ const WORKBENCH_ROOT = join(homedir(), 'Workbench');
 // answers from memory, synchronously.
 let attentionLastSeen: AttentionLastSeenStore;
 
+// The interactive HITL checklist's checked flags (issue 156): app-level
+// userData state, keyed by project + issue file — ephemeral QA progress,
+// never a workbench commit. Instantiated in `whenReady`.
+let checklistStateStore: ChecklistStateStore;
+
 // The Receipt capture edge (issue 56, ADR-0013): watches each Project's
 // `issues/completions/` (checkout + live worktrees) for Worker Receipts, keyed
 // per renderer WebContents like the Backlog Watcher, so a closing Window never
@@ -708,6 +717,31 @@ function registerIpc(): void {
       const outcome = await deleteIssueFile(issuesRootFor(req.projectPath), req?.fileName ?? '');
       if (outcome.ok) commitIssueFileOp(req.projectPath, req.fileName, 'deleted');
       return outcome;
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannel.ChecklistStateGet,
+    (_event, req: ChecklistStateGetRequest): ChecklistStateResult => {
+      const checked = checklistStateStore.get(
+        normalizeProjectKey(req.projectPath),
+        req?.fileName ?? '',
+        req?.itemCount ?? 0,
+      );
+      return { checked };
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannel.ChecklistStateToggle,
+    async (_event, req: ChecklistStateToggleRequest): Promise<ChecklistStateResult> => {
+      const checked = await checklistStateStore.toggle(
+        normalizeProjectKey(req.projectPath),
+        req?.fileName ?? '',
+        req?.index ?? -1,
+        req?.itemCount ?? 0,
+      );
+      return { checked };
     },
   );
 
@@ -1670,6 +1704,8 @@ app.whenReady().then(async () => {
   // first derivation already filters against them (issue 80).
   attentionLastSeen = new AttentionLastSeenStore(app.getPath('userData'));
   await attentionLastSeen.load();
+  checklistStateStore = new ChecklistStateStore(app.getPath('userData'));
+  await checklistStateStore.load();
   // OS notifications when the drain needs the human (issue 138): the pure
   // decision + dedupe live in `shared/attention-notifications`; the thin adapter
   // shows the native `Notification` and routes a click through `focusAndNavigate`.
