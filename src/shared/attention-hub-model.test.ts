@@ -20,15 +20,26 @@ import {
   advanceLastSeen,
   buildAttentionHub,
   deriveAttention,
+  deriveCuratorReportItems,
   kindLabel,
+  markDebriefSeen,
+  markReportSeen,
   mergeBriefing,
   needsYouByProject,
   needsYouCount,
   parseLastSeen,
+  parseSeenDebriefs,
+  parseSeenReports,
+  projectDirNameFromKey,
+  scopeAttentionToWindow,
   serializeLastSeen,
+  serializeSeenDebriefs,
+  serializeSeenReports,
+  shouldOfferDebrief,
   workbenchProjectPath,
   type AttentionInput,
   type AttentionItem,
+  type CuratorReportFile,
 } from './attention-hub-model';
 
 // ===========================================================================
@@ -671,5 +682,249 @@ describe('workbenchProjectPath', () => {
     expect(workbenchProjectPath('/root', '')).toBeNull();
     expect(workbenchProjectPath('/root', '../etc')).toBeNull();
     expect(workbenchProjectPath('/root', 'a/b')).toBeNull();
+  });
+});
+
+describe('projectDirNameFromKey — the inverse of workbenchProjectPath (issue 150)', () => {
+  it('recovers the directory name when the key sits directly under the root', () => {
+    expect(projectDirNameFromKey('/Users/x/Workbench', '/Users/x/Workbench/alpha')).toBe('alpha');
+  });
+
+  it('tolerates a trailing slash on the root', () => {
+    expect(projectDirNameFromKey('/Users/x/Workbench/', '/Users/x/Workbench/alpha')).toBe('alpha');
+  });
+
+  it('is null for a legacy key (a repo path elsewhere, not under the root)', () => {
+    expect(projectDirNameFromKey('/Users/x/Workbench', '/Users/x/repo-a')).toBeNull();
+  });
+
+  it('is null for a nested path (not a bare directory name) or malformed input', () => {
+    expect(projectDirNameFromKey('/Users/x/Workbench', '/Users/x/Workbench/alpha/sub')).toBeNull();
+    expect(projectDirNameFromKey('', '/Users/x/Workbench/alpha')).toBeNull();
+    expect(projectDirNameFromKey('/Users/x/Workbench', '')).toBeNull();
+    expect(projectDirNameFromKey('/Users/x/Workbench', '/Users/x/Workbench/')).toBeNull();
+  });
+
+  it('round-trips with workbenchProjectPath', () => {
+    const path = workbenchProjectPath('/Users/x/Workbench', 'alpha');
+    expect(projectDirNameFromKey('/Users/x/Workbench', path as string)).toBe('alpha');
+  });
+});
+
+describe('scopeAttentionToWindow — own project first-class, elsewhere collapsed (issue 150)', () => {
+  const items: AttentionItem[] = [
+    item({ project: 'alpha', id: 'alpha:hitl-park:5', issueId: 5 }),
+    item({ project: 'alpha', kind: 'blocked-run', id: 'alpha:blocked-run:7', issueId: 7 }),
+    item({ project: 'beta', id: 'beta:hitl-park:1', issueId: 1 }),
+    item({ project: 'gamma', kind: 'setup-gate', id: 'gamma:setup-gate:x', issueId: 2 }),
+  ];
+
+  it('shows the own project expanded and groups everything else as elsewhere counts', () => {
+    const hub = buildAttentionHub(items);
+    const view = scopeAttentionToWindow(hub, 'alpha');
+    expect(view.own?.project).toBe('alpha');
+    expect(view.own?.items.map((i) => i.id)).toEqual(['alpha:hitl-park:5', 'alpha:blocked-run:7']);
+    // beta has the park, so it floats first even collapsed — the hub's urgency
+    // order carries straight through to the collapsed line.
+    expect(view.elsewhere).toEqual([
+      { project: 'beta', needsYou: 1 },
+      { project: 'gamma', needsYou: 1 },
+    ]);
+    expect(view.elsewhereTotal).toBe(2);
+  });
+
+  it('own is null when the Window project has no actionable items', () => {
+    const hub = buildAttentionHub(items);
+    const view = scopeAttentionToWindow(hub, 'delta');
+    expect(view.own).toBeNull();
+    expect(view.elsewhere.map((e) => e.project)).toEqual(['alpha', 'beta', 'gamma']);
+    expect(view.elsewhereTotal).toBe(4);
+  });
+
+  it('own is null and every group is elsewhere when no project is open (null)', () => {
+    const hub = buildAttentionHub(items);
+    const view = scopeAttentionToWindow(hub, null);
+    expect(view.own).toBeNull();
+    expect(view.elsewhere).toHaveLength(3);
+    expect(view.elsewhereTotal).toBe(4);
+  });
+
+  it('empty states: no items at all yields no own group and no elsewhere', () => {
+    const view = scopeAttentionToWindow(buildAttentionHub([]), 'alpha');
+    expect(view.own).toBeNull();
+    expect(view.elsewhere).toEqual([]);
+    expect(view.elsewhereTotal).toBe(0);
+  });
+
+  it('elsewhere is empty when the own project is the only one with items', () => {
+    const hub = buildAttentionHub([item({ project: 'alpha', id: 'alpha:hitl-park:5', issueId: 5 })]);
+    const view = scopeAttentionToWindow(hub, 'alpha');
+    expect(view.own?.project).toBe('alpha');
+    expect(view.elsewhere).toEqual([]);
+    expect(view.elsewhereTotal).toBe(0);
+  });
+});
+
+// ===========================================================================
+// Curator reports — report-file → item mapping + seen-state (issue 151)
+// ===========================================================================
+
+const reportFile = (name: string, frontmatter: string): CuratorReportFile => ({
+  name,
+  content: `---\n${frontmatter}\n---\n# Curator pass\n\nbody`,
+});
+
+describe('deriveCuratorReportItems — report-file → item summary mapping', () => {
+  it('derives one item per unseen report, summarizing outcome + proposal count', () => {
+    const items = deriveCuratorReportItems(
+      [reportFile('2026-07-17.md', 'outcome: defects-found\nproposals: 2\nfinished: 2026-07-17T14:57:52Z')],
+      new Set(),
+    );
+    expect(items).toEqual([
+      {
+        project: 'tools',
+        kind: 'curator-report',
+        issueId: null,
+        fileRef: 'tools/curator-reports/2026-07-17.md',
+        text: 'curator pass 2026-07-17 — defects-found · 2 proposals',
+        id: 'curator-report:2026-07-17.md',
+      },
+    ]);
+  });
+
+  it('singular "proposal" for exactly one, and omits the count entirely for zero', () => {
+    const [one] = deriveCuratorReportItems(
+      [reportFile('2026-07-05.md', 'outcome: clean\nproposals: 1')],
+      new Set(),
+    );
+    expect(one.text).toBe('curator pass 2026-07-05 — clean · 1 proposal');
+
+    const [zero] = deriveCuratorReportItems(
+      [reportFile('2026-07-05.md', 'outcome: clean\nproposals: 0')],
+      new Set(),
+    );
+    expect(zero.text).toBe('curator pass 2026-07-05 — clean');
+  });
+
+  it('a seen report name is excluded — the seen-once-opened rule', () => {
+    const files = [
+      reportFile('2026-07-05.md', 'outcome: clean\nproposals: 0'),
+      reportFile('2026-07-17.md', 'outcome: defects-found\nproposals: 2'),
+    ];
+    const items = deriveCuratorReportItems(files, new Set(['2026-07-05.md']));
+    expect(items.map((i) => i.id)).toEqual(['curator-report:2026-07-17.md']);
+  });
+
+  it('orders newest report first (by file name)', () => {
+    const items = deriveCuratorReportItems(
+      [reportFile('2026-07-05.md', 'outcome: clean'), reportFile('2026-07-17.md', 'outcome: clean')],
+      new Set(),
+    );
+    expect(items.map((i) => i.fileRef)).toEqual([
+      'tools/curator-reports/2026-07-17.md',
+      'tools/curator-reports/2026-07-05.md',
+    ]);
+  });
+
+  it('a non-.md file (the curator\'s log files) never derives an item', () => {
+    const items = deriveCuratorReportItems(
+      [{ name: 'launchd.log', content: 'outcome: clean' }],
+      new Set(),
+    );
+    expect(items).toEqual([]);
+  });
+
+  it('malformed/missing frontmatter degrades to a generic label, never a throw', () => {
+    const items = deriveCuratorReportItems([{ name: '2026-07-17.md', content: 'no frontmatter here' }], new Set());
+    expect(items[0].text).toBe('curator pass 2026-07-17 — unknown outcome');
+  });
+
+  it('is total against junk input: non-array, null entries, missing fields', () => {
+    // @ts-expect-error deliberately malformed input — must never throw
+    expect(deriveCuratorReportItems(null, new Set())).toEqual([]);
+    expect(deriveCuratorReportItems([null as unknown as CuratorReportFile], new Set())).toEqual([]);
+  });
+
+  it('kindLabel renders the curator-report badge text', () => {
+    expect(kindLabel('curator-report')).toBe('REPORT');
+  });
+});
+
+describe('curator-report seen-state transitions', () => {
+  it('parseSeenReports: missing/empty content is the empty list (everything unseen)', () => {
+    expect(parseSeenReports(null)).toEqual([]);
+    expect(parseSeenReports('')).toEqual([]);
+  });
+
+  it('parseSeenReports: junk JSON or a non-array degrades to empty', () => {
+    expect(parseSeenReports('not json')).toEqual([]);
+    expect(parseSeenReports('{"a":1}')).toEqual([]);
+  });
+
+  it('parseSeenReports: filters non-string / empty-string entries', () => {
+    expect(parseSeenReports(JSON.stringify(['a.md', 42, '', null, 'b.md']))).toEqual(['a.md', 'b.md']);
+  });
+
+  it('markReportSeen: adds a new name, is idempotent, and dedupes existing input', () => {
+    expect(markReportSeen([], '2026-07-17.md')).toEqual(['2026-07-17.md']);
+    expect(markReportSeen(['2026-07-17.md'], '2026-07-17.md')).toEqual(['2026-07-17.md']);
+    expect(markReportSeen(['a.md', 'a.md', 'b.md'], 'c.md').sort()).toEqual(['a.md', 'b.md', 'c.md']);
+  });
+
+  it('markReportSeen: a blank/non-string name is a no-op (still deduped)', () => {
+    expect(markReportSeen(['a.md', 'a.md'], '')).toEqual(['a.md']);
+  });
+
+  it('serializeSeenReports: sorted, deduped, parses back to the same set', () => {
+    const serialized = serializeSeenReports(['b.md', 'a.md', 'a.md']);
+    expect(parseSeenReports(serialized)).toEqual(['a.md', 'b.md']);
+  });
+
+  it('round-trips through a full mark → serialize → parse cycle', () => {
+    let names = parseSeenReports(null);
+    names = markReportSeen(names, '2026-07-05.md');
+    const serialized = serializeSeenReports(names);
+    expect(parseSeenReports(serialized)).toEqual(['2026-07-05.md']);
+  });
+});
+
+// ===========================================================================
+// Debrief affordance — once-per-drain offer decision (issue 152)
+// ===========================================================================
+
+describe('debrief affordance — once-per-journal-entry offer', () => {
+  it('a new journal-entry key offers the affordance', () => {
+    expect(shouldOfferDebrief('mission-control:2026-07-18.md', new Set())).toBe(true);
+  });
+
+  it('a seen journal-entry key never offers again', () => {
+    expect(
+      shouldOfferDebrief('mission-control:2026-07-18.md', new Set(['mission-control:2026-07-18.md'])),
+    ).toBe(false);
+  });
+
+  it('a blank key never offers — no journal entry landed, nothing to debrief', () => {
+    expect(shouldOfferDebrief('', new Set())).toBe(false);
+  });
+
+  it('markDebriefSeen: adds a new key, is idempotent, and dedupes existing input', () => {
+    expect(markDebriefSeen([], 'a:2026-07-18.md')).toEqual(['a:2026-07-18.md']);
+    expect(markDebriefSeen(['a:2026-07-18.md'], 'a:2026-07-18.md')).toEqual(['a:2026-07-18.md']);
+    expect(markDebriefSeen(['a', 'a', 'b'], 'c').sort()).toEqual(['a', 'b', 'c']);
+  });
+
+  it('markDebriefSeen: a blank/non-string key is a no-op (still deduped)', () => {
+    expect(markDebriefSeen(['a', 'a'], '')).toEqual(['a']);
+  });
+
+  it('round-trips through mark → serialize → parse, and the offer decision flips', () => {
+    const key = 'mission-control:2026-07-18.md';
+    let seen = parseSeenDebriefs(null);
+    expect(shouldOfferDebrief(key, new Set(seen))).toBe(true);
+    seen = markDebriefSeen(seen, key);
+    const serialized = serializeSeenDebriefs(seen);
+    const reparsed = parseSeenDebriefs(serialized);
+    expect(reparsed).toEqual([key]);
+    expect(shouldOfferDebrief(key, new Set(reparsed))).toBe(false);
   });
 });

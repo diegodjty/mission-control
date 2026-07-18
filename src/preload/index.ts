@@ -33,6 +33,12 @@ import {
   type PlanningDocReadRequest,
   type PlanningDocReadResult,
   type PlanningWatchRequest,
+  type CuratorReportReadRequest,
+  type CuratorReportReadResult,
+  type CuratorReportMarkSeenRequest,
+  type CuratorReportMarkSeenResult,
+  type CoreProposalReadRequest,
+  type CoreProposalReadResult,
   type QuickFixCreateRequest,
   type QuickFixCreateResult,
   type IssueFileReadRequest,
@@ -217,6 +223,17 @@ const api: MissionControlApi = {
 
   readPlanningDoc: (req: PlanningDocReadRequest): Promise<PlanningDocReadResult> =>
     ipcRenderer.invoke(IpcChannel.PlanningDocRead, req),
+
+  readCuratorReport: (req: CuratorReportReadRequest): Promise<CuratorReportReadResult> =>
+    ipcRenderer.invoke(IpcChannel.CuratorReportRead, req),
+
+  markCuratorReportSeen: (
+    req: CuratorReportMarkSeenRequest,
+  ): Promise<CuratorReportMarkSeenResult> =>
+    ipcRenderer.invoke(IpcChannel.CuratorReportMarkSeen, req),
+
+  readCoreProposal: (req: CoreProposalReadRequest): Promise<CoreProposalReadResult> =>
+    ipcRenderer.invoke(IpcChannel.CoreProposalRead, req),
 
   spawnPty: (req: PtySpawnRequest): Promise<PtySpawnResult> =>
     ipcRenderer.invoke(IpcChannel.PtySpawn, req),

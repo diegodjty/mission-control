@@ -790,6 +790,78 @@ body {
   border-color: var(--border-strong);
 }
 
+/* ---- Elsewhere: other Projects' items, collapsed to one quiet line
+   (issue 150) — Window identity stays intact; nothing is lost, it's just
+   not expanded here. ---- */
+.attention__elsewhere {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.attention__elsewhere-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  font-size: 12px;
+  color: var(--fg-mute);
+  background: transparent;
+  border: 1px dashed var(--border-strong);
+  border-radius: 10px;
+  padding: 10px 14px;
+  cursor: pointer;
+}
+
+.attention__elsewhere-summary:hover {
+  color: var(--fg-soft);
+  border-color: var(--border-teal);
+}
+
+.attention__elsewhere-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--fg-mute);
+}
+
+.attention__elsewhere-text {
+  flex: 1 1 auto;
+}
+
+.attention__elsewhere-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.attention__elsewhere-open {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+  font: inherit;
+  font-size: 12px;
+  color: var(--fg-mute);
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+
+.attention__elsewhere-open:hover {
+  color: var(--teal);
+  background: var(--surface-2);
+}
+
 /* Parked HITL — the most urgent kind — gets an amber emphasis, per the mock. */
 .attention__item--hitl-park {
   border-color: var(--amber-border);
@@ -855,6 +927,113 @@ body {
   color: var(--green-soft);
   border-color: var(--green-border);
   background: var(--green-bg);
+}
+
+.attention__badge--curator-report {
+  color: var(--blue);
+  border-color: var(--teal-border);
+  background: var(--teal-bg);
+}
+
+/* Curator-report section (issue 151): global, always visible, above the
+   briefing — the same group-header/list rendering, its own class only so it
+   isn't mistaken for a Project group. */
+.attention__curator-reports {
+  margin-bottom: 14px;
+}
+
+/* The rendered-doc modal (issue 151): a curator report, or a CORE proposal's
+   proposed-vs-current diff, read-only, reusing the Planning preview's
+   markdown rendering so the two surfaces never look inconsistent. */
+.attention__modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+
+.attention__modal {
+  width: min(920px, 92vw);
+  height: min(720px, 86vh);
+  background: var(--bg1);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+}
+
+.attention__modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-strong);
+  flex: 0 0 auto;
+}
+
+.attention__modal-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.attention__modal-close {
+  background: transparent;
+  border: none;
+  color: var(--fg-mute);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+}
+
+.attention__modal-close:hover {
+  color: var(--fg);
+}
+
+.attention__modal-body {
+  flex: 1 1 auto;
+  overflow: hidden;
+  display: flex;
+}
+
+.attention__modal-body--split .attention__doc-pane:first-child {
+  border-right: 1px solid var(--border-strong);
+}
+
+.attention__doc-pane {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.attention__doc-pane-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border-strong);
+  flex: 0 0 auto;
+}
+
+.attention__doc-pane-body {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 12px 14px;
+}
+
+.attention__error {
+  color: var(--red-soft);
+  font-size: 12px;
 }
 
 /* An Inbox click-through's file reference, above the Map (issue 80). */

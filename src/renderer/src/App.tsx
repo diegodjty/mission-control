@@ -669,6 +669,21 @@ export function App(): JSX.Element {
   // dedupes by key; each click is deliberately its own delivery).
   const planningStageSeq = useRef(0);
 
+  // The Just-talk Pane's own submit-pump (issue 152's Debrief affordance
+  // reuses the issue-91 type-only pattern): a dedicated instance so its
+  // defer-while-typing gate is the talk session's own compose state, not the
+  // Dispatcher's or Planning's.
+  const talkTyping = useRef<TypingState>(INITIAL_TYPING_STATE);
+  const talkPumpRef = useRef<DispatcherPump | null>(null);
+  if (talkPumpRef.current === null) {
+    talkPumpRef.current = createDispatcherPump({
+      write: (sessionId, data) => window.mc.writePty({ sessionId, data }),
+      canFlush: (now) => canFlushChat(talkTyping.current, now),
+    });
+  }
+  const talkPump = talkPumpRef.current;
+  const [talkFocusSignal, setTalkFocusSignal] = useState(0);
+
   // --- Run state -----------------------------------------------------------
   const [runs, setRuns] = useState<TrackedRun[]>([]);
   // Each solo Run's Receipt-aware auto-commit lifecycle (issues 25 + 59), keyed
@@ -744,6 +759,10 @@ export function App(): JSX.Element {
   const [draining, setDraining] = useState(false);
   const [cap, setCap] = useState(2);
   const [drainMessage, setDrainMessage] = useState('');
+  // The "Debrief this drain" affordance (issue 152): offered at most once per
+  // drain-end journal entry (main's DebriefSeenStore is the seen-state
+  // authority; this just reflects its verdict for the current drain).
+  const [debriefAvailable, setDebriefAvailable] = useState(false);
 
   // --- Dispatcher state (issue 35, ADR-0010) -------------------------------
   // The conversational orchestrator for a drain: spun up WHEN A DRAIN STARTS
@@ -1049,6 +1068,8 @@ export function App(): JSX.Element {
     setMaximizedId(null);
     setDraining(false);
     setDrainMessage('');
+    setDebriefAvailable(false);
+    talkPumpRef.current?.reset();
     // The Dispatcher is per-Project (ADR-0010): drop it on a switch so the new
     // Project never inherits the previous one's orchestrator. Unmounting its
     // panel kills the session.
@@ -2077,7 +2098,32 @@ export function App(): JSX.Element {
     });
   }, [startTalk]);
 
-  const endTalk = useCallback((): void => setTalk(null), []);
+  const endTalk = useCallback((): void => {
+    setTalk(null);
+    talkPump.reset();
+  }, [talkPump]);
+
+  const handleTalkSession = useCallback(
+    (sessionId: string): void => talkPump.attachSession(sessionId),
+    [talkPump],
+  );
+
+  // "Debrief this drain" (issue 152): open/focus the Just-talk Pane for the
+  // active Project with `/debrief` typed but unsubmitted — the issue-91
+  // pattern (the human finishes the sentence and presses enter themselves).
+  // No project focus ⇒ nothing louder than a no-op (the affordance simply
+  // does nothing, per the issue's out-of-scope note).
+  const debriefDrain = useCallback((): void => {
+    if (activeProject === null) return;
+    setDebriefAvailable(false);
+    startTalk({
+      cwd: activeProject.defaultRepoPath,
+      workbenchProjectRoot: activeProject.key,
+      label: activeProject.label,
+    });
+    talkPump.enqueue({ key: `debrief:${activeProject.key}`, text: '/debrief', submit: false });
+    setTalkFocusSignal((n) => n + 1);
+  }, [activeProject, startTalk, talkPump]);
 
   // Quick fix's Run now (issue 81): open the chosen project through the
   // NORMAL open/claim flow, then launch exactly ONE bare Run on the freshly
@@ -2841,6 +2887,13 @@ export function App(): JSX.Element {
           .map((a) => a.label);
         void window.mc
           .writeDrainJournal({ projectPath: journalPath, reason, records, notables })
+          .then((result) => {
+            // Same Project-switch guard as the write itself: a stale offer
+            // must never surface against whatever Project is now open.
+            if (result.offerDebrief && projectPathRef.current === journalPath) {
+              setDebriefAvailable(true);
+            }
+          })
           .catch(() => {});
       }, RECEIPT_AUDIT_GRACE_MS);
     },
@@ -2872,6 +2925,7 @@ export function App(): JSX.Element {
       }
       setCap(Math.max(1, Math.floor(chosenCap) || 1));
       setDrainMessage('');
+      setDebriefAvailable(false);
       setDraining(true);
       // Each drain gets its own sequence so its stopped/halted narrative fact
       // (issue 66) carries a stable, deduped delivery key.
@@ -3981,6 +4035,8 @@ export function App(): JSX.Element {
             onStopDrain={stopDrain}
             draining={draining}
             drainMessage={drainMessage}
+            debriefAvailable={debriefAvailable}
+            onDebrief={debriefDrain}
             cap={cap}
             onCapChange={setCap}
             mergeReady={mergePlan.ready}
@@ -4280,6 +4336,8 @@ export function App(): JSX.Element {
                 </div>
                 <Pane
                   talk={talk}
+                  focusSignal={talkFocusSignal}
+                  onSession={handleTalkSession}
                   onStatusChange={runs.length === 0 ? setPaneStatus : undefined}
                 />
               </div>
@@ -4349,6 +4407,7 @@ export function App(): JSX.Element {
           <div className="app__slot" style={{ display: 'flex' }}>
             <Attention
               snapshot={attention}
+              ownProjectKey={activeProjectKey}
               onOpenItem={openAttentionItem}
               onOpenProject={openAttentionProject}
               onRegisterRepo={(item) => void registerRepoFromInbox(item)}

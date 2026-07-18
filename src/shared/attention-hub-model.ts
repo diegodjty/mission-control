@@ -55,6 +55,7 @@ import { detectAppearedRepos, type RepoCandidate, type SelfHealInput } from './s
 export type AttentionKind =
   | 'hitl-park'
   | 'curator-proposal'
+  | 'curator-report'
   | 'blocked-run'
   | 'setup-gate'
   | 'new-repo-candidate'
@@ -556,6 +557,8 @@ export function kindLabel(kind: AttentionKind): string {
       return 'PARKED';
     case 'curator-proposal':
       return 'PROPOSAL';
+    case 'curator-report':
+      return 'REPORT';
     case 'blocked-run':
       return 'BLOCKED';
     case 'setup-gate':
@@ -636,4 +639,218 @@ export function workbenchProjectPath(workbenchRoot: string, project: string): st
     return null;
   }
   return `${workbenchRoot.replace(/\/+$/, '')}/${project}`;
+}
+
+/**
+ * The workbench project directory NAME a `ProjectView.key` names, when that
+ * key sits directly under the given workbench root (`<workbenchRoot>/<name>`)
+ * — the inverse of `workbenchProjectPath`. Null for a legacy Project's key (a
+ * repo path, not a workbench directory) or malformed input. Used to resolve
+ * which `AttentionItem.project` is "this Window's own" (issue 150).
+ */
+export function projectDirNameFromKey(workbenchRoot: string, key: string): string | null {
+  if (typeof workbenchRoot !== 'string' || workbenchRoot.trim() === '') return null;
+  if (typeof key !== 'string' || key.trim() === '') return null;
+  const root = workbenchRoot.replace(/\/+$/, '');
+  if (!key.startsWith(`${root}/`)) return null;
+  const rest = key.slice(root.length + 1);
+  if (rest.length === 0 || rest.includes('/') || rest.includes('\\')) return null;
+  return rest;
+}
+
+// ---------------------------------------------------------------------------
+// Per-Window scoping — own project first-class, elsewhere collapsed (issue 150)
+// ---------------------------------------------------------------------------
+
+/** One other project's items, collapsed to a count for the Window surface. */
+export interface AttentionElsewhere {
+  project: string;
+  needsYou: number;
+}
+
+/** The attention hub, scoped to one Window's own Project (issue 150). */
+export interface WindowAttentionView {
+  /** This Window's own project's group, expanded — null when it has no
+   *  actionable items, or no project is open in this Window. */
+  own: AttentionGroup | null;
+  /** Every OTHER project with actionable items, collapsed to a count, in the
+   *  hub's urgency order (parked HITL first). Empty when there are none. */
+  elsewhere: AttentionElsewhere[];
+  /** Sum of `elsewhere[].needsYou` — the collapsed line's total. */
+  elsewhereTotal: number;
+}
+
+/**
+ * Partition a cross-project `AttentionHub` into this Window's own Project
+ * (shown expanded, as today) and everything else (collapsed to a per-project
+ * count) — ADR-0016's cross-project guarantee is unchanged, only the
+ * presentation narrows to Window identity. `ownProject` is the workbench
+ * directory name of the Project this Window has open, or null when this
+ * Window has none open (the Launcher/home case, which shows the flat list
+ * instead of calling this at all). Pure; any input yields a value.
+ */
+export function scopeAttentionToWindow(
+  hub: AttentionHub,
+  ownProject: string | null,
+): WindowAttentionView {
+  const own =
+    ownProject !== null ? (hub.groups.find((g) => g.project === ownProject) ?? null) : null;
+  const elsewhere = hub.groups
+    .filter((g) => g.project !== ownProject)
+    .map((g) => ({ project: g.project, needsYou: g.needsYou }));
+  const elsewhereTotal = elsewhere.reduce((n, e) => n + e.needsYou, 0);
+  return { own, elsewhere, elsewhereTotal };
+}
+
+// ---------------------------------------------------------------------------
+// Curator reports — global (cross-project) pass files as attention items
+// (issue 151). `~/Workbench/tools/curator-reports/*.md` is written by the
+// weekly memory-curator skill; it lives outside any single project's
+// workbench dir, so these items are derived independently of `deriveAttention`
+// and folded into the same aggregated item list by the caller (main).
+// ---------------------------------------------------------------------------
+
+/** One raw curator-report file: base name (`YYYY-MM-DD[-n].md`) and content. */
+export interface CuratorReportFile {
+  name: string;
+  content: string;
+}
+
+interface CuratorReportFrontmatter {
+  outcome: string | null;
+  proposals: number | null;
+}
+
+/** The frontmatter fields this surface needs — malformed/missing degrades to null. */
+function parseCuratorReportFrontmatter(content: string): CuratorReportFrontmatter {
+  const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content ?? '');
+  if (!fm) return { outcome: null, proposals: null };
+  const outcome = /^outcome:\s*(.+)$/m.exec(fm[1]);
+  const proposals = /^proposals:\s*(\d+)/m.exec(fm[1]);
+  return {
+    outcome: outcome ? outcome[1].trim() : null,
+    proposals: proposals ? Number(proposals[1]) : null,
+  };
+}
+
+/** The `YYYY-MM-DD` a report's file name starts with, or null. */
+function curatorReportDate(name: string): string | null {
+  const m = /^(\d{4}-\d{2}-\d{2})/.exec(name);
+  return m ? m[1] : null;
+}
+
+/** `curator pass 2026-07-17 — defects-found · 2 proposals` — the one-liner. */
+function curatorReportText(name: string, fm: CuratorReportFrontmatter): string {
+  const date = curatorReportDate(name) ?? name;
+  const outcome = fm.outcome ?? 'unknown outcome';
+  const proposals = fm.proposals ?? 0;
+  const proposalPart = proposals > 0 ? ` · ${proposals} proposal${proposals === 1 ? '' : 's'}` : '';
+  return `curator pass ${date} — ${outcome}${proposalPart}`;
+}
+
+/**
+ * Derive attention items for curator-report files the human hasn't opened yet
+ * (issue 151). "Seen" is per-file-name, set once a report is opened — never a
+ * last-seen time window — so a re-derive never resurrects one already read,
+ * and a brand-new file always surfaces regardless of the others' history.
+ * Newest-file-name first. Pure; malformed frontmatter degrades to a generic
+ * label rather than a throw; a non-`.md` file (the curator's log files) is
+ * never a report.
+ */
+export function deriveCuratorReportItems(
+  files: readonly CuratorReportFile[],
+  seen: ReadonlySet<string>,
+): AttentionItem[] {
+  const items: AttentionItem[] = [];
+  for (const f of asArray(files)) {
+    if (!f || typeof f.name !== 'string' || typeof f.content !== 'string') continue;
+    if (!/\.md$/i.test(f.name)) continue;
+    if (seen.has(f.name)) continue;
+    const fm = parseCuratorReportFrontmatter(f.content);
+    items.push({
+      project: 'tools',
+      kind: 'curator-report',
+      issueId: null,
+      fileRef: `tools/curator-reports/${f.name}`,
+      text: curatorReportText(f.name, fm),
+      id: `curator-report:${f.name}`,
+    });
+  }
+  return items.sort((a, b) => (b.fileRef ?? '').localeCompare(a.fileRef ?? ''));
+}
+
+// ---------------------------------------------------------------------------
+// Curator-report seen state — "opened it" persisted as a plain name list
+// (app userData, like the briefing's last-seen stamps). Pure parse/serialize/
+// mark so the fs edge (main) stays a thin adapter and the transitions are
+// unit-testable without touching disk.
+// ---------------------------------------------------------------------------
+
+/** Parse the persisted seen-reports file (`string[]` JSON of file names).
+ *  Malformed content — missing file, junk JSON, non-array, non-string
+ *  entries — degrades to the empty list: everything then reads as unseen. */
+export function parseSeenReports(content: string | null): string[] {
+  if (typeof content !== 'string' || content.length === 0) return [];
+  let raw: unknown;
+  try {
+    raw = JSON.parse(content);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((v): v is string => typeof v === 'string' && v.length > 0);
+}
+
+/** Serialize the seen-reports list for the userData file (sorted, deduped). */
+export function serializeSeenReports(names: readonly string[]): string {
+  const unique = [...new Set(names.filter((n): n is string => typeof n === 'string'))].sort();
+  return `${JSON.stringify(unique, null, 2)}\n`;
+}
+
+/**
+ * Mark one report name seen — "opened it". Pure: returns a new deduped list;
+ * a blank/non-string name is a no-op (returns the deduped input unchanged).
+ */
+export function markReportSeen(names: readonly string[], name: string): string[] {
+  const unique = [...new Set(names)];
+  if (typeof name !== 'string' || name.length === 0) return unique;
+  const set = new Set(unique);
+  set.add(name);
+  return [...set];
+}
+
+// ---------------------------------------------------------------------------
+// Debrief affordance — once per drain (issue 152). When a drain ends, the
+// drain-summary surface offers one "Debrief" button that opens a Just-talk
+// Pane with `/debrief` pre-typed (issue-91 pattern: typed, never submitted).
+// The affordance is offered exactly once per journal entry — keyed on a
+// caller-built string (project + journal file name) — and never resurfaces
+// after a refresh/restart, mirroring the curator-report seen-state above
+// (same parse/serialize/mark shape, generalized past file names).
+// ---------------------------------------------------------------------------
+
+/** Parse the persisted seen-debriefs file (`string[]` JSON of entry keys).
+ *  Malformed content degrades to the empty list: everything then offers. */
+export function parseSeenDebriefs(content: string | null): string[] {
+  return parseSeenReports(content);
+}
+
+/** Serialize the seen-debriefs list for the userData file (sorted, deduped). */
+export function serializeSeenDebriefs(keys: readonly string[]): string {
+  return serializeSeenReports(keys);
+}
+
+/** Mark one journal entry's key seen. Pure: a blank/non-string key is a no-op. */
+export function markDebriefSeen(keys: readonly string[], key: string): string[] {
+  return markReportSeen(keys, key);
+}
+
+/**
+ * Should a drain's journal entry offer the Debrief affordance? True exactly
+ * once per entry key — an unseen (or blank) key never offers twice; a blank
+ * key never offers at all (no journal entry landed, nothing to debrief).
+ */
+export function shouldOfferDebrief(key: string, seen: ReadonlySet<string>): boolean {
+  if (typeof key !== 'string' || key.length === 0) return false;
+  return !seen.has(key);
 }

@@ -14,6 +14,9 @@ import { PtySessionManager } from './pty-session-manager';
 import { HeadlessSessionManager } from './headless-session-manager';
 import { AttentionLastSeenStore } from './attention-last-seen';
 import { AttentionWatcher } from './attention-watcher';
+import { CuratorReportSeenStore } from './curator-report-seen';
+import { CuratorReportWatcher } from './curator-report-watcher';
+import { DebriefSeenStore } from './debrief-seen';
 import { readBacklogAt } from './backlog-reader';
 import { BacklogWatcher } from './backlog-watcher';
 import { resolveProjectIdentity } from './project-resolver';
@@ -107,6 +110,12 @@ import {
   type PlanningDocReadRequest,
   type PlanningDocReadResult,
   type PlanningWatchRequest,
+  type CuratorReportReadRequest,
+  type CuratorReportReadResult,
+  type CuratorReportMarkSeenRequest,
+  type CuratorReportMarkSeenResult,
+  type CoreProposalReadRequest,
+  type CoreProposalReadResult,
   type QuickFixCreateRequest,
   type QuickFixCreateResult,
   type MainCommitRequest,
@@ -538,6 +547,16 @@ let runLogStore: RunLogStore;
 // on macOS the app outlives its Windows, and the Inbox must keep watching).
 let attentionWatcher: AttentionWatcher | null = null;
 
+// The curator-report attention items (issue 151): a SECOND, independent
+// background watch over the global `~/Workbench/tools/curator-reports/` dir
+// (outside any single project's workbench dir, so it can't ride the
+// per-project AttentionWatcher above). Its items are folded into the same
+// broadcast snapshot by `currentAttentionSnapshot`. Instantiated in
+// `whenReady`; torn down on quit alongside the attention watch.
+let curatorReportWatcher: CuratorReportWatcher | null = null;
+let curatorReportSeen: CuratorReportSeenStore;
+let debriefSeen: DebriefSeenStore;
+
 // OS notifications when the drain needs the human (issue 138): the ONE app-level
 // controller deciding — via the pure `shared/attention-notifications` tier
 // filter + dedupe — which attention/lifecycle events earn a native OS ping (HITL
@@ -548,6 +567,30 @@ let notificationController: NotificationController | null = null;
 
 // The workbench root the attention watch (and Inbox click-through) keys on.
 const WORKBENCH_ROOT = join(homedir(), 'Workbench');
+
+// Where the memory-curator skill's weekly pass writes its reports (issue 151)
+// — a global dir, sibling to the per-project workbench directories.
+const CURATOR_REPORTS_DIR = join(WORKBENCH_ROOT, 'tools', 'curator-reports');
+
+/**
+ * The aggregated cross-project attention snapshot the Inbox reads: every
+ * active project's items (the AttentionWatcher) PLUS the curator-report items
+ * (the independent CuratorReportWatcher, issue 151) — folded together here so
+ * both watches broadcast through the one AttentionChanged channel and the
+ * pull handler never disagrees with the push.
+ */
+function currentAttentionSnapshot(): AttentionSnapshot {
+  const base = attentionWatcher?.snapshot ?? { workbenchRoot: WORKBENCH_ROOT, items: [], notes: [] };
+  const curatorItems = curatorReportWatcher?.items ?? [];
+  return curatorItems.length === 0 ? base : { ...base, items: [...base.items, ...curatorItems] };
+}
+
+/** Push the merged snapshot to every Window and the OS-notification gate. */
+function broadcastAttentionSnapshot(): void {
+  const snapshot = currentAttentionSnapshot();
+  broadcast(IpcChannel.AttentionChanged, snapshot);
+  notificationController?.attentionChanged(snapshot.items);
+}
 
 // The briefing's last-seen stamps (issue 80, ADR-0016): app-level state in
 // userData — reading the Inbox must never create workbench commits. Loaded in
@@ -1230,11 +1273,7 @@ function registerIpc(): void {
   // opened Windows; live updates arrive on the AttentionChanged broadcast.
   // Not ownership-gated on purpose — the Inbox is a cross-project, read-only
   // surface every Window shows (acting on an item goes through open/claim).
-  ipcMain.handle(
-    IpcChannel.AttentionList,
-    (): AttentionSnapshot =>
-      attentionWatcher?.snapshot ?? { workbenchRoot: WORKBENCH_ROOT, items: [], notes: [] },
-  );
+  ipcMain.handle(IpcChannel.AttentionList, (): AttentionSnapshot => currentAttentionSnapshot());
 
   // The Inbox was viewed (issue 80): advance every watched project's briefing
   // last-seen stamp to now, persist in app userData, and re-derive so already-
@@ -1249,6 +1288,71 @@ function registerIpc(): void {
     return { lastSeen };
   });
 
+  // Read one curator-report file for the attention surface's rendered view
+  // (issue 151). `name` is restricted to a bare file name — never a path — so
+  // this can never become an arbitrary-file read.
+  ipcMain.handle(
+    IpcChannel.CuratorReportRead,
+    async (_event, req: CuratorReportReadRequest): Promise<CuratorReportReadResult> => {
+      const name = req.name;
+      if (
+        typeof name !== 'string' ||
+        name.length === 0 ||
+        name.includes('/') ||
+        name.includes('\\') ||
+        name === '.' ||
+        name === '..'
+      ) {
+        return { name, content: null, error: 'invalid report name' };
+      }
+      try {
+        const content = await readFile(join(CURATOR_REPORTS_DIR, name), 'utf8');
+        return { name, content, error: null };
+      } catch (err) {
+        return { name, content: null, error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  // A curator report was opened (issue 151): mark it seen — app userData,
+  // never a workbench write — and re-derive so it drops off the next
+  // snapshot. Not ownership-gated, same as the rest of the Inbox.
+  ipcMain.handle(
+    IpcChannel.CuratorReportMarkSeen,
+    async (_event, req: CuratorReportMarkSeenRequest): Promise<CuratorReportMarkSeenResult> => {
+      const changed = await curatorReportSeen.markSeen(req.name);
+      if (changed) curatorReportWatcher?.rederive();
+      return { changed };
+    },
+  );
+
+  // Read a project's proposed CORE.md beside its current CORE.md for the
+  // attention surface's proposal-diff view (issue 151). Read-only — no write
+  // path exists for either file from this surface. `project` is restricted to
+  // a bare workbench directory name, matching an attention item's `project`.
+  ipcMain.handle(
+    IpcChannel.CoreProposalRead,
+    async (_event, req: CoreProposalReadRequest): Promise<CoreProposalReadResult> => {
+      const project = req.project;
+      if (
+        typeof project !== 'string' ||
+        project.length === 0 ||
+        project.includes('/') ||
+        project.includes('\\') ||
+        project === '.' ||
+        project === '..'
+      ) {
+        return { proposed: null, current: null, error: 'invalid project name' };
+      }
+      const memoryRoot = join(WORKBENCH_ROOT, project, 'memory');
+      const proposed = await readFile(join(memoryRoot, 'CORE.proposed.md'), 'utf8').catch(
+        () => null,
+      );
+      const current = await readCoreMemory(memoryRoot);
+      return { proposed, current, error: null };
+    },
+  );
+
   // Drain journal (issue 73, ADR-0015): when a drain ends (any stop reason),
   // ONE dated summary entry lands in the workbench project's `memory/journal/`
   // — every Run with its declared outcome, doc-drift flags, notable events —
@@ -1260,10 +1364,10 @@ function registerIpc(): void {
     IpcChannel.DrainJournal,
     async (event, req: DrainJournalRequest): Promise<DrainJournalResult> => {
       const denied = ownershipError(event, req.projectPath);
-      if (denied) return { written: false, path: null, error: denied };
+      if (denied) return { written: false, path: null, fileName: null, error: denied, offerDebrief: false };
       const identity = identityFor(req.projectPath);
       if (identity === null || identity.kind !== 'workbench') {
-        return { written: false, path: null, error: null };
+        return { written: false, path: null, fileName: null, error: null, offerDebrief: false };
       }
       // OS notification: the drain reached a terminal moment (issue 138) — one
       // ping per drain end, whatever the stop reason. Fired here, independent of
@@ -1295,7 +1399,20 @@ function registerIpc(): void {
           )
           .catch(() => {});
       }
-      return { written: outcome.written, path: outcome.path, error: outcome.error };
+      // The Debrief affordance (issue 152): offered exactly once per journal
+      // entry, keyed on this project + the entry's file name so two projects
+      // landing a same-named entry (e.g. same-day drains) never collide.
+      const offerDebrief =
+        outcome.written && outcome.fileName !== null
+          ? await debriefSeen.offerOnce(`${basename(identity.key)}:${outcome.fileName}`)
+          : false;
+      return {
+        written: outcome.written,
+        path: outcome.path,
+        fileName: outcome.fileName,
+        error: outcome.error,
+        offerDebrief,
+      };
     },
   );
 
@@ -1680,18 +1797,35 @@ app.whenReady().then(async () => {
   // independent of any Window, and stays inert when ~/Workbench doesn't exist.
   attentionWatcher = new AttentionWatcher({
     workbenchRoot: WORKBENCH_ROOT,
-    onChange: (snapshot) => {
-      broadcast(IpcChannel.AttentionChanged, snapshot);
+    onChange: () => {
       // The blocking-tier parks (HITL / blocked) ping from HERE — the single
       // attention watch — so they fire once regardless of how many Windows are
       // open. The controller seeds on the first snapshot (no launch burst).
-      notificationController?.attentionChanged(snapshot.items);
+      broadcastAttentionSnapshot();
     },
     lastSeenFor: (project) => attentionLastSeen.get(project),
     // For the self-heal detector's `~/`-path expansion (issue 95, ADR-0017).
     homeDir: homedir(),
   });
   attentionWatcher.start();
+
+  // The curator-report attention items (issue 151): a second, independent
+  // background watch over the global curator-reports dir. Its seen-state
+  // loads before it starts, same discipline as the briefing's last-seen store.
+  curatorReportSeen = new CuratorReportSeenStore(app.getPath('userData'));
+  await curatorReportSeen.load();
+  curatorReportWatcher = new CuratorReportWatcher({
+    dir: CURATOR_REPORTS_DIR,
+    seenFor: () => curatorReportSeen.get(),
+    onChange: () => broadcastAttentionSnapshot(),
+  });
+  curatorReportWatcher.start();
+
+  // The drain-end Debrief affordance's seen-state (issue 152): loads before
+  // any drain can end, same discipline as the curator-report seen store.
+  debriefSeen = new DebriefSeenStore(app.getPath('userData'));
+  await debriefSeen.load();
+
   registerIpc();
   createWindow();
 
@@ -1719,4 +1853,6 @@ app.on('before-quit', () => {
   // window-all-closed (macOS keeps the app alive; the Inbox keeps watching).
   attentionWatcher?.close();
   attentionWatcher = null;
+  curatorReportWatcher?.close();
+  curatorReportWatcher = null;
 });

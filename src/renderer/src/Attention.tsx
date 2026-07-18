@@ -1,11 +1,33 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { AttentionItem } from '../../shared/attention-hub-model';
+import type { AttentionGroup, AttentionItem } from '../../shared/attention-hub-model';
 import type { AttentionSnapshot } from '../../shared/ipc-contract';
-import { buildAttentionHub, kindLabel, mergeBriefing } from '../../shared/attention-hub-model';
+import {
+  buildAttentionHub,
+  kindLabel,
+  mergeBriefing,
+  projectDirNameFromKey,
+  scopeAttentionToWindow,
+} from '../../shared/attention-hub-model';
+import { parsePlanningDoc } from '../../shared/planning-model';
+import { PlanningBlockView } from './PlanningView';
+
+/** What the rendered-doc modal is currently showing (issue 151): a single
+ *  curator report, or a project's proposed CORE.md beside its current one. */
+type DocViewerTarget =
+  | { kind: 'curator-report'; name: string; label: string }
+  | { kind: 'curator-proposal'; project: string };
 
 interface AttentionProps {
   /** The live aggregated cross-project attention snapshot (issue 79). */
   snapshot: AttentionSnapshot;
+  /**
+   * This Window's own Project key (`ProjectView.key`), or null when this
+   * Window has none open. Non-null scopes the surface to Window identity
+   * (issue 150): the own project's items show expanded, every other
+   * project's collapse to a count line. Null (no project open) shows the
+   * full flat cross-project list, same as the Launcher.
+   */
+  ownProjectKey: string | null;
   /** Open/switch to an item's project and focus its referenced thing. */
   onOpenItem: (item: AttentionItem) => void;
   /** Open a whole project from its group header (no specific focus). */
@@ -43,6 +65,7 @@ interface AttentionProps {
  */
 export function Attention({
   snapshot,
+  ownProjectKey,
   onOpenItem,
   onOpenProject,
   onRegisterRepo,
@@ -50,6 +73,24 @@ export function Attention({
 }: AttentionProps): JSX.Element {
   // Freeze the briefing as it stood when the surface was opened.
   const [frozenBriefing] = useState<AttentionItem[]>(() => buildAttentionHub(snapshot.items).briefing);
+  // The collapsed "elsewhere" line starts collapsed every time the surface
+  // (re)mounts — expanding is a deliberate look, not a remembered preference.
+  const [elsewhereExpanded, setElsewhereExpanded] = useState(false);
+  // The rendered-doc modal (issue 151): a curator report or a CORE proposal
+  // diff. Opening one is a LOCAL view, never the project-switch click-through
+  // the other item kinds use — read-only v1 has no write path from here.
+  const [docViewer, setDocViewer] = useState<DocViewerTarget | null>(null);
+
+  const openReport = (item: AttentionItem): void => {
+    const name = item.fileRef?.split('/').pop();
+    if (!name) return;
+    setDocViewer({ kind: 'curator-report', name, label: item.text });
+    void window.mc.markCuratorReportSeen({ name }).catch(() => {});
+  };
+
+  const openProposal = (item: AttentionItem): void => {
+    setDocViewer({ kind: 'curator-proposal', project: item.project });
+  };
 
   // Viewing the surface advances the last-seen stamp — once per view (mount).
   // StrictMode's dev double-invoke just advances to "now" twice: idempotent.
@@ -57,16 +98,76 @@ export function Attention({
     void window.mc.markAttentionSeen().catch(() => {});
   }, []);
 
-  const hub = useMemo(() => buildAttentionHub(snapshot.items), [snapshot.items]);
+  // Curator-report items (issue 151) are global — not owned by any single
+  // Project — so they're pulled out before grouping and shown in their own
+  // always-visible section, in every Window, regardless of window scoping.
+  const curatorReportItems = useMemo(
+    () => snapshot.items.filter((i) => i.kind === 'curator-report'),
+    [snapshot.items],
+  );
+  const hub = useMemo(
+    () => buildAttentionHub(snapshot.items.filter((i) => i.kind !== 'curator-report')),
+    [snapshot.items],
+  );
   const briefing = useMemo(
     () => mergeBriefing(frozenBriefing, hub.briefing),
     [frozenBriefing, hub.briefing],
   );
 
+  // This Window has a Project open exactly when `ownProjectKey` is non-null —
+  // that's what scopes the surface to Window identity (issue 150). A legacy
+  // Project (no matching workbench directory name) still scopes: it simply
+  // has no "own" group, so every project shows collapsed.
+  const isWindowScoped = ownProjectKey !== null;
+  const ownProject = useMemo(
+    () => (ownProjectKey !== null ? projectDirNameFromKey(snapshot.workbenchRoot, ownProjectKey) : null),
+    [ownProjectKey, snapshot.workbenchRoot],
+  );
+  const windowView = useMemo(() => scopeAttentionToWindow(hub, ownProject), [hub, ownProject]);
+
   return (
     <div className="attention">
       <div className="attention__body">
         {notice && <p className="attention__notice">{notice}</p>}
+
+        {curatorReportItems.length > 0 && (
+          /* Curator-report items (issue 151): the weekly memory-curator pass,
+             global and outside window scoping — always visible, in every
+             Window. Opening one renders it in place (never a project switch). */
+          <section className="attention__curator-reports">
+            <header className="attention__group-head">
+              <span className="attention__group-title">
+                <span className="attention__group-dot" aria-hidden="true" />
+                Curator reports
+              </span>
+              <span
+                className="attention__group-count"
+                aria-label={`${curatorReportItems.length} unread curator report${curatorReportItems.length === 1 ? '' : 's'}`}
+              >
+                {curatorReportItems.length}
+              </span>
+            </header>
+            <ul className="attention__list">
+              {curatorReportItems.map((item) => (
+                <li key={item.id} className="attention__item-cell">
+                  <button
+                    className={`attention__item attention__item--${item.kind}`}
+                    onClick={() => openReport(item)}
+                    title={`Open ${item.text}`}
+                  >
+                    <span className={`attention__badge attention__badge--${item.kind}`}>
+                      {kindLabel(item.kind)}
+                    </span>
+                    <span className="attention__text">{item.text}</span>
+                    <span className="attention__action" aria-hidden="true">
+                      open →
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
 
         {briefing.length > 0 && (
           /* The since-last-seen briefing (issue 80): quiet journal one-liners,
@@ -91,83 +192,86 @@ export function Attention({
           </section>
         )}
 
-        {hub.needsYou === 0 && briefing.length === 0 && (
+        {hub.needsYou === 0 && curatorReportItems.length === 0 && briefing.length === 0 && (
           <p className="attention__empty">Nothing needs you.</p>
         )}
-        {hub.needsYou === 0 && briefing.length > 0 && (
+        {hub.needsYou === 0 && curatorReportItems.length === 0 && briefing.length > 0 && (
           <p className="attention__empty">Nothing needs you — just the briefing above.</p>
         )}
 
-        {/* Groups by Project, urgency-ordered (parked HITL first) — the top of
-            the list is always the right next thing (issue 125). */}
-        {hub.groups.map((group) => (
-          <section key={group.project} className="attention__group">
-            <header className="attention__group-head">
-              <span className="attention__group-title">
-                <span className="attention__group-dot" aria-hidden="true" />
-                {group.project}
+        {/* Window-scoped (issue 150): this Window's own Project expanded,
+            first-class; every other project collapsed to one quiet count
+            line below. Nothing is lost — ADR-0016's cross-project guarantee
+            holds, only the presentation narrows to Window identity. */}
+        {isWindowScoped && windowView.own && (
+          <AttentionGroupSection
+            group={windowView.own}
+            onOpenItem={onOpenItem}
+            onOpenProject={onOpenProject}
+            onRegisterRepo={onRegisterRepo}
+            onOpenProposal={openProposal}
+          />
+        )}
+
+        {isWindowScoped && windowView.elsewhereTotal > 0 && (
+          <section className="attention__elsewhere">
+            <button
+              type="button"
+              className="attention__elsewhere-summary"
+              onClick={() => setElsewhereExpanded((v) => !v)}
+              aria-expanded={elsewhereExpanded}
+              title="Show the other projects with something needing you"
+            >
+              <span className="attention__elsewhere-dot" aria-hidden="true" />
+              <span className="attention__elsewhere-text">
+                {windowView.elsewhereTotal} elsewhere:{' '}
+                {windowView.elsewhere.map((e) => `${e.project} (${e.needsYou})`).join(' · ')}
               </span>
-              <span
-                className="attention__group-count"
-                aria-label={`${group.needsYou} needs you`}
-                title={`${group.needsYou} attention item${group.needsYou === 1 ? '' : 's'} awaiting you`}
-              >
-                {group.needsYou}
+              <span className="attention__action" aria-hidden="true">
+                {elsewhereExpanded ? '▲' : '▼'}
               </span>
-              <button
-                className="attention__group-open"
-                onClick={() => onOpenProject(group.project)}
-                title={`Open ${group.project}`}
-              >
-                open →
-              </button>
-            </header>
-            <ul className="attention__list">
-              {group.items.map((item) =>
-                item.kind === 'new-repo-candidate' && item.candidate ? (
-                  /* A candidate isn't opened — it's registered in place (issue
-                     95). One click confirms; a new repo is new state, so MC
-                     proposes and the human decides (never auto-registered). */
-                  <li key={item.id} className="attention__item-cell">
+            </button>
+            {elsewhereExpanded && (
+              <ul className="attention__elsewhere-list">
+                {windowView.elsewhere.map((e) => (
+                  <li key={e.project} className="attention__elsewhere-item">
                     <button
-                      className={`attention__item attention__item--${item.kind}`}
-                      onClick={() => onRegisterRepo(item)}
-                      title={`Register ${item.candidate.path} in ${group.project} as "${item.candidate.suggestedKey}"`}
+                      type="button"
+                      className="attention__elsewhere-open"
+                      onClick={() => onOpenProject(e.project)}
+                      title={`Open ${e.project}`}
                     >
-                      <span className={`attention__badge attention__badge--${item.kind}`}>
-                        {kindLabel(item.kind)}
+                      <span className="attention__project">{e.project}</span>
+                      <span
+                        className="attention__group-count"
+                        aria-label={`${e.needsYou} needs you`}
+                      >
+                        {e.needsYou}
                       </span>
-                      <span className="attention__text">{item.text}</span>
-                      <span className="attention__action" aria-hidden="true">
-                        Register
-                      </span>
-                    </button>
-                  </li>
-                ) : (
-                  <li key={item.id} className="attention__item-cell">
-                    <button
-                      className={`attention__item attention__item--${item.kind}`}
-                      onClick={() => onOpenItem(item)}
-                      title={
-                        item.fileRef
-                          ? `Open ${group.project} and focus ${item.fileRef}`
-                          : `Open ${group.project}`
-                      }
-                    >
-                      <span className={`attention__badge attention__badge--${item.kind}`}>
-                        {kindLabel(item.kind)}
-                      </span>
-                      <span className="attention__text">{item.text}</span>
                       <span className="attention__action" aria-hidden="true">
                         open →
                       </span>
                     </button>
                   </li>
-                ),
-              )}
-            </ul>
+                ))}
+              </ul>
+            )}
           </section>
-        ))}
+        )}
+
+        {/* No project open in this Window (the Launcher/home case) — the full
+            flat cross-project list, urgency-ordered (parked HITL first). */}
+        {!isWindowScoped &&
+          hub.groups.map((group) => (
+            <AttentionGroupSection
+              key={group.project}
+              group={group}
+              onOpenItem={onOpenItem}
+              onOpenProject={onOpenProject}
+              onRegisterRepo={onRegisterRepo}
+              onOpenProposal={openProposal}
+            />
+          ))}
 
         {snapshot.notes.length > 0 && (
           /* Malformed-artifact notes: explicit but quiet (issue 78's "no
@@ -185,6 +289,233 @@ export function Attention({
             </ul>
           </details>
         )}
+      </div>
+
+      {docViewer !== null && (
+        <DocViewerModal target={docViewer} onClose={() => setDocViewer(null)} />
+      )}
+    </div>
+  );
+}
+
+interface AttentionGroupSectionProps {
+  group: AttentionGroup;
+  onOpenItem: (item: AttentionItem) => void;
+  onOpenProject: (project: string) => void;
+  onRegisterRepo: (item: AttentionItem) => void;
+  /** Open the rendered proposal-diff view in place (issue 151) — never the
+   *  project-switch click-through `onOpenItem` performs for other kinds. */
+  onOpenProposal: (item: AttentionItem) => void;
+}
+
+/** One Project's items, expanded — the shared rendering for the flat list
+ *  (no project open) and for the Window-scoped own-project section. */
+function AttentionGroupSection({
+  group,
+  onOpenItem,
+  onOpenProject,
+  onRegisterRepo,
+  onOpenProposal,
+}: AttentionGroupSectionProps): JSX.Element {
+  return (
+    <section className="attention__group">
+      <header className="attention__group-head">
+        <span className="attention__group-title">
+          <span className="attention__group-dot" aria-hidden="true" />
+          {group.project}
+        </span>
+        <span
+          className="attention__group-count"
+          aria-label={`${group.needsYou} needs you`}
+          title={`${group.needsYou} attention item${group.needsYou === 1 ? '' : 's'} awaiting you`}
+        >
+          {group.needsYou}
+        </span>
+        <button
+          className="attention__group-open"
+          onClick={() => onOpenProject(group.project)}
+          title={`Open ${group.project}`}
+        >
+          open →
+        </button>
+      </header>
+      <ul className="attention__list">
+        {group.items.map((item) =>
+          item.kind === 'new-repo-candidate' && item.candidate ? (
+            /* A candidate isn't opened — it's registered in place (issue
+               95). One click confirms; a new repo is new state, so MC
+               proposes and the human decides (never auto-registered). */
+            <li key={item.id} className="attention__item-cell">
+              <button
+                className={`attention__item attention__item--${item.kind}`}
+                onClick={() => onRegisterRepo(item)}
+                title={`Register ${item.candidate.path} in ${group.project} as "${item.candidate.suggestedKey}"`}
+              >
+                <span className={`attention__badge attention__badge--${item.kind}`}>
+                  {kindLabel(item.kind)}
+                </span>
+                <span className="attention__text">{item.text}</span>
+                <span className="attention__action" aria-hidden="true">
+                  Register
+                </span>
+              </button>
+            </li>
+          ) : item.kind === 'curator-proposal' ? (
+            /* A CORE proposal opens the rendered proposed-vs-current view in
+               place (issue 151) — never a project switch. Read-only v1: no
+               write path exists here; accept/reject stays a human edit. */
+            <li key={item.id} className="attention__item-cell">
+              <button
+                className={`attention__item attention__item--${item.kind}`}
+                onClick={() => onOpenProposal(item)}
+                title={`Compare the proposed CORE.md against ${group.project}'s current one`}
+              >
+                <span className={`attention__badge attention__badge--${item.kind}`}>
+                  {kindLabel(item.kind)}
+                </span>
+                <span className="attention__text">{item.text}</span>
+                <span className="attention__action" aria-hidden="true">
+                  compare →
+                </span>
+              </button>
+            </li>
+          ) : (
+            <li key={item.id} className="attention__item-cell">
+              <button
+                className={`attention__item attention__item--${item.kind}`}
+                onClick={() => onOpenItem(item)}
+                title={
+                  item.fileRef
+                    ? `Open ${group.project} and focus ${item.fileRef}`
+                    : `Open ${group.project}`
+                }
+              >
+                <span className={`attention__badge attention__badge--${item.kind}`}>
+                  {kindLabel(item.kind)}
+                </span>
+                <span className="attention__text">{item.text}</span>
+                <span className="attention__action" aria-hidden="true">
+                  open →
+                </span>
+              </button>
+            </li>
+          ),
+        )}
+      </ul>
+    </section>
+  );
+}
+
+/** One fetched doc's parsed render, or its load state — shared by both panes
+ *  of the modal (a single report, or either half of the proposal diff). */
+function DocPane({ title, text, error }: { title: string; text: string | null; error: string | null }): JSX.Element {
+  const parsed = useMemo(() => (text !== null ? parsePlanningDoc(text) : null), [text]);
+  return (
+    <div className="attention__doc-pane">
+      <div className="attention__doc-pane-title">{title}</div>
+      <div className="attention__doc-pane-body">
+        {text === null && error === null && <p className="attention__empty">Loading…</p>}
+        {error !== null && <p className="attention__error">{error}</p>}
+        {parsed !== null && (
+          <>
+            {parsed.frontmatter.length > 0 && (
+              <div className="planning__frontmatter">
+                {parsed.frontmatter.map((f, i) => (
+                  <span key={i} className="planning__fm">
+                    {f.key !== '' && <span className="planning__fm-key">{f.key}</span>}
+                    <span className="planning__fm-value">{f.value}</span>
+                  </span>
+                ))}
+              </div>
+            )}
+            <div className="planning__render">
+              {parsed.blocks.map((block, i) => (
+                <PlanningBlockView key={i} block={block} />
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+interface DocViewerModalProps {
+  target: DocViewerTarget;
+  onClose: () => void;
+}
+
+/**
+ * The rendered read-only doc view for curator reports and CORE proposals
+ * (issue 151): a curator report renders as one pane; a proposal renders two
+ * panes side by side (proposed vs current) so the diff is judgeable at a
+ * glance. Reuses the Planning view's markdown parse/render — the exact same
+ * legible rendering, not a second implementation. Read-only: no write path
+ * exists from this surface (accept/reject stays a human edit outside MC).
+ */
+function DocViewerModal({ target, onClose }: DocViewerModalProps): JSX.Element {
+  const [report, setReport] = useState<{ text: string | null; error: string | null }>({
+    text: null,
+    error: null,
+  });
+  const [proposal, setProposal] = useState<{
+    proposed: { text: string | null; error: string | null };
+    current: { text: string | null; error: string | null };
+  }>({ proposed: { text: null, error: null }, current: { text: null, error: null } });
+
+  useEffect(() => {
+    let cancelled = false;
+    if (target.kind === 'curator-report') {
+      void window.mc
+        .readCuratorReport({ name: target.name })
+        .then((res) => {
+          if (!cancelled) setReport({ text: res.content, error: res.error });
+        })
+        .catch((err: unknown) => {
+          if (!cancelled) setReport({ text: null, error: err instanceof Error ? err.message : String(err) });
+        });
+    } else {
+      void window.mc
+        .readCoreProposal({ project: target.project })
+        .then((res) => {
+          if (cancelled) return;
+          setProposal({
+            proposed: { text: res.proposed, error: res.error ?? (res.proposed === null ? 'CORE.proposed.md not found' : null) },
+            current: { text: res.current, error: res.error },
+          });
+        })
+        .catch((err: unknown) => {
+          if (cancelled) return;
+          const message = err instanceof Error ? err.message : String(err);
+          setProposal({ proposed: { text: null, error: message }, current: { text: null, error: message } });
+        });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [target]);
+
+  return (
+    <div className="attention__modal-overlay" onClick={onClose}>
+      <div className="attention__modal" onClick={(e) => e.stopPropagation()}>
+        <header className="attention__modal-head">
+          <span className="attention__modal-title">
+            {target.kind === 'curator-report' ? target.label : `CORE proposal — ${target.project}`}
+          </span>
+          <button className="attention__modal-close" onClick={onClose} title="Close">
+            ✕
+          </button>
+        </header>
+        <div className={`attention__modal-body${target.kind === 'curator-proposal' ? ' attention__modal-body--split' : ''}`}>
+          {target.kind === 'curator-report' ? (
+            <DocPane title={target.label} text={report.text} error={report.error} />
+          ) : (
+            <>
+              <DocPane title="Proposed" text={proposal.proposed.text} error={proposal.proposed.error} />
+              <DocPane title="Current" text={proposal.current.text} error={proposal.current.error} />
+            </>
+          )}
+        </div>
       </div>
     </div>
   );

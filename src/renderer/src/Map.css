@@ -273,6 +273,19 @@
   color: var(--fg-mute);
 }
 
+/* "Debrief this drain" (issue 152): a passive, low-key affordance — never a
+   notification, just an easy next step sitting where the drain just ended. */
+.map__debrief-btn {
+  align-self: flex-start;
+  background: var(--surface-2);
+  color: var(--teal);
+  border: 1px solid var(--teal-border);
+  border-radius: 8px;
+  padding: 5px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
 /* ---- Mid-merge alert (issue 24): the most consequential state — main is left
    mid-merge; new Runs/Drain are paused. Reads as a prominent red alert. */
 .map__alert {

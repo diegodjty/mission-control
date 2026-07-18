@@ -28,8 +28,9 @@ interface PlanningViewProps {
   onStage: (stage: PlanningStage) => void;
 }
 
-/** Render one block's text with inline code/bold runs made legible. */
-function InlineText({ text }: { text: string }): JSX.Element {
+/** Render one block's text with inline code/bold runs made legible. Shared
+ *  with the attention surface's curator-report / CORE-proposal renders. */
+export function InlineText({ text }: { text: string }): JSX.Element {
   return (
     <>
       {parseInline(text).map((seg, i) =>
@@ -45,8 +46,10 @@ function InlineText({ text }: { text: string }): JSX.Element {
   );
 }
 
-/** One parsed markdown block of the read-only preview. */
-function Block({ block }: { block: PlanningBlock }): JSX.Element {
+/** One parsed markdown block of the read-only preview. Exported so other
+ *  read-only doc renders (the attention surface's report/proposal views,
+ *  issue 151) reuse the exact same legible markdown rendering. */
+export function PlanningBlockView({ block }: { block: PlanningBlock }): JSX.Element {
   switch (block.kind) {
     case 'heading': {
       const level = Math.min(block.level, 4);
@@ -281,7 +284,7 @@ export function PlanningView({
               )}
               <div className="planning__render">
                 {parsed.blocks.map((block, i) => (
-                  <Block key={i} block={block} />
+                  <PlanningBlockView key={i} block={block} />
                 ))}
               </div>
             </>

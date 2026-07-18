@@ -300,6 +300,28 @@ export const IpcChannel = {
    */
   PlanningDocRead: 'planning:read-doc',
   /**
+   * renderer → main (invoke): read one curator-report file for the attention
+   * surface's rendered view (issue 151) — `~/Workbench/tools/curator-reports/
+   * <name>.md`. `name` must be a bare file name (no separators / `..`); never
+   * an arbitrary-file read. Resolves to a CuratorReportReadResult.
+   */
+  CuratorReportRead: 'curator-report:read',
+  /**
+   * renderer → main (invoke): a curator report was opened (issue 151) — mark
+   * it seen (app userData, never a workbench write) so it never resurfaces,
+   * and re-derive the curator-report watch. Resolves to a
+   * CuratorReportMarkSeenResult.
+   */
+  CuratorReportMarkSeen: 'curator-report:mark-seen',
+  /**
+   * renderer → main (invoke): read a project's proposed CORE.md alongside its
+   * current CORE.md for the attention surface's proposal-diff view (issue
+   * 151) — `memory/CORE.proposed.md` + `memory/CORE.md`. Read-only; no write
+   * path exists for either file from this surface. Resolves to a
+   * CoreProposalReadResult.
+   */
+  CoreProposalRead: 'core-proposal:read',
+  /**
    * renderer → main (invoke): the Launcher's New project flow (issue 82,
    * ADR-0016; repo-less projects, issue 93 / ADR-0017) — validate a project
    * name + workspace root + ZERO or more repo drafts against the workbench and,
@@ -1033,8 +1055,17 @@ export interface DrainJournalResult {
   written: boolean;
   /** The absolute path of the entry, when written. */
   path: string | null;
+  /** The entry's file name (for the Debrief affordance's seen-key), when written. */
+  fileName: string | null;
   /** The failure when the write was attempted and failed; null otherwise. */
   error: string | null;
+  /**
+   * True exactly once per journal entry (issue 152): this call is the first
+   * time this drain's entry has landed, so the drain-summary surface should
+   * offer the "Debrief" affordance. Persisted server-side (userData) so a
+   * refresh/restart never re-offers the same entry.
+   */
+  offerDebrief: boolean;
 }
 
 /**
@@ -1287,6 +1318,43 @@ export interface PlanningDocReadResult {
   error: string | null;
 }
 
+export interface CuratorReportReadRequest {
+  /** Bare file name within `~/Workbench/tools/curator-reports/` (no separators). */
+  name: string;
+}
+
+export interface CuratorReportReadResult {
+  /** The requested name, echoed so a stale response can be discarded. */
+  name: string;
+  /** The report's raw markdown, or null when it could not be read. */
+  content: string | null;
+  /** Why reading failed (invalid name / fs error), else null. */
+  error: string | null;
+}
+
+export interface CuratorReportMarkSeenRequest {
+  name: string;
+}
+
+export interface CuratorReportMarkSeenResult {
+  /** Whether the name was newly marked seen (false when already seen). */
+  changed: boolean;
+}
+
+export interface CoreProposalReadRequest {
+  /** The workbench project directory name (matches an attention item's `project`). */
+  project: string;
+}
+
+export interface CoreProposalReadResult {
+  /** `memory/CORE.proposed.md` content, or null when absent/unreadable. */
+  proposed: string | null;
+  /** `memory/CORE.md` content, or null when absent/unreadable. */
+  current: string | null;
+  /** Set when `project` itself couldn't be resolved to a workbench dir. */
+  error: string | null;
+}
+
 /** One repo row of the New project form: a short key + a path (issue 82). */
 export interface OnboardingRepoDraft {
   /** The CONFIG `repos:` map key (no spaces/colons). */
@@ -1486,6 +1554,14 @@ export interface MissionControlApi {
   onPlanningChanged(listener: (msg: PlanningChangedMessage) => void): () => void;
   /** Read one watched planning document for the read-only preview (issue 83). */
   readPlanningDoc(req: PlanningDocReadRequest): Promise<PlanningDocReadResult>;
+  /** Read one curator-report file for the attention surface's rendered view (issue 151). */
+  readCuratorReport(req: CuratorReportReadRequest): Promise<CuratorReportReadResult>;
+  /** Mark a curator report seen (issue 151) — it never resurfaces after. */
+  markCuratorReportSeen(
+    req: CuratorReportMarkSeenRequest,
+  ): Promise<CuratorReportMarkSeenResult>;
+  /** Read a project's proposed CORE.md beside its current CORE.md (issue 151). */
+  readCoreProposal(req: CoreProposalReadRequest): Promise<CoreProposalReadResult>;
   spawnPty(req: PtySpawnRequest): Promise<PtySpawnResult>;
   writePty(msg: PtyWriteMessage): void;
   resizePty(msg: PtyResizeMessage): void;

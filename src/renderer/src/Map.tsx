@@ -80,6 +80,13 @@ interface MapProps {
   draining?: boolean;
   /** The reason the last drain stopped, shown when not draining. */
   drainMessage?: string;
+  /**
+   * True when this drain's journal entry hasn't yet had its "Debrief this
+   * drain" affordance offered (issue 152) — passive tier, once per entry.
+   */
+  debriefAvailable?: boolean;
+  /** Open/focus a Just-talk Pane with `/debrief` typed and unsubmitted. */
+  onDebrief?: () => void;
   /** The user-configurable max-concurrent cap. */
   cap?: number;
   /** Change the cap. */
@@ -194,6 +201,8 @@ export function Map({
   onStopDrain,
   draining,
   drainMessage,
+  debriefAvailable,
+  onDebrief,
   cap,
   onCapChange,
   mergeReady,
@@ -577,7 +586,8 @@ export function Map({
         resolvedPath !== null &&
         (draining ||
           (!midMerge && drainGate.reason) ||
-          (drainMessage && drainMessage !== drainGate.reason)) && (
+          (drainMessage && drainMessage !== drainGate.reason) ||
+          debriefAvailable) && (
           <div className="map__notes">
             {draining && (
               <span className="map__note">
@@ -589,6 +599,14 @@ export function Map({
             )}
             {!draining && drainMessage && drainMessage !== drainGate.reason && (
               <span className="map__note map__note--muted">{drainMessage}</span>
+            )}
+            {/* "Debrief this drain" (issue 152): passive, once per journal
+                entry — opens/focuses a Just-talk Pane with `/debrief` typed
+                but unsubmitted (issue-91 pattern). */}
+            {!draining && debriefAvailable && (
+              <button className="map__debrief-btn" onClick={onDebrief}>
+                Debrief this drain
+              </button>
             )}
           </div>
         )}
