@@ -65,6 +65,7 @@ sequenceDiagram
   W->>W: work · verify gate
   W->>F: flip wip→done, write Receipt (before final message)
   F-->>MC: receipt-watcher ingests → Run log card + journal
+  W-->>MC: process exits → usage stamped onto the SAME Run-log record
   MC-->>C: re-plan → next issue fills the slot
 ```
 
@@ -104,8 +105,11 @@ Session Manager arms a real kill timer at spawn; breach kills the child, and
 the exit (like any headless exit non-zero with no Receipt) lands in the SAME
 no-Receipt handling (conservative drain stop, a missing-Receipt note), naming
 the cause ("timeout" vs. "crashed") — no new failure vocabulary. A Receipt
-that lands before death still wins. *Queued:* Run telemetry —
-tokens/cost/duration (143).
+that lands before death still wins. *Landed (143):* the terminal result's
+**usage** (tokens, cost, duration) is stamped onto the Run-log record once the
+process exits — before or after its Receipt, whichever lands first — and shown
+on the Run card and the drain journal's per-Run line plus a `## Totals` line; a
+Pane Run's record carries duration only. The Receipt itself is never touched.
 
 ## 3. Merge lifecycle
 

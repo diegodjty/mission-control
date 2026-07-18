@@ -50,6 +50,9 @@ import { listWorkbenchProjectNames } from './workbench-projects';
 import { registerAppearedRepo } from './register-repo';
 import { deleteIssueFile, readIssueText, writeIssueText } from './issue-file-store';
 import { readCoreMemory, writeDrainJournal } from './memory-files';
+import { extractRunUsage, timeOnlyUsage, type RunUsage } from '../shared/run-telemetry';
+import type { TerminalResult } from '../shared/headless-feed';
+import type { WorkerModelTier } from '../shared/worker-model';
 import {
   buildProjectGrid,
   buildQuickFixIssue,
@@ -496,6 +499,63 @@ function liveRunsByProject(): Map<string, number> {
   return counts;
 }
 
+// Per-Run spawn metadata for telemetry (issue 143, ADR-0001 amendment): keyed
+// by the MC-internal sessionId, populated in the PtySpawn handler below (the
+// only place with the RunTarget) and consumed at exit, where duration is
+// measured. Only a Run (`req.run` present) enters — the Dispatcher, talk, and
+// plain-shell spawns never carry an issueId and so never contribute telemetry.
+interface RunSpawnMeta {
+  projectPath: string;
+  issueId: number;
+  startedAt: number;
+  headless: boolean;
+  tier: WorkerModelTier | null;
+  /** Last terminal result folded from a HEADLESS Run's stream (issue 140), if any. */
+  lastResult: TerminalResult | null;
+}
+const runSpawnMeta = new Map<string, RunSpawnMeta>();
+
+// A Run's usage may resolve BEFORE its Receipt lands (the common case — a
+// Worker writes the Receipt, then the process exits a beat later) or AFTER
+// (a slow watch). Keyed by Project + issue so either order reaches the same
+// RunLogRecord; the Receipt watch below consumes this map when it applies.
+const pendingRunUsage = new Map<string, RunUsage>();
+
+function pendingUsageKey(projectPath: string, issueId: number): string {
+  return `${normalizeProjectKey(projectPath)}::${issueId}`;
+}
+
+/**
+ * Stamp a Run's usage into its persisted Run-log record (issue 143): find the
+ * latest record for this issue that has none yet, and re-append a patched copy
+ * (the store collapses to the latest per id, same as a Receipt re-capture). If
+ * no such record exists yet, stash the usage — the Receipt watch consumes it
+ * the moment the Receipt lands. Receipts themselves are NEVER touched.
+ */
+async function applyRunUsage(projectPath: string, issueId: number, usage: RunUsage): Promise<void> {
+  const records = await runLogStore.read(projectPath).catch(() => []);
+  const latest = records.find((r) => r.issueId === issueId && r.usage == null);
+  if (!latest) {
+    pendingRunUsage.set(pendingUsageKey(projectPath, issueId), usage);
+    return;
+  }
+  const patched = { ...latest, usage };
+  await runLogStore.append(projectPath, patched).catch(() => {});
+  broadcast(IpcChannel.ReceiptCaptured, { projectPath, record: patched });
+}
+
+/** Shared exit-side telemetry tail for both the PTY and headless managers. */
+function finishRunSpawn(sessionId: string): void {
+  const meta = runSpawnMeta.get(sessionId);
+  if (!meta) return;
+  runSpawnMeta.delete(sessionId);
+  const durationMs = Date.now() - meta.startedAt;
+  const usage = meta.headless
+    ? extractRunUsage(meta.lastResult, durationMs, meta.tier)
+    : timeOnlyUsage(durationMs);
+  if (usage) void applyRunUsage(meta.projectPath, meta.issueId, usage);
+}
+
 // One PTY Session Manager for the app. With many Windows on one backend, PTY
 // output is broadcast to every Window and each Pane reacts only to its own
 // sessionId — so a session started in one Window still round-trips correctly.
@@ -508,6 +568,7 @@ const ptyManager = new PtySessionManager({
     // attention-float update live even when the exit isn't accompanied by a
     // backlog flip (e.g. a Run the user stopped, leaving its issue `wip`).
     if (runSessionProject.delete(msg.sessionId)) broadcastRegistryChanged();
+    finishRunSpawn(msg.sessionId);
   },
 });
 
@@ -521,12 +582,20 @@ const headlessManager = new HeadlessSessionManager({
   onExit: (msg) => {
     broadcast(IpcChannel.PtyExit, msg);
     if (runSessionProject.delete(msg.sessionId)) broadcastRegistryChanged();
+    finishRunSpawn(msg.sessionId);
   },
   onSessionCaptured: (msg) => broadcast(IpcChannel.RunSessionCaptured, msg),
   // The folded Feed content (issue 140): activity line, last assistant message,
   // terminal result. Broadcast to every Window; each Run's Feed self-filters by
   // the internal sessionId. The renderer never sees a raw event.
-  onFeedUpdate: (msg) => broadcast(IpcChannel.RunFeedUpdate, msg),
+  onFeedUpdate: (msg) => {
+    broadcast(IpcChannel.RunFeedUpdate, msg);
+    // Retain the latest terminal result per session (issue 143) — main never
+    // parses the raw stream itself, but the Feed reducer's result already rode
+    // this same update, so grabbing it here needs no new parsing.
+    const meta = runSpawnMeta.get(msg.sessionId);
+    if (meta) meta.lastResult = msg.content.result;
+  },
 });
 
 // One Backlog Watcher for the app; keyed per renderer WebContents so a Window
@@ -1058,6 +1127,19 @@ function registerIpc(): void {
     const result = req.run?.headless
       ? headlessManager.spawn(req, { memoryCore })
       : ptyManager.spawn(req, { memoryCore, talkDest });
+    // Seed this spawn's telemetry meta (issue 143): every Run (Pane or
+    // headless) gets a startedAt so duration is measurable at exit; only a
+    // headless Run also gets its tier (Panes are never tiered — issue 154).
+    if (req.run) {
+      runSpawnMeta.set(result.sessionId, {
+        projectPath: req.run.projectPath,
+        issueId: req.run.issueId,
+        startedAt: Date.now(),
+        headless: req.run.headless === true,
+        tier: req.run.model ?? null,
+        lastResult: null,
+      });
+    }
     // Track a Run's live session per workbench project (issue 118) so the home
     // grid's "N running" liveness and attention-float reflect it immediately.
     // Only a Run with an explicit workbench (ADR-0015) maps to a card; the dir
@@ -1249,18 +1331,25 @@ function registerIpc(): void {
       // The Window may have gone away while the seed read ran.
       if (sender.isDestroyed()) return;
       receiptWatcher.watch(key, roots, seen, (record) => {
+        // A headless Run's process may exit (and report usage) BEFORE its
+        // Receipt lands — the common case. Apply it here so the FIRST persisted
+        // version of this Run's record already carries telemetry (issue 143).
+        const pendingKey = record.issueId !== null ? pendingUsageKey(req.projectPath, record.issueId) : null;
+        const pending = pendingKey ? pendingRunUsage.get(pendingKey) : undefined;
+        if (pendingKey && pending) pendingRunUsage.delete(pendingKey);
+        const finalRecord = pending ? { ...record, usage: pending } : record;
         // Persist first (the durable Run log is the record of truth, ADR-0009);
         // a failed append still surfaces the record live rather than dropping it.
-        void runLogStore.append(req.projectPath, record).catch(() => {});
+        void runLogStore.append(req.projectPath, finalRecord).catch(() => {});
         // Workbench auto-commit on the Receipt-declared Run event (issue 72):
         // done (flip + Receipt as ONE commit), park, or blocked. Deduped by
         // the ingest edge (issue + finished), so a re-scan re-fires nothing.
         if (isWorkbench) {
-          const runEvent = receiptRunEvent(record.issueId, record.outcome);
+          const runEvent = receiptRunEvent(finalRecord.issueId, finalRecord.outcome);
           if (runEvent !== null) commitWorkbenchEvents(req.projectPath, [runEvent]);
         }
         if (!sender.isDestroyed()) {
-          sender.send(IpcChannel.ReceiptCaptured, { projectPath: req.projectPath, record });
+          sender.send(IpcChannel.ReceiptCaptured, { projectPath: req.projectPath, record: finalRecord });
         }
       });
     });

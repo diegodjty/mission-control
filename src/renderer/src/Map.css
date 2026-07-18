@@ -995,6 +995,13 @@
   white-space: nowrap;
 }
 
+.runlog-card__usage {
+  margin-top: 4px;
+  color: var(--fg-mute);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
 .runlog-card__fields {
   margin: 8px 0 0;
   display: flex;

@@ -52,6 +52,7 @@ function receiptRecord(over: Partial<RunLogRecord> & { issueId: number }): RunLo
     id: `receipt:${slug}:2026-07-03T10:00:00Z`,
     capturedAt: '2026-07-03T10:00:01.000Z',
     title: null,
+    usage: null,
     ...over,
     slug,
   };

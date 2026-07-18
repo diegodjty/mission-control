@@ -48,6 +48,7 @@ function receipt(issueId: number, slug: string, finished: string): RunLogRecord 
     docDrift: null,
     detail: null,
     outcome: 'completed',
+    usage: null,
   };
 }
 

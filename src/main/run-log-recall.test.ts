@@ -40,6 +40,7 @@ function record(over: Partial<RunLogRecord> = {}): RunLogRecord {
     docDrift: 'none',
     detail: null,
     outcome: 'completed',
+    usage: null,
     ...over,
   };
 }

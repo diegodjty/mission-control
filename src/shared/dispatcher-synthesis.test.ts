@@ -249,6 +249,7 @@ describe('reuse of the Run-log records (no duplication)', () => {
       docDrift: 'docs/PRD.md is stale',
       detail: null,
       outcome: 'completed',
+      usage: null,
     };
     const synth = synthesizeAcrossRuns([record, record]);
     // Same id twice collapses to one Run — no false overlap from re-capture.
