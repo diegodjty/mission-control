@@ -37,6 +37,14 @@ const writeReceipt = env.MC_FAKE_NO_RECEIPT !== '1';
 //     the finished session back, so the backlog must be left exactly as it was.
 const hang = env.MC_FAKE_HANG === '1';
 const interrogate = env.MC_FAKE_INTERROGATE === '1';
+// Crash mode (issue 141): the Worker process dies non-zero mid-run — no claim
+// flip, no Receipt — simulating a genuine crash rather than a declared park.
+const crash = env.MC_FAKE_CRASH === '1';
+// Force the exit code after normal completion (issue 141, AC4): a Worker that
+// DID write its Receipt and flip `done`, but whose process then exits
+// non-zero anyway (e.g. a post-completion cleanup hiccup) — the Receipt that
+// landed must still win.
+const forcedExitCode = env.MC_FAKE_EXIT_CODE ? Number(env.MC_FAKE_EXIT_CODE) : null;
 
 const emit = (obj) => process.stdout.write(`${JSON.stringify(obj)}\n`);
 
@@ -72,6 +80,10 @@ if (hang) {
   // Post-mortem resume: touch nothing on disk; just read the session back and
   // exit cleanly, so the backlog is byte-identical before and after.
   emit({ type: 'result', subtype: 'success', session_id: sessionId, is_error: false, result: 'post-mortem read' });
+} else if (crash) {
+  // Crash (issue 141): die non-zero immediately, no on-disk work, no Receipt —
+  // the no-Receipt path must treat this the same as a killed hang, cause "crashed".
+  process.exit(17);
 } else {
 
 // 2. The on-disk work. A blocked/park Worker leaves the claim `wip`; a completed
@@ -134,6 +146,9 @@ emit({
   result: `done ${slug}`,
   usage: { input_tokens: 1200, output_tokens: 340 },
 });
+
+// Set (not `process.exit()`) so buffered stdout flushes normally before exit.
+if (forcedExitCode !== null) process.exitCode = forcedExitCode;
 
 }
 // Let the process exit naturally so buffered stdout is fully flushed first.

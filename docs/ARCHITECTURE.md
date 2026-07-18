@@ -98,8 +98,14 @@ drain Worker also carries a declared **effort** (`--effort <level>`), **derived
 from the tier** by default (`haiku`→low, `sonnet`→medium, `opus`/`fable`→high)
 with an issue `effort:` / CONFIG `worker_effort` override — a second cost lever
 beside the model; escalation re-derives it for the bigger tier unless a per-issue
-`effort:` pins it. *Queued:* hung Runs killed at `run_timeout` (141), Run
-telemetry — tokens/cost/duration (143).
+`effort:` pins it. *Landed (141):* a hung headless Run is **killed at
+`run_timeout`** (CONFIG frontmatter, minutes, default 30) — the Headless
+Session Manager arms a real kill timer at spawn; breach kills the child, and
+the exit (like any headless exit non-zero with no Receipt) lands in the SAME
+no-Receipt handling (conservative drain stop, a missing-Receipt note), naming
+the cause ("timeout" vs. "crashed") — no new failure vocabulary. A Receipt
+that lands before death still wins. *Queued:* Run telemetry —
+tokens/cost/duration (143).
 
 ## 3. Merge lifecycle
 

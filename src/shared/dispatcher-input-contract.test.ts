@@ -37,6 +37,7 @@ function backlog(): Backlog {
     workerModel: 'sonnet',
     escalationCeiling: 'opus',
     workerEffort: null,
+    runTimeoutMinutes: 30,
     issues: [
       {
         id: 3,

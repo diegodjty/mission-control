@@ -20,6 +20,7 @@ import {
   type WorkerEffort,
   type WorkerModelTier,
 } from './worker-model';
+import { DEFAULT_RUN_TIMEOUT_MINUTES, parseRunTimeoutMinutes } from './run-timeout';
 
 export type IssueStatus = 'open' | 'wip' | 'done';
 
@@ -107,6 +108,14 @@ export interface Backlog {
    * renderer resolves effort without a second CONFIG read.
    */
   workerEffort: WorkerEffort | null;
+  /**
+   * The headless drain kill timeout, in MINUTES, from CONFIG `run_timeout`
+   * (issue 141), resolved to a known value (30 when unset/malformed). A
+   * headless Run watched past this many minutes is killed by the Headless
+   * Session Manager and lands in the existing no-Receipt handling. Surfaced
+   * here so the drain spawn site has it without a second CONFIG read.
+   */
+  runTimeoutMinutes: number;
   /** Issues sorted ascending by id. */
   issues: BacklogIssue[];
 }
@@ -121,6 +130,7 @@ export const EMPTY_BACKLOG: Backlog = {
   workerModel: DEFAULT_WORKER_MODEL,
   escalationCeiling: DEFAULT_ESCALATION_CEILING,
   workerEffort: null,
+  runTimeoutMinutes: DEFAULT_RUN_TIMEOUT_MINUTES,
   issues: [],
 };
 
@@ -249,6 +259,8 @@ export function buildBacklog(files: RawFile[], configContent: string | null): Ba
   // and resolved to their defaults, so the renderer gets them with the backlog.
   const { workerModel, escalationCeiling, workerEffort } =
     parseWorkerTieringConfig(configContent);
+  // The headless kill timeout (issue 141), from CONFIG `run_timeout`.
+  const runTimeoutMinutes = parseRunTimeoutMinutes(configContent);
 
   const issues: BacklogIssue[] = [];
   for (const file of files) {
@@ -263,5 +275,5 @@ export function buildBacklog(files: RawFile[], configContent: string | null): Ba
   }
 
   issues.sort((a, b) => a.id - b.id);
-  return { activePrd, workerModel, escalationCeiling, workerEffort, issues };
+  return { activePrd, workerModel, escalationCeiling, workerEffort, runTimeoutMinutes, issues };
 }

@@ -352,6 +352,14 @@ interface TrackedRun {
    * Null for a manual (Pane) Run and until the headless Run's init event lands.
    */
   claudeSessionId?: string | null;
+  /**
+   * Why this Run's headless process ended with no declared outcome (issue
+   * 141): `timeout` (the Headless Session Manager killed it for exceeding
+   * `run_timeout`), `crashed` (it exited non-zero on its own), or null (a
+   * clean exit, a user stop, or an interactive Pane — none of which name a
+   * cause). Fed to the missing-Receipt audit so its note can name the cause.
+   */
+  endCause?: 'timeout' | 'crashed' | null;
 }
 
 function newRun(target: RunTarget, drainGeneration: number | null = null): TrackedRun {
@@ -363,6 +371,7 @@ function newRun(target: RunTarget, drainGeneration: number | null = null): Track
     drainGeneration,
     sessionId: null,
     claudeSessionId: null,
+    endCause: null,
   };
 }
 
@@ -2281,13 +2290,18 @@ export function App(): JSX.Element {
     [projectPath, activeScan],
   );
 
-  const handleRunExit = useCallback((issueId: number): void => {
-    setRuns((prev) =>
-      prev.map((r) =>
-        r.target.issueId === issueId ? { ...r, sessionAlive: false } : r,
-      ),
-    );
-  }, []);
+  const handleRunExit = useCallback(
+    (issueId: number, endCause?: 'timeout' | 'crashed'): void => {
+      setRuns((prev) =>
+        prev.map((r) =>
+          r.target.issueId === issueId
+            ? { ...r, sessionAlive: false, endCause: endCause ?? null }
+            : r,
+        ),
+      );
+    },
+    [],
+  );
 
   // A headless Run reported its MC-internal spawn session id (issue 139).
   const handleRunSession = useCallback((issueId: number, sessionId: string): void => {
@@ -2796,6 +2810,7 @@ export function App(): JSX.Element {
         slug: slugOf(r.target.issueFileName),
         title: r.target.issueTitle,
         status: runStatusOf(r),
+        endCause: r.endCause ?? null,
       })),
       runLog,
     );
@@ -3261,6 +3276,11 @@ export function App(): JSX.Element {
               configDefault: backlog.workerEffort,
               issueEffort: issue.effort,
             }),
+            // The `run_timeout` kill timeout (issue 141), from CONFIG
+            // (default 30 min): armed by the Headless Session Manager so a
+            // hung drain Run is killed rather than watched forever. Drain-only
+            // — a manual "▶ Run" leaves this unset.
+            runTimeoutMs: backlog.runTimeoutMinutes * 60_000,
           },
           // Stamp the Run with THIS drain's generation (issue 132) so a later
           // drain can tell it apart from a leftover Pane it should not count.
@@ -4296,7 +4316,7 @@ export function App(): JSX.Element {
                       onSession={(sid) => handleRunSession(r.target.issueId, sid)}
                       onClaudeSession={(sid) => handleRunClaudeSession(r.target.issueId, sid)}
                       onStatusChange={r.target.issueId === focusedId ? setPaneStatus : undefined}
-                      onExit={() => handleRunExit(r.target.issueId)}
+                      onExit={(_exitCode, cause) => handleRunExit(r.target.issueId, cause)}
                     />
                   ) : (
                     <Pane

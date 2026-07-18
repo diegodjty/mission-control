@@ -20,8 +20,13 @@ interface RunFeedProps {
   onSession?: (sessionId: string) => void;
   /** Fired with the claude session id once captured from the stream (AC3). */
   onClaudeSession?: (claudeSessionId: string) => void;
-  /** Fired when the underlying child process exits (with its exit code). */
-  onExit?: (exitCode: number) => void;
+  /**
+   * Fired when the underlying child process exits, with its exit code and —
+   * when the Headless Session Manager named one (issue 141) — the cause:
+   * `timeout` (killed for exceeding `run_timeout`) or `crashed` (non-zero on
+   * its own). Absent for a clean exit.
+   */
+  onExit?: (exitCode: number, cause?: 'timeout' | 'crashed') => void;
   /** Display-only status string for the focused-Run header (mirrors Pane). */
   onStatusChange?: (status: string) => void;
 }
@@ -86,7 +91,7 @@ export function RunFeed({
       if (msg.sessionId !== sessionId) return;
       setExited(true);
       onStatusChangeRef.current?.(`exited (${msg.exitCode})`);
-      onExitRef.current?.(msg.exitCode);
+      onExitRef.current?.(msg.exitCode, msg.cause);
     });
     const offCaptured = window.mc.onRunSessionCaptured((msg) => {
       if (msg.sessionId !== sessionId) return;

@@ -201,9 +201,14 @@ export function reactToLifecycleEvent(event: LifecycleEvent): DispatcherReaction
       // Receipts are the sole capture input (issue 57, ADR-0013): when a Run
       // ends per ground truth but no Receipt exists, MC never scrapes the tail
       // buffer or guesses — it says so, once, as a routine passive fact. The
-      // Pane's own scrollback remains the human's peek/debug surface.
+      // Pane's own scrollback remains the human's peek/debug surface. Issue
+      // 141: when the audit named a cause (a timeout kill vs. a crash exit),
+      // `detail` carries that phrase and replaces the generic "finished
+      // without a receipt" clause so the cause is visible, not just the fact.
       return {
-        notification: `${label} finished without a receipt — peek at the Pane.`,
+        notification: event.detail
+          ? `${label} ${event.detail} — peek at the Pane.`
+          : `${label} finished without a receipt — peek at the Pane.`,
         proposal: null,
         proactive: false,
       };
