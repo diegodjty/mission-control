@@ -25,39 +25,34 @@
  * items. An ACTUAL conflict on a `merge` still classifies to `gate` and leaves
  * main mid-merge, so both conflict kinds pause the whole lane until resolved.
  *
- * Still deferred to issue 148 (the Merge-button rejob): the LIVE subscription —
- * calling `sweepAutoMergeLane` from the `ReceiptWatch` onReceipt callback and the
- * MergeRuns completion in `index.ts`, and retiring the renderer's Dispatcher-only
- * auto-merge effect (`App.tsx`). Wiring the triggers live now would double-fire
- * alongside the still-present press-time path; 148 is where that path becomes the
- * exceptions entry (resolve/abort a paused lane, adopt strays, force a sweep). The
- * always-on PROPERTY is proven here and in the e2e by driving a sweep with no
- * drain live — the executor is stateless per tick, so any trigger can fire it.
+ * Issue 148 (the Merge-button rejob) wires the LIVE trigger into the renderer
+ * instead of here: `App.tsx` runs the same `decideAutoMergeLane` decision (fed by
+ * facts only a live Window has — the in-memory live-solo-Run fact — via
+ * `../shared/merge-affordance`) on every scan tick and Run-finish, firing the
+ * existing `MergeRuns` IPC (already serialized per repo) when it says `merge`,
+ * and raising the same blocking `merge-conflict` approval when it says `pause`.
+ * The renderer's Dispatcher-only auto-merge effect (issue 46) retired in favor of
+ * that always-on path. THIS module — the main-process sweep, independent of any
+ * live Window — stays available (and unit-tested) for a future headless trigger
+ * (a `ReceiptWatch` callback or the `MergeRuns` completion in `index.ts`) but is
+ * not yet wired to one; nothing production calls `sweepAutoMergeLane` today.
  */
-import { mergeReadinessOnDisk, type AfkBranchFacts } from '../shared/worktree-scan';
-import type { BranchPreview, SettledVerdict } from '../shared/merge-preview';
 import type { MergeRunsResult, RunLogRecord } from '../shared/ipc-contract';
 import type { RepoSerializer } from '../shared/repo-serializer';
 import type { DispatcherAction } from '../shared/dispatcher-authority';
-import { hasReceiptFor } from '../shared/receipt-audit';
 import {
   decideAutoMergeLane,
-  type LaneBranch,
+  laneBranchesFrom,
+  pauseReason,
+  type AutoMergeLaneScan,
   type LaneHoldReason,
   type LaneSkip,
   type MainIdle,
 } from '../shared/auto-merge-lane';
 import { decideDispatcherMerge, type DispatcherMergeDecision } from '../shared/dispatcher-merge';
 
-/** One repo's scanned facts the sweep reads (the shape `scanReposWithPreviews` yields per repo). */
-export interface AutoMergeLaneScan {
-  /** The repo's `afk/` branch facts (finished-unmerged is derived from these). */
-  branches: AfkBranchFacts[];
-  /** Each finished-unmerged branch's preview verdict against the current tip. */
-  previews: BranchPreview[];
-  /** True when this repo is left mid-merge (a main-idle fact — issue 24). */
-  midMerge: boolean;
-}
+export { laneBranchesFrom };
+export type { AutoMergeLaneScan } from '../shared/auto-merge-lane';
 
 /**
  * Everything one sweep needs, injected so the executor stays pure-ish (no direct
@@ -123,72 +118,6 @@ export type LaneSweepOutcome =
       decision: DispatcherMergeDecision;
       skipped: LaneSkip[];
     };
-
-/**
- * The Receipt `finished` timestamp embedded in a Run-log record's id
- * (`receipt:<NN-slug>:<finished>`, ADR-0013). The slug carries no colon and
- * `finished` is ISO-8601 (which does), so everything past the second colon is the
- * timestamp. Null for a non-Receipt (legacy scroll-era) record or a malformed id.
- */
-function finishedFromReceiptId(id: string): string | null {
-  const prefix = 'receipt:';
-  if (!id.startsWith(prefix)) return null;
-  const rest = id.slice(prefix.length);
-  const slugEnd = rest.indexOf(':');
-  if (slugEnd === -1) return null;
-  const finished = rest.slice(slugEnd + 1);
-  return finished.length > 0 ? finished : null;
-}
-
-/** The latest Receipt's `finished` timestamp per issue id (newest `capturedAt` wins). */
-function latestFinishedByIssue(runLog: readonly RunLogRecord[]): Map<number, string> {
-  const latestCapturedAt = new Map<number, string>();
-  const finished = new Map<number, string>();
-  for (const rec of runLog) {
-    if (rec.issueId === null || !rec.id.startsWith('receipt:')) continue;
-    const prior = latestCapturedAt.get(rec.issueId);
-    if (prior !== undefined && rec.capturedAt <= prior) continue;
-    const stamp = finishedFromReceiptId(rec.id);
-    if (stamp === null) continue;
-    latestCapturedAt.set(rec.issueId, rec.capturedAt);
-    finished.set(rec.issueId, stamp);
-  }
-  return finished;
-}
-
-/**
- * Assemble the pure lane's candidate list from a scan + previews + the Run log:
- * every finished-unmerged branch (`mergeReadinessOnDisk`), annotated with whether
- * a Receipt backs it, its Receipt `finished` timestamp, and its preview verdict.
- * Exported for the executor test (and 146) to reuse the exact assembly.
- */
-export function laneBranchesFrom(
-  scan: AutoMergeLaneScan,
-  runLog: readonly RunLogRecord[],
-): LaneBranch[] {
-  const verdictByIssue = new Map(scan.previews.map((p) => [p.issueId, p.verdict]));
-  const finishedByIssue = latestFinishedByIssue(runLog);
-  return mergeReadinessOnDisk(scan.branches).mergeable.map((c) => ({
-    issueId: c.issueId,
-    slug: c.slug,
-    receiptBacked: hasReceiptFor(runLog, c.issueId),
-    finished: finishedByIssue.get(c.issueId) ?? null,
-    verdict: verdictByIssue.get(c.issueId) ?? null,
-  }));
-}
-
-/**
- * The plain-language cause a paused lane surfaces on its blocking `merge-conflict`
- * approval — the conflicting files for a `conflicts` branch, or the earlier branch
- * a `blocked` one is stuck behind. Mirrors the wording the merge-preview badge uses.
- */
-function pauseReason(slug: string, verdict: SettledVerdict): string {
-  if (verdict.kind === 'blocked') {
-    return `Auto-merge lane paused: ${slug} is blocked behind issue ${verdict.behindIssueId}'s predicted conflict — resolve or abort it to resume the lane.`;
-  }
-  const files = verdict.kind === 'conflicts' && verdict.files.length > 0 ? ` in ${verdict.files.join(', ')}` : '';
-  return `Auto-merge lane paused: ${slug} is predicted to conflict${files} — resolve or abort it to resume the lane.`;
-}
 
 /**
  * Run one sweep of the auto-merge lane for a repo (issue 146). Reads the current

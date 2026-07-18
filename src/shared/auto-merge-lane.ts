@@ -39,7 +39,11 @@
  * the following branch); still PURE (no git/fs/Electron) so the whole
  * merge / pause / skip / hold matrix is unit-testable in isolation.
  */
-import type { MergePreviewVerdict, SettledVerdict } from './merge-preview';
+import type { BranchPreview, MergePreviewVerdict, SettledVerdict } from './merge-preview';
+import type { AfkBranchFacts } from './worktree-scan';
+import { mergeReadinessOnDisk } from './worktree-scan';
+import type { RunLogRecord } from './ipc-contract';
+import { hasReceiptFor } from './receipt-audit';
 
 /**
  * One finished-unmerged `afk/` branch the lane is considering, annotated with the
@@ -228,4 +232,82 @@ export function decideAutoMergeLane(input: AutoMergeLaneInput): AutoMergeLaneDec
     }
   }
   return { kind: 'hold', reason: 'no-clean-branch', skipped };
+}
+
+/**
+ * One repo's scanned facts a sweep (or the renderer's exceptions-entry Merge
+ * affordance, issue 148) reads: the `afk/` branch facts, each finished-unmerged
+ * branch's preview verdict, and whether this repo is left mid-merge.
+ */
+export interface AutoMergeLaneScan {
+  branches: AfkBranchFacts[];
+  previews: BranchPreview[];
+  midMerge: boolean;
+}
+
+/**
+ * The Receipt `finished` timestamp embedded in a Run-log record's id
+ * (`receipt:<NN-slug>:<finished>`, ADR-0013). The slug carries no colon and
+ * `finished` is ISO-8601 (which does), so everything past the second colon is the
+ * timestamp. Null for a non-Receipt (legacy scroll-era) record or a malformed id.
+ */
+function finishedFromReceiptId(id: string): string | null {
+  const prefix = 'receipt:';
+  if (!id.startsWith(prefix)) return null;
+  const rest = id.slice(prefix.length);
+  const slugEnd = rest.indexOf(':');
+  if (slugEnd === -1) return null;
+  const finished = rest.slice(slugEnd + 1);
+  return finished.length > 0 ? finished : null;
+}
+
+/** The latest Receipt's `finished` timestamp per issue id (newest `capturedAt` wins). */
+function latestFinishedByIssue(runLog: readonly RunLogRecord[]): Map<number, string> {
+  const latestCapturedAt = new Map<number, string>();
+  const finished = new Map<number, string>();
+  for (const rec of runLog) {
+    if (rec.issueId === null || !rec.id.startsWith('receipt:')) continue;
+    const prior = latestCapturedAt.get(rec.issueId);
+    if (prior !== undefined && rec.capturedAt <= prior) continue;
+    const stamp = finishedFromReceiptId(rec.id);
+    if (stamp === null) continue;
+    latestCapturedAt.set(rec.issueId, rec.capturedAt);
+    finished.set(rec.issueId, stamp);
+  }
+  return finished;
+}
+
+/**
+ * Assemble the pure lane's candidate list from a scan + previews + the Run log:
+ * every finished-unmerged branch (`mergeReadinessOnDisk`), annotated with whether
+ * a Receipt backs it, its Receipt `finished` timestamp, and its preview verdict.
+ * Exported so the main-process executor and the renderer's Merge-affordance
+ * decision (issue 148) share the exact same assembly.
+ */
+export function laneBranchesFrom(
+  scan: AutoMergeLaneScan,
+  runLog: readonly RunLogRecord[],
+): LaneBranch[] {
+  const verdictByIssue = new Map(scan.previews.map((p) => [p.issueId, p.verdict]));
+  const finishedByIssue = latestFinishedByIssue(runLog);
+  return mergeReadinessOnDisk(scan.branches).mergeable.map((c) => ({
+    issueId: c.issueId,
+    slug: c.slug,
+    receiptBacked: hasReceiptFor(runLog, c.issueId),
+    finished: finishedByIssue.get(c.issueId) ?? null,
+    verdict: verdictByIssue.get(c.issueId) ?? null,
+  }));
+}
+
+/**
+ * The plain-language cause a paused lane surfaces on its blocking `merge-conflict`
+ * approval — the conflicting files for a `conflicts` branch, or the earlier branch
+ * a `blocked` one is stuck behind. Mirrors the wording the merge-preview badge uses.
+ */
+export function pauseReason(slug: string, verdict: SettledVerdict): string {
+  if (verdict.kind === 'blocked') {
+    return `Auto-merge lane paused: ${slug} is blocked behind issue ${verdict.behindIssueId}'s predicted conflict — resolve or abort it to resume the lane.`;
+  }
+  const files = verdict.kind === 'conflicts' && verdict.files.length > 0 ? ` in ${verdict.files.join(', ')}` : '';
+  return `Auto-merge lane paused: ${slug} is predicted to conflict${files} — resolve or abort it to resume the lane.`;
 }

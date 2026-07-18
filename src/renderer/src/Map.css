@@ -205,6 +205,37 @@
   cursor: default;
 }
 
+/* Merge exceptions entry (issue 148, ADR-0021): a paused conflict reads as
+   urgent (red, like the mid-merge alert); a stray merge keeps the base violet
+   (still an explicit human action, just not urgent). Force sweep is the
+   low-key fallback, always available, so it reads quieter than either. */
+.map__merge--conflict {
+  background: var(--red);
+}
+
+.map__sweep {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: transparent;
+  color: var(--text-muted, inherit);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.map__sweep:hover:not(:disabled) {
+  background: var(--surface);
+}
+
+.map__sweep:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* ---- ＋ Start something disclosure / empty-state chooser (issue 116) ------- */
 .map__startpanel,
 .map__start-empty {

@@ -22,6 +22,7 @@ import {
   type RunGuidance,
 } from '../../shared/run-guidance';
 import type { MergeDisplay } from '../../shared/merge-display';
+import type { MergeAffordance } from '../../shared/merge-affordance';
 import {
   previewBadge,
   type BranchPreview,
@@ -93,13 +94,24 @@ interface MapProps {
   cap?: number;
   /** Change the cap. */
   onCapChange?: (cap: number) => void;
-  /** True once parallel Runs have finished and a Merge is offered (issue 08). */
-  mergeReady?: boolean;
-  /** How many finished branches the Merge would integrate. */
-  mergeCount?: number;
-  /** Trigger the human-initiated Merge (never automatic — ADR-0002). */
-  onMerge?: () => void;
-  /** True while a Merge is running. */
+  /**
+   * The Merge button's exceptions-entry decision (issue 148, ADR-0021):
+   * everyday merging belongs to the always-on lane now, so the button only
+   * surfaces a paused conflict (named) and/or adopted stray branches — both
+   * independent facts. `null`/absent hides the whole affordance (no lane data
+   * yet); an empty decision (`{pausedConflict: null, strays: []}`) means the
+   * lane is healthy and the button recedes.
+   */
+  mergeAffordance?: MergeAffordance | null;
+  /** Resolve a paused conflict: attempt the real merge of this branch. */
+  onResolveConflict?: (slug: string) => void;
+  /** Merge the given adopted stray branches (no Receipt backs them). */
+  onMergeStrays?: (slugs: string[]) => void;
+  /** Force one auto-merge lane sweep now, reporting what it did. */
+  onForceSweep?: () => void;
+  /** The last force-sweep's plain-language report (a pause/hold reason), or null. */
+  sweepNote?: string | null;
+  /** True while a Merge (resolve / stray / lane) is running. */
   merging?: boolean;
   /**
    * What to show for the last (or in-flight) Merge: a headline plus, on a
@@ -207,9 +219,11 @@ export function Map({
   onDebrief,
   cap,
   onCapChange,
-  mergeReady,
-  mergeCount,
-  onMerge,
+  mergeAffordance,
+  onResolveConflict,
+  onMergeStrays,
+  onForceSweep,
+  sweepNote,
   merging,
   mergeDisplay,
   midMerge,
@@ -490,7 +504,7 @@ export function Map({
           shows just the run controls, and an uncontrolled Map shows none. */}
       {resolvedPath !== null &&
         (onDrain ||
-          onMerge ||
+          onForceSweep ||
           (startProject && backlog && backlog.issues.length > 0)) && (
           <div className="map__controls">
             {/* ＋ Start something (issue 116, ADR-0019): the two per-Project entry
@@ -551,14 +565,39 @@ export function Map({
                     ▶▶ Drain backlog
                   </button>
                 ))}
-              {onMerge && (mergeReady || merging) && (
+              {/* Merge exceptions entry (issue 148, ADR-0021): everyday merging
+                  belongs to the always-on lane, so this only surfaces a paused
+                  conflict (named) and/or adopted strays — a healthy lane with
+                  no strays shows neither, and the button recedes. Force sweep
+                  stays available regardless, as the low-key fallback action. */}
+              {onResolveConflict && mergeAffordance?.pausedConflict && (
                 <button
-                  className="map__merge"
-                  onClick={() => onMerge()}
-                  disabled={merging || !mergeReady}
-                  title="Merge finished parallel Runs into main"
+                  className="map__merge map__merge--conflict"
+                  onClick={() => onResolveConflict(mergeAffordance.pausedConflict!.slug)}
+                  disabled={merging}
+                  title={mergeAffordance.pausedConflict.reason}
                 >
-                  {merging ? 'Merging…' : `↕ Merge ready · ${mergeCount ?? 0}`}
+                  {merging ? 'Resolving…' : `⚠ Conflict paused · ${mergeAffordance.pausedConflict.slug}`}
+                </button>
+              )}
+              {onMergeStrays && mergeAffordance && mergeAffordance.strays.length > 0 && (
+                <button
+                  className="map__merge map__merge--stray"
+                  onClick={() => onMergeStrays(mergeAffordance.strays.map((s) => s.slug))}
+                  disabled={merging}
+                  title="Merge adopted stray branch(es) — no Receipt backs them, so the lane never merges them on its own"
+                >
+                  {merging ? 'Merging…' : `Merge strays · ${mergeAffordance.strays.length}`}
+                </button>
+              )}
+              {onForceSweep && (
+                <button
+                  className="map__sweep"
+                  onClick={() => onForceSweep()}
+                  disabled={merging}
+                  title="Force one auto-merge lane sweep now"
+                >
+                  {merging ? 'Sweeping…' : '↻ Force sweep'}
                 </button>
               )}
             </div>
@@ -636,9 +675,18 @@ export function Map({
         </div>
       )}
 
+      {/* Force-sweep report (issue 148): what a manually-triggered sweep did
+          when it held or paused rather than merging (a merge attempt reports
+          through the same `mergeDisplay` panel below). */}
+      {resolvedPath !== null && sweepNote && (
+        <div className="map__notes">
+          <span className="map__note map__note--muted">{sweepNote}</span>
+        </div>
+      )}
+
       {/* Merge outcome (issue 17): the tone-coded headline plus, on a
           failure/conflict, the script's verbatim output in a collapsible panel. */}
-      {onMerge && resolvedPath !== null && mergeDisplay && (
+      {resolvedPath !== null && mergeDisplay && (
         <div className="map__mergeout">
           <span className={`map__merge-state map__merge-state--${mergeDisplay.tone}`}>
             {mergeDisplay.headline}

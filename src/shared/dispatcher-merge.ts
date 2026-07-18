@@ -9,18 +9,17 @@
  * list) and surfaces the reason (issues 17/23/24). It never auto-resolves a
  * conflict.
  *
- * This module holds the two PURE decisions behind that wiring, kept out of the
- * React effect in `App.tsx` so the auto-vs-gate boundary is unit-testable in
- * isolation:
+ * This module holds the PURE post-run classification behind that wiring, kept
+ * out of the React effect in `App.tsx` so the auto-vs-gate boundary is
+ * unit-testable in isolation: `decideDispatcherMerge` — given the completed
+ * `MergeRunsResult` the adapter (`run-merge.ts`) returns, was it a clean
+ * auto-proceed (→ a passive `merge` note) or a conflict / preflight failure
+ * (→ a blocking `merge-conflict` gate that surfaces the reason)?
  *
- *   - `shouldAutoMerge` — the pre-run guard: given the live drain context, may
- *     the Dispatcher auto-invoke a merge right now? (mergeable branches exist,
- *     main isn't mid-merge, nothing is already in flight, and this exact
- *     mergeable set hasn't already been auto-attempted).
- *   - `decideDispatcherMerge` — the post-run classification: given the completed
- *     `MergeRunsResult` the adapter (`run-merge.ts`) returns, was it a clean
- *     auto-proceed (→ a passive `merge` note) or a conflict / preflight failure
- *     (→ a blocking `merge-conflict` gate that surfaces the reason)?
+ * (The pre-run "should this auto-fire now?" guard used to live here too, but
+ * ADR-0021's always-on lane replaced it — `decideAutoMergeLane`, issues
+ * 145/146/148, decides WHEN to merge; this module only classifies the RESULT
+ * once something has run, whichever path triggered it.)
  *
  * The real git work — and the clean/conflict/preflight CLASSIFICATION itself —
  * lives in `run-merge.ts` (via `mergeRuns` + the issue-23/24 output parsing);
@@ -33,44 +32,6 @@
  */
 import type { MergeRunsResult } from './ipc-contract';
 import type { DispatcherAction } from './dispatcher-authority';
-
-/**
- * The live-drain context the pre-run guard reads. All plain booleans/counts so
- * the "auto-invoke now?" decision stays pure and testable.
- */
-export interface AutoMergeContext {
-  /** A Dispatcher drain is live (auto-merge is a Dispatcher-path behavior only). */
-  dispatcherActive: boolean;
-  /** How many finished isolated `afk/` branches are mergeable on disk right now. */
-  mergeableCount: number;
-  /** `main` is mid-merge from a prior partial conflict — resolve/abort first. */
-  midMerge: boolean;
-  /** A merge is already in flight (don't fire a second one over it). */
-  merging: boolean;
-  /**
-   * This exact mergeable set was already auto-attempted this drain. Guards
-   * against re-firing in a loop when a merge fails preflight without changing the
-   * on-disk branch set (a clean merge drops the branches, a conflict sets
-   * `midMerge` — both self-guard; a persistent preflight failure would not).
-   */
-  alreadyAttempted: boolean;
-}
-
-/**
- * The pre-run guard: should the Dispatcher auto-invoke a merge now? True exactly
- * when a drain is live, there is at least one mergeable branch, `main` is not
- * mid-merge, no merge is already running, and this mergeable set hasn't already
- * been auto-attempted. PURE.
- */
-export function shouldAutoMerge(ctx: AutoMergeContext): boolean {
-  return (
-    ctx.dispatcherActive &&
-    ctx.mergeableCount > 0 &&
-    !ctx.midMerge &&
-    !ctx.merging &&
-    !ctx.alreadyAttempted
-  );
-}
 
 /**
  * The post-run classification of a completed auto-merge:
