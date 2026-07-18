@@ -15,10 +15,15 @@
    (issue 126, src/shared/breakpoints.ts) — the same mechanism the shell uses.
    ===================================================================== */
 
-/* The view is the single scrolling column (the shell owns the rail + header).
-   min-width/height:0 so it shrinks inside the flex map-col without forcing the
-   app frame to scroll horizontally; overflow-x hidden is the belt-and-braces
-   guarantee of the "no horizontal scroll at narrow width" acceptance criterion. */
+/* The shell owns the rail + header. min-width/height:0 so it shrinks inside
+   the flex map-col without forcing the app frame to scroll horizontally;
+   overflow-x hidden is the belt-and-braces guarantee of the "no horizontal
+   scroll at narrow width" acceptance criterion.
+
+   The view itself no longer scrolls as one column (issue 159): the Run log
+   and the controls/banners above it keep their natural height, and only the
+   backlog list (`.map__section` / `.map__list` below) scrolls in its own
+   region — so a 100+ issue backlog can never push the Run log out of view. */
 .map {
   flex: 1 1 auto;
   min-width: 0;
@@ -28,7 +33,7 @@
   gap: 14px;
   padding: 18px 24px 28px;
   overflow-x: hidden;
-  overflow-y: auto;
+  overflow-y: hidden;
 }
 
 /* ---- Uncontrolled path bar (legacy / no Project Registry) ------------------
@@ -587,9 +592,16 @@
 }
 
 /* ---- Backlog section (collapsible) ---------------------------------------- */
+/* Flex:1 + min-height:0 (issue 159) makes this the one region that grows to
+   fill the remaining view height and clips to it, so its inner `.map__list`
+   scrolls on its own instead of the whole `.map` column growing past the
+   viewport and burying the Run log above. */
 .map__section {
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .map__section-summary {
@@ -636,10 +648,15 @@
 .map__list {
   list-style: none;
   margin: 6px 0 0;
-  padding: 0;
+  padding: 0 0 4px;
   display: flex;
   flex-direction: column;
   gap: 6px;
+  /* Issue 159: this is the one region that scrolls with backlog size — the
+     Run log and everything else above `.map__section` keeps its own height. */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .map__empty {
@@ -994,8 +1011,11 @@
 }
 
 /* ---- Run-log feed (issue 34): the durable per-Project history of finished
-   Runs, one card each, below the backlog per the mock. Collapsible. */
+   Runs, one card each. Pinned above the backlog list (issue 159) so it's
+   reachable without scrolling past a large backlog; collapsible, and its own
+   `.map__runlog-list` scrolls independently of the backlog below it. */
 .map__runlog {
+  flex: 0 0 auto;
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--surface);
@@ -1145,4 +1165,11 @@
 .app[data-compact='true'] .issue {
   gap: 10px;
   padding: 11px 13px;
+}
+
+/* At compact width the Run log's own scroll region shrinks (issue 159) so it
+   can't crowd out the backlog list on a short/narrow window — both stay
+   reachable without the Run log dominating the view. */
+.app[data-compact='true'] .map__runlog-list {
+  max-height: 220px;
 }

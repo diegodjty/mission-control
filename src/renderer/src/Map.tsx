@@ -935,9 +935,21 @@ export function Map({
           </div>
         )}
 
+      {/* Run-log feed (issue 34; repositioned above the backlog by issue 159): a
+          scannable entry per finished Run, parsed from its Completion block,
+          loaded from the per-Project on-disk Run log — so it survives closing
+          the Run's Pane and persists across restarts. Rendered above the
+          backlog list (rather than below it) so it's reachable without
+          scrolling past a 100+ issue backlog; the backlog list below scrolls
+          in its own region so neither view forces the other. */}
+      {resolvedPath !== null && runLog && runLog.length > 0 && (
+        <RunLogFeed records={runLog} onSelect={(id) => id !== null && setSelectedId(id)} />
+      )}
+
       {/* Backlog (mock: single column, collapsible) — clear status/dependency/
           blocker hierarchy per row (story 34); the selected row expands in place
-          to its full detail. */}
+          to its full detail. Scrolls in its own region (issue 159) so a 100+
+          issue backlog never pushes the Run log (above) out of view. */}
       <details className="map__section" open>
         <summary className="map__section-summary">
           <span className="map__section-title">Backlog</span>
@@ -1120,13 +1132,6 @@ export function Map({
         </ul>
       </details>
 
-      {/* Run-log feed (issue 34): a scannable entry per finished Run, parsed from
-          its Completion block, loaded from the per-Project on-disk Run log — so
-          it survives closing the Run's Pane and persists across restarts. Below
-          the backlog, per the approved mock. */}
-      {resolvedPath !== null && runLog && runLog.length > 0 && (
-        <RunLogFeed records={runLog} onSelect={(id) => id !== null && setSelectedId(id)} />
-      )}
     </div>
   );
 }
@@ -1212,6 +1217,8 @@ function StartSomething({
  * The Run-log feed (issue 34): the durable, per-Project history of finished
  * Runs, one card each, parsed from their Completion blocks. Collapsible so it
  * doesn't crowd the backlog; open by default when there are records to show.
+ * Pinned above the backlog list (issue 159) with its own scroll region, so
+ * it stays glanceable regardless of backlog size.
  */
 function RunLogFeed({
   records,
