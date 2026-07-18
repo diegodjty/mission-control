@@ -23,6 +23,10 @@ const slug = env.MC_FAKE_SLUG ?? 'issue';
 const id = env.MC_FAKE_ID ?? '0';
 const finished = env.MC_FAKE_FINISHED ?? '2026-07-17T00:00:00.000Z';
 const outcome = env.MC_FAKE_OUTCOME ?? 'completed'; // completed | blocked | needs-verification
+// Denial mode (issue 142): when set alongside outcome=blocked, the Worker hit a
+// permission denial — it parks `blocked` with a Receipt that NAMES the denied
+// action (the headless failure contract's producer half) instead of retrying it.
+const deniedAction = env.MC_FAKE_DENIED_ACTION ?? '';
 const writeReceipt = env.MC_FAKE_NO_RECEIPT !== '1';
 
 const emit = (obj) => process.stdout.write(`${JSON.stringify(obj)}\n`);
@@ -81,8 +85,16 @@ if (writeReceipt && receiptPath) {
       : outcome === 'needs-verification'
         ? `## Ready for manual verification — issue ${id} — ${slug}\n\n` +
           `Steps:\n1. Open the surface this issue changed.\n2. Confirm by hand.\n`
-        : `No AFK-eligible work completable on issue ${id} — ${slug}. I stopped because a ` +
-          `dependency the issue says is done turned out not to be done in the code.\n`;
+        : deniedAction
+          ? // Denial park (issue 142): first line NAMES the action so the attention
+            // item (which shows the Receipt's first line) carries the denial too.
+            `Permission denied: \`${deniedAction}\` — parked blocked, not retried.\n\n` +
+            `No AFK-eligible work completable on issue ${id} — ${slug}. I stopped because the ` +
+            `action \`${deniedAction}\` was denied; a permission denial is a park-blocked exit, so ` +
+            `I recorded it here and did not retry the denied action. Grant the permission before ` +
+            `running AFK again.\n`
+          : `No AFK-eligible work completable on issue ${id} — ${slug}. I stopped because a ` +
+            `dependency the issue says is done turned out not to be done in the code.\n`;
   writeFileSync(
     receiptPath,
     `---\nissue: ${id}\nslug: ${slug}\noutcome: ${outcome}\nfinished: ${finished}\n---\n${body}`,
