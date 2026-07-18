@@ -18,10 +18,11 @@ import { channelForAction } from './dispatcher-channel';
 import type { LifecycleEventKind } from './dispatcher-lifecycle';
 
 describe('narrativeChannelFor — the ADR-0014 channel model', () => {
-  it('routes run narrative into the conversation: completion blocks, HITL parks, drain facts, adopted strays, missing receipts', () => {
+  it('routes run narrative into the conversation: completion blocks, HITL parks, blocked parks, drain facts, adopted strays, missing receipts', () => {
     const chatKinds: NarrativeEventKind[] = [
       'run-completed',
       'hitl-park',
+      'run-blocked-park',
       'drain-stopped',
       'drain-halted',
       'strays-adopted',
@@ -69,7 +70,7 @@ describe('narrativeKindForLifecycle — lifecycle events onto the narrative tabl
     const expected: Record<LifecycleEventKind, NarrativeEventKind> = {
       started: 'run-started',
       finished: 'run-completed',
-      blocked: 'run-blocked-alert',
+      blocked: 'run-blocked-park',
       stranded: 'run-stranded-alert',
       'needs-attention': 'needs-attention',
       'hitl-waiting': 'hitl-park',
@@ -78,11 +79,12 @@ describe('narrativeKindForLifecycle — lifecycle events onto the narrative tabl
     for (const [lifecycle, narrative] of Object.entries(expected)) {
       expect(narrativeKindForLifecycle(lifecycle as LifecycleEventKind), lifecycle).toBe(narrative);
     }
-    // The two ADR-0014 promotions out of the ambient log:
+    // The ADR-0014 promotions out of the ambient log, plus issue 137's blocked
+    // park: the drain no longer halts on a block, so the park IS the chat fact.
     expect(narrativeChannelFor(narrativeKindForLifecycle('hitl-waiting'))).toBe('chat');
     expect(narrativeChannelFor(narrativeKindForLifecycle('finished-without-receipt'))).toBe('chat');
-    // Blocked/stranded alerts stay history (their halt fact is the chat message).
-    expect(narrativeChannelFor(narrativeKindForLifecycle('blocked'))).toBe('history');
+    expect(narrativeChannelFor(narrativeKindForLifecycle('blocked'))).toBe('chat');
+    // A stranded Run (no Receipt, issue 22) stays a history alert.
     expect(narrativeChannelFor(narrativeKindForLifecycle('stranded'))).toBe('history');
   });
 });

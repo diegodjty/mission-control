@@ -3,6 +3,7 @@ import {
   planDrain,
   normalizeCap,
   isParkedHitl,
+  isBlockedPark,
   drainAvailability,
   soloChainedIssueIds,
   type ActiveRun,
@@ -481,16 +482,20 @@ describe('planDrain — a parked HITL Run does not halt the drain (issue 64)', (
     expect(plan.drain.reason).toBe('no-eligible');
   });
 
-  it('still stops with run-blocked for a Run declaring outcome: blocked', () => {
-    const issues = [mk(5, 'wip', [], true), mk(6, 'open')];
+  it('a Run declaring outcome: blocked PARKS — it no longer halts (issue 137)', () => {
+    // Pre-137 this stopped the drain with run-blocked; now a declared-blocked
+    // Run parks (its dependents stay excluded via eligibility) and the drain
+    // keeps scheduling, exactly as it already does for a parked HITL Run.
+    const issues = [mk(5, 'wip'), mk(6, 'open')];
     const plan = planDrain({
       issues,
       maxConcurrent: 2,
       activeRuns: [{ issueId: 5, status: 'blocked', receiptOutcome: 'blocked' }],
     });
-    expect(plan.drain.stop).toBe(true);
-    expect(plan.drain.reason).toBe('run-blocked');
-    expect(plan.drain.blockedIssueId).toBe(5);
+    expect(plan.drain.stop).toBe(false);
+    expect(plan.drain.reason).toBeNull();
+    expect(plan.drain.blockedParkedIssueIds).toEqual([5]);
+    expect(plan.startable).toEqual([6]);
   });
 
   it('still stops with run-blocked when a Run ends with no Receipt and no done flip', () => {
@@ -504,19 +509,151 @@ describe('planDrain — a parked HITL Run does not halt the drain (issue 64)', (
     expect(plan.drain.reason).toBe('run-blocked');
   });
 
-  it('halts on the genuinely blocked Run even when another Run is parked', () => {
-    const issues = [mk(4, 'wip'), mk(5, 'wip', [], true), mk(6, 'open')];
+  it('halts on a genuinely blocked (no-Receipt) Run even alongside parks (issue 137)', () => {
+    // Both a parked HITL Run (05) and a declared-blocked park (04) are skipped;
+    // only the no-Receipt Run (03) — genuinely-unknown state — halts the drain.
+    const issues = [mk(3, 'wip'), mk(4, 'wip'), mk(5, 'wip', [], true), mk(6, 'open')];
     const plan = planDrain({
       issues,
       maxConcurrent: 3,
       activeRuns: [
-        { issueId: 5, status: 'blocked', receiptOutcome: 'needs-verification' },
-        { issueId: 4, status: 'blocked', receiptOutcome: 'blocked' },
+        { issueId: 5, status: 'blocked', receiptOutcome: 'needs-verification' }, // HITL park
+        { issueId: 4, status: 'blocked', receiptOutcome: 'blocked' }, // declared-blocked park
+        { issueId: 3, status: 'blocked' }, // no Receipt → genuine halt
       ],
     });
     expect(plan.drain.stop).toBe(true);
     expect(plan.drain.reason).toBe('run-blocked');
-    expect(plan.drain.blockedIssueId).toBe(4);
+    expect(plan.drain.blockedIssueId).toBe(3);
+    // The declared-blocked park is still reported so the human sees it.
+    expect(plan.drain.blockedParkedIssueIds).toEqual([4]);
+  });
+});
+
+describe('isBlockedPark — declared-blocked parks vs the genuinely-unknown halt (issue 137)', () => {
+  it('a non-leftover blocked Run whose Receipt declares blocked is a park', () => {
+    expect(isBlockedPark({ status: 'blocked', receiptOutcome: 'blocked' })).toBe(true);
+  });
+
+  it('a blocked Run with NO Receipt is NOT a park — the conservative halt stands', () => {
+    expect(isBlockedPark({ status: 'blocked' })).toBe(false);
+    expect(isBlockedPark({ status: 'blocked', receiptOutcome: null })).toBe(false);
+  });
+
+  it('a park needs the blocked status: a needs-verification/unknown Receipt is not a blocked park', () => {
+    expect(isBlockedPark({ status: 'blocked', receiptOutcome: 'needs-verification' })).toBe(false);
+    expect(isBlockedPark({ status: 'blocked', receiptOutcome: 'unknown' })).toBe(false);
+    expect(isBlockedPark({ status: 'running', receiptOutcome: 'blocked' })).toBe(false);
+  });
+
+  it('a LEFTOVER declared-blocked Run is not THIS drain\'s park (issue 132)', () => {
+    expect(isBlockedPark({ status: 'blocked', receiptOutcome: 'blocked', leftover: true })).toBe(false);
+  });
+});
+
+describe('planDrain — a declared-blocked Run parks and the drain continues (issue 137)', () => {
+  it('does not stop; excludes the blocked issue + its transitive dependents; fills free slots with unrelated work', () => {
+    // 03 declared blocked. 04 depends_on 03, 07 depends_on 04 — both transitive
+    // dependents stay excluded (their dependency never reached `done`). 05 and 06
+    // are unrelated and eligible; both fill the free slots on THIS tick.
+    const issues = [
+      mk(3, 'wip'),
+      mk(4, 'open', [3]),
+      mk(7, 'open', [4]),
+      mk(5, 'open'),
+      mk(6, 'open'),
+    ];
+    const plan = planDrain({
+      issues,
+      maxConcurrent: 3,
+      activeRuns: [{ issueId: 3, status: 'blocked', receiptOutcome: 'blocked' }],
+    });
+    expect(plan.drain.stop).toBe(false);
+    expect(plan.drain.reason).toBeNull();
+    expect(plan.drain.blockedParkedIssueIds).toEqual([3]);
+    // Unrelated eligible issues fill the slots; the dependents never appear.
+    expect(plan.startable).toEqual([5, 6]);
+    expect(plan.startable).not.toContain(4);
+    expect(plan.startable).not.toContain(7);
+    // The blocked issue is never re-started within the drain (it has a Run).
+    expect(plan.startable).not.toContain(3);
+  });
+
+  it('never restarts the blocked-parked issue within the same drain', () => {
+    // Even if the blocked issue somehow read `open`, its Run is tracked.
+    const issues = [mk(3, 'open'), mk(6, 'open')];
+    const plan = planDrain({
+      issues,
+      maxConcurrent: 3,
+      activeRuns: [{ issueId: 3, status: 'blocked', receiptOutcome: 'blocked' }],
+    });
+    expect(plan.startable).toEqual([6]);
+  });
+
+  it('a blocked park frees its slot (it is not running)', () => {
+    const issues = [mk(3, 'wip'), mk(6, 'open'), mk(7, 'open')];
+    const plan = planDrain({
+      issues,
+      maxConcurrent: 2,
+      activeRuns: [{ issueId: 3, status: 'blocked', receiptOutcome: 'blocked' }],
+    });
+    // cap 2, the park occupies no slot → both remaining eligible issues start.
+    expect(plan.startable).toEqual([6, 7]);
+  });
+
+  it('ends no-eligible (not run-blocked) and the stop message reports "N blocked awaiting you"', () => {
+    // Only the blocked park remains — nothing running, nothing eligible: the
+    // drain FINISHED, it did not halt. The message names who is awaiting you.
+    const issues = [mk(3, 'wip'), mk(6, 'done')];
+    const plan = planDrain({
+      issues,
+      maxConcurrent: 2,
+      activeRuns: [
+        { issueId: 3, status: 'blocked', receiptOutcome: 'blocked' },
+        { issueId: 6, status: 'finished', receiptOutcome: 'completed' },
+      ],
+    });
+    expect(plan.drain.stop).toBe(true);
+    expect(plan.drain.reason).toBe('no-eligible');
+    expect(plan.drain.blockedParkedIssueIds).toEqual([3]);
+    expect(plan.drain.message).toMatch(/no eligible issue remains/i);
+    expect(plan.drain.message).toMatch(/1 blocked awaiting you \(issue 3\)/i);
+  });
+
+  it('lists multiple blocked parks by id, ascending, in the stop message', () => {
+    const issues = [mk(3, 'wip'), mk(8, 'wip'), mk(6, 'done')];
+    const plan = planDrain({
+      issues,
+      maxConcurrent: 3,
+      activeRuns: [
+        { issueId: 8, status: 'blocked', receiptOutcome: 'blocked' },
+        { issueId: 3, status: 'blocked', receiptOutcome: 'blocked' },
+      ],
+    });
+    expect(plan.drain.reason).toBe('no-eligible');
+    expect(plan.drain.blockedParkedIssueIds).toEqual([3, 8]);
+    expect(plan.drain.message).toMatch(/2 blocked awaiting you \(issues 3, 8\)/i);
+  });
+
+  it('a clean no-eligible stop (no blocked parks) reads exactly as before', () => {
+    const issues = [mk(1, 'done'), mk(2, 'done')];
+    const plan = planDrain({ issues, maxConcurrent: 3, activeRuns: [] });
+    expect(plan.drain.blockedParkedIssueIds).toEqual([]);
+    expect(plan.drain.message).toBe('Stopped: no eligible issue remains.');
+  });
+
+  it('a LEFTOVER declared-blocked Run neither halts nor is reported as this drain\'s park', () => {
+    // A prior-drain Run that declared blocked (Receipt and all) is not THIS
+    // drain's concern: it neither halts nor swells the "awaiting you" list.
+    const issues = [mk(1, 'open'), mk(2, 'open')];
+    const plan = planDrain({
+      issues,
+      maxConcurrent: 2,
+      activeRuns: [{ issueId: 99, status: 'blocked', receiptOutcome: 'blocked', leftover: true }],
+    });
+    expect(plan.drain.stop).toBe(false);
+    expect(plan.drain.blockedParkedIssueIds).toEqual([]);
+    expect(plan.startable).toEqual([1, 2]);
   });
 });
 

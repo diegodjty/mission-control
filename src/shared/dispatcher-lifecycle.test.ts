@@ -30,21 +30,19 @@ describe('reactToLifecycleEvent', () => {
     }
   });
 
-  it('surfaces a blocked Run and suggests discard-and-continue (non-blocking, ADR-0011)', () => {
+  it('surfaces a declared-blocked Run as a PARK awaiting the human, no discard proposal (issue 137)', () => {
     const r = reactToLifecycleEvent(
       ev({ kind: 'blocked', detail: '62 is wip and blocks the rest' }),
     );
+    // Proactive so the user is not left to notice the parked issue.
     expect(r.proactive).toBe(true);
     expect(r.notification).toContain('issue 05');
     expect(r.notification).toContain('blocked');
     // The captured blocker reason (issue 42 detail) reaches the user.
     expect(r.notification).toContain('62 is wip and blocks the rest');
-    expect(r.proposal).not.toBeNull();
-    expect(r.proposal?.action).toBe('discard-and-continue');
-    expect(r.proposal?.id).toBe('discard-and-continue:sess-1');
-    // ADR-0011: discard-and-continue is NOT on the three-item blocking list, so
-    // the suggested next step no longer raises an approve/reject gate.
-    expect(classifyAuthority(r.proposal!.action)).not.toBe('blocking');
+    // The drain continues past it and the human unsticks it — nothing to discard.
+    expect(r.notification?.toLowerCase()).not.toContain('discard');
+    expect(r.proposal).toBeNull();
   });
 
   it('surfaces a stranded Run and suggests a non-blocking discard-and-continue', () => {
@@ -99,11 +97,18 @@ describe('reactToLifecycleEvent', () => {
   });
 
   it('falls back gracefully when issue id/slug are unknown', () => {
-    const r = reactToLifecycleEvent(
+    // The blocked park labels the issue "a Run" when nothing is known, no proposal.
+    const b = reactToLifecycleEvent(
       ev({ kind: 'blocked', issueId: null, slug: null, title: null }),
     );
-    expect(r.notification).toContain('a Run');
-    expect(r.proposal?.id).toBe('discard-and-continue:sess-1');
+    expect(b.notification).toContain('a Run');
+    expect(b.proposal).toBeNull();
+    // The stranded path still carries its discard-and-continue proposal id.
+    const s = reactToLifecycleEvent(
+      ev({ kind: 'stranded', issueId: null, slug: null, title: null }),
+    );
+    expect(s.notification).toContain('a Run');
+    expect(s.proposal?.id).toBe('discard-and-continue:sess-1');
   });
 
   // The defining exclusion (PRD "Input contract", ADR-0007): raw Pane output is

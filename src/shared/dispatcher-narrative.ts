@@ -45,6 +45,12 @@ export type NarrativeEventKind =
   | 'run-completed'
   /** A HITL issue parked awaiting the human ("waiting for you", with steps). */
   | 'hitl-park'
+  /**
+   * A Run parked BLOCKED awaiting the human (issue 137). The drain no longer
+   * halts on a declared-blocked Run, so its park is now the chat message a
+   * `drain-halted` fact used to carry — never a silent skip.
+   */
+  | 'run-blocked-park'
   /** The user stopped the drain. */
   | 'drain-stopped'
   /** The drain halted/ended on its own (run blocked, nothing eligible, isolation failure). */
@@ -56,7 +62,11 @@ export type NarrativeEventKind =
   // --- History strip only (the ADR-0012 noise floor stands) ---
   /** A Run's Pane spawned — routine, never a conversation message. */
   | 'run-started'
-  /** A blocked Run's alert (its halt fact is the chat message; the alert is history). */
+  /**
+   * A blocked Run's captured block text (its full report). The chat message is
+   * the `run-blocked-park` park notice (issue 137); this full block stays a
+   * history line so the same Run never gets two chat messages.
+   */
   | 'run-blocked-alert'
   /** A stranded isolated Run's alert (issue 22). */
   | 'run-stranded-alert'
@@ -85,6 +95,7 @@ const NARRATIVE_CHANNEL: Record<NarrativeEventKind, NarrativeChannel> = {
   // Run narrative — messages in the Dispatcher conversation, live.
   'run-completed': 'chat',
   'hitl-park': 'chat',
+  'run-blocked-park': 'chat',
   'drain-stopped': 'chat',
   'drain-halted': 'chat',
   'strays-adopted': 'chat',
@@ -119,7 +130,10 @@ export function narrativeKindForLifecycle(kind: LifecycleEventKind): NarrativeEv
     case 'finished':
       return 'run-completed';
     case 'blocked':
-      return 'run-blocked-alert';
+      // Issue 137: a declared-blocked Run parks awaiting the human and the drain
+      // continues past it, so its park is a Run-narrative CHAT message now — the
+      // `drain-halted` fact that used to carry it no longer fires for a block.
+      return 'run-blocked-park';
     case 'stranded':
       return 'run-stranded-alert';
     case 'needs-attention':

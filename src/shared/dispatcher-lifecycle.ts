@@ -10,11 +10,13 @@
  *   - `started`         — a Run's Pane spawned (light relay, no action).
  *   - `finished`        — a Run reached `done` (light relay; its substance is the
  *                          Completion block fed separately).
- *   - `blocked`         — a Run ended without finishing (issue 22): it will emit
- *                          no useful Completion block, so the Dispatcher surfaces
- *                          it and PROPOSES discard-and-continue (issue 22's
- *                          discard, gated by issue 36) rather than the drain
- *                          silently stalling.
+ *   - `blocked`         — a Run DECLARED `outcome: blocked` (issue 137): it parks
+ *                          awaiting the human, and the drain continues past it
+ *                          (never a run-blocked halt). The Dispatcher PROACTIVELY
+ *                          surfaces the park as a Run-narrative message with the
+ *                          captured blocker reason — unstick it and it re-runs.
+ *                          No discard proposal (the human clears the blocker;
+ *                          throwing the Run away is the `stranded` path below).
  *   - `stranded`        — a blocked/stopped isolated Run left a worktree behind
  *                          (issue 22): same surface + discard-and-continue
  *                          proposal so a finished sibling's Merge isn't blocked.
@@ -145,14 +147,18 @@ export function reactToLifecycleEvent(event: LifecycleEvent): DispatcherReaction
       return { notification: `Finished ${label}.`, proposal: null, proactive: false };
 
     case 'blocked':
-      // A blocked Run emits no useful Completion block — surface it and propose
-      // discarding it so the drain continues rather than stalling silently.
+      // Issue 137: a Run that DECLARES `outcome: blocked` parks awaiting the
+      // human — its issue stays not-done, its dependents stay blocked naturally,
+      // and the drain continues past it (never a run-blocked halt). So the
+      // reaction is a proactive PARK notice (unstick it, then it re-runs), not a
+      // discard proposal: discarding is the stranded/no-Receipt path below, and
+      // the human clears a blocker; they don't throw the Run away.
       return {
         notification:
-          `${label} is blocked — its Run ended without finishing, so no completion block is coming.` +
+          `${label} is parked blocked — its Run reported a blocker only you can clear, so the drain skipped it and kept going.` +
           detailClause('Reason', event.detail) +
-          ` Discard it and continue the drain?`,
-        proposal: { id: `discard-and-continue:${event.runId}`, action: 'discard-and-continue' },
+          ` Unstick it, then it can run again.`,
+        proposal: null,
         proactive: true,
       };
 
@@ -218,9 +224,12 @@ export function actionForLifecycle(kind: LifecycleEventKind): DispatcherAction {
   switch (kind) {
     case 'hitl-waiting':
       return 'hitl-signoff';
-    case 'blocked':
     case 'stranded':
       return 'discard-and-continue';
+    case 'blocked':
+      // Issue 137: a declared-blocked Run parks awaiting the human — the drain
+      // continues past it and the human unsticks it. Nothing to discard, no gate
+      // to raise: it's a proactive relay (a Run-narrative chat message).
     case 'needs-attention':
     case 'started':
     case 'finished':
@@ -234,7 +243,7 @@ export function actionForLifecycle(kind: LifecycleEventKind): DispatcherAction {
  * lifecycle kind that should react to it, given whether the issue is HITL
  * (`hitl: true` / `(HITL)`, per the afk-issue-runner's own detection):
  *   - `completed`          → `finished`.
- *   - `blocked`            → `blocked` (propose discard-and-continue).
+ *   - `blocked`            → `blocked` (park awaiting the human, issue 137).
  *   - `needs-verification` → `hitl-waiting` when the issue is HITL (relay its
  *     verification steps); otherwise `needs-attention` — a Run that stalled
  *     awaiting a manual step it never declared HITL, surfaced rather than
