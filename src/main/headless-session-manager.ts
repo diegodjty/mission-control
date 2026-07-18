@@ -90,16 +90,23 @@ export class HeadlessSessionManager {
     if (!req.run) {
       throw new Error('HeadlessSessionManager.spawn requires a Run target');
     }
-    const { file, args } = resolveHeadlessRunCommand(process.env, {
-      id: req.run.issueId,
-      fileName: req.run.issueFileName,
-      title: req.run.issueTitle,
-      // The Run's RESOLVED cwd (the issue's target repo for a workbench Project),
-      // from which the prompt spells out the absolute Receipt path (issue 62).
-      cwd: req.run.projectPath,
-      workbench: req.run.workbench ?? null,
-      memoryCore: context.memoryCore ?? null,
-    });
+    const { file, args } = resolveHeadlessRunCommand(
+      process.env,
+      {
+        id: req.run.issueId,
+        fileName: req.run.issueFileName,
+        title: req.run.issueTitle,
+        // The Run's RESOLVED cwd (the issue's target repo for a workbench Project),
+        // from which the prompt spells out the absolute Receipt path (issue 62).
+        cwd: req.run.projectPath,
+        workbench: req.run.workbench ?? null,
+        memoryCore: context.memoryCore ?? null,
+      },
+      // The declared drain-worker tier + effort (issues 154/155): a headless Run
+      // is always a drain Run, so `--model <id>` and `--effort <level>` are
+      // injected when the drain set them.
+      { model: req.run.model ?? null, effort: req.run.effort ?? null },
+    );
     const cwd = req.run.projectPath || process.env.HOME || process.cwd();
     const sessionId = randomUUID();
 

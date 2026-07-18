@@ -18,14 +18,28 @@
  * so the whole merge-or-hold matrix is unit-testable in isolation (see the PRD
  * "Testing Decisions").
  *
- * Scope of THIS slice (issue 145): the walking skeleton merges at most one branch
- * per sweep and treats every non-`clean` verdict as a hold. **Ordering across
- * many branches, the lane-pause flag a conflict raises, and the per-offender
- * artifact skip are issue 146** — this module already sorts candidates in finish
- * order so 146 extends it without reshaping the decision, but it deliberately does
- * not yet model pause or skip.
+ * Scope (issues 145 → 146). Issue 145's walking skeleton merged at most one clean
+ * branch per sweep and treated every non-`clean` verdict as a hold. **Issue 146
+ * completes the lane doctrine** on top of that seed: the decision now WALKS the
+ * receipt-backed candidates in finish order and distinguishes the non-clean cases
+ * the skeleton lumped together —
+ *   - a predicted **conflict** (`conflicts`/`blocked`) → `pause`: the lane raises
+ *     a blocking approval on that branch and merges NOTHING past it in finish
+ *     order (later clean branches queue). Runs keep executing — the pause is a
+ *     merge-lane fact, not a Run fact — and it clears itself the moment the
+ *     conflicting branch leaves the candidate set (resolved or aborted), so
+ *     "resume" needs no stored flag: the next sweep simply re-derives.
+ *   - an artifact-hygiene **offender** (`artifact`, issue 98/106) → skipped
+ *     PER-OFFENDER while the walk continues, so an innocent clean sibling later in
+ *     finish order still merges. The skipped offenders ride the decision so the
+ *     executor can raise their per-branch attention items.
+ *   - a **stray** (no Receipt) is filtered out of the walk entirely — never
+ *     auto-merged, never a blocker (ADR-0021: the human adopts it by hand).
+ * Still one merge per sweep (the next sweep, fired on the merge completion, takes
+ * the following branch); still PURE (no git/fs/Electron) so the whole
+ * merge / pause / skip / hold matrix is unit-testable in isolation.
  */
-import type { MergePreviewVerdict } from './merge-preview';
+import type { MergePreviewVerdict, SettledVerdict } from './merge-preview';
 
 /**
  * One finished-unmerged `afk/` branch the lane is considering, annotated with the
@@ -81,10 +95,35 @@ export interface MainIdle {
  */
 export type LaneHoldReason = 'mid-merge' | 'main-dirty' | 'live-solo-run' | 'no-clean-branch';
 
-/** The lane's decision for one sweep: merge the next clean branch, or hold. */
+/**
+ * An artifact-hygiene offender the lane skipped this sweep (issue 106/146): a
+ * finished, Receipt-backed branch whose merge-preview stamped it `artifact`
+ * (it would add ignored install artifacts to the default branch — issue 98). The
+ * lane skips it per-offender and keeps merging innocent siblings; the executor
+ * turns each skip into that branch's attention item. `paths` are the offending
+ * artifact paths the badge names.
+ */
+export interface LaneSkip {
+  issueId: number;
+  slug: string;
+  paths: string[];
+}
+
+/**
+ * The lane's decision for one sweep (issue 146):
+ *   - `merge` — merge THIS clean branch (the earliest-finished one still
+ *     mergeable), carrying any artifact offenders `skipped` on the way to it.
+ *   - `pause` — a predicted conflict on `issueId`/`slug` (its `verdict` is
+ *     `conflicts` or `blocked`) stops the lane: raise a blocking approval, merge
+ *     nothing past it. `skipped` carries offenders passed before the pause point.
+ *   - `hold`  — nothing to do this sweep: main isn't idle (`reason` names the
+ *     fact), or no branch is currently mergeable (`no-clean-branch`). `skipped`
+ *     still reports any offenders seen (they are order-independent facts).
+ */
 export type AutoMergeLaneDecision =
-  | { kind: 'merge'; issueId: number; slug: string }
-  | { kind: 'hold'; reason: LaneHoldReason };
+  | { kind: 'merge'; issueId: number; slug: string; skipped: LaneSkip[] }
+  | { kind: 'pause'; issueId: number; slug: string; verdict: SettledVerdict; skipped: LaneSkip[] }
+  | { kind: 'hold'; reason: LaneHoldReason; skipped: LaneSkip[] };
 
 export interface AutoMergeLaneInput {
   /** The finished-unmerged candidates (any order — the lane sorts by finish time). */
@@ -107,42 +146,86 @@ export function mainIdleHold(main: MainIdle): Exclude<LaneHoldReason, 'no-clean-
 }
 
 /**
- * The auto-mergeable candidates — Receipt-backed AND stamped `clean` — in finish
- * order (earliest Receipt `finished` first; a null timestamp sorts last; ties
- * broken by ascending issue id for determinism). Strays and non-`clean` verdicts
- * are filtered out. Exported so 146 can build its multi-branch ordering on the
- * same finish-order list this slice already produces. Pure; input untouched.
+ * Finish-order comparator (ADR-0021, "first finished, first merged"): earliest
+ * Receipt `finished` first; a null timestamp sorts last so a branch with a real
+ * timestamp is always preferred; ties broken by ascending issue id for
+ * determinism. The one ordering the whole lane merges by.
  */
-export function mergeableInFinishOrder(branches: LaneBranch[]): LaneBranch[] {
-  return branches
-    .filter((b) => b.receiptBacked && b.verdict !== null && b.verdict.kind === 'clean')
-    .slice()
-    .sort((a, b) => {
-      if (a.finished !== b.finished) {
-        if (a.finished === null) return 1;
-        if (b.finished === null) return -1;
-        return a.finished < b.finished ? -1 : 1;
-      }
-      return a.issueId - b.issueId;
-    });
+function byFinishOrder(a: LaneBranch, b: LaneBranch): number {
+  if (a.finished !== b.finished) {
+    if (a.finished === null) return 1;
+    if (b.finished === null) return -1;
+    return a.finished < b.finished ? -1 : 1;
+  }
+  return a.issueId - b.issueId;
 }
 
 /**
- * Decide one sweep of the auto-merge lane (issue 145). Deterministic and
- * idempotent — safe to recompute on every Run-finish / merge-completion event.
+ * The Receipt-backed candidates in finish order — strays (no Receipt) filtered
+ * out, EVERY verdict kept (clean, conflict, artifact, transient). This is the
+ * list the 146 walk marches down deciding merge / skip / pause per branch. Pure;
+ * input untouched.
+ */
+export function receiptBackedInFinishOrder(branches: LaneBranch[]): LaneBranch[] {
+  return branches.filter((b) => b.receiptBacked).slice().sort(byFinishOrder);
+}
+
+/**
+ * The auto-mergeable candidates — Receipt-backed AND stamped `clean` — in finish
+ * order. Strays and non-`clean` verdicts are filtered out. Retained from issue
+ * 145 (and still the seed the walk builds on); pure, input untouched.
+ */
+export function mergeableInFinishOrder(branches: LaneBranch[]): LaneBranch[] {
+  return receiptBackedInFinishOrder(branches).filter(
+    (b) => b.verdict !== null && b.verdict.kind === 'clean',
+  );
+}
+
+/**
+ * Decide one sweep of the full auto-merge lane (issue 146). Deterministic and
+ * idempotent — safe to recompute on every Run-finish / merge-completion event, and
+ * "resume after resolve/abort" needs no stored state: once the conflicting branch
+ * leaves the candidate set the next sweep re-derives a `merge`.
  *
- *  - main not idle (mid-merge / dirty / a live solo Run) → **hold**, naming the
- *    blocking fact — the lane never merges onto a moving or conflicted main.
- *  - main idle, at least one Receipt-backed branch stamped `clean` → **merge**
- *    the earliest-finished one (this slice takes exactly one per sweep; the next
- *    sweep, fired on the merge completion, takes the following one — issue 146).
- *  - main idle but nothing clean and Receipt-backed → **hold** (`no-clean-branch`).
+ *  1. main not idle (mid-merge / dirty / a live solo Run) → **hold**, naming the
+ *     blocking fact — the lane never merges onto a moving or conflicted main. (An
+ *     ACTUAL conflict left by a prior sweep sets `midMerge`, so it pauses the lane
+ *     here; a PREDICTED conflict pauses at step 2 below, before any git touch.)
+ *  2. main idle → WALK the Receipt-backed candidates in finish order:
+ *       - `clean`               → **merge** it (one per sweep), reporting offenders
+ *                                  skipped on the way.
+ *       - `artifact`            → **skip** this offender, keep walking (issue 106).
+ *       - `conflicts`/`blocked` → **pause** the lane on this branch (blocking
+ *                                  approval); merge nothing past it — later clean
+ *                                  branches queue until it's resolved or aborted.
+ *       - transient (`recalculating`/`suspended`) or no verdict → **hold** without
+ *         merging past it, preserving finish order until the preview settles.
+ *     Walk falls off the end with nothing mergeable → **hold** (`no-clean-branch`),
+ *     still reporting any offenders skipped.
  */
 export function decideAutoMergeLane(input: AutoMergeLaneInput): AutoMergeLaneDecision {
   const idleHold = mainIdleHold(input.main);
-  if (idleHold !== null) return { kind: 'hold', reason: idleHold };
+  if (idleHold !== null) return { kind: 'hold', reason: idleHold, skipped: [] };
 
-  const next = mergeableInFinishOrder(input.branches)[0];
-  if (next === undefined) return { kind: 'hold', reason: 'no-clean-branch' };
-  return { kind: 'merge', issueId: next.issueId, slug: next.slug };
+  const skipped: LaneSkip[] = [];
+  for (const b of receiptBackedInFinishOrder(input.branches)) {
+    const verdict = b.verdict;
+    if (verdict === null) return { kind: 'hold', reason: 'no-clean-branch', skipped };
+    switch (verdict.kind) {
+      case 'clean':
+        return { kind: 'merge', issueId: b.issueId, slug: b.slug, skipped };
+      case 'artifact':
+        skipped.push({ issueId: b.issueId, slug: b.slug, paths: verdict.paths });
+        continue;
+      case 'conflicts':
+      case 'blocked':
+        return { kind: 'pause', issueId: b.issueId, slug: b.slug, verdict, skipped };
+      // A transient verdict (a moved tip / mid-merge suspension) leaves this
+      // branch's true outcome unknown; hold rather than merge a LATER branch
+      // ahead of it and break finish order — the next settled sweep re-decides.
+      default:
+        return { kind: 'hold', reason: 'no-clean-branch', skipped };
+    }
+  }
+  return { kind: 'hold', reason: 'no-clean-branch', skipped };
 }

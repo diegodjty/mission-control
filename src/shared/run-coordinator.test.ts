@@ -28,6 +28,8 @@ function mk(
     source: null,
     hitl,
     repoKey: null,
+    model: null,
+    effort: null,
     inBatch: true,
     standalone: false,
     body: '',

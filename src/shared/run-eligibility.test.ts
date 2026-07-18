@@ -20,6 +20,8 @@ function mk(id: number, status: IssueStatus, dependsOn: number[] = []): BacklogI
     source: null,
     hitl: false,
     repoKey: null,
+    model: null,
+    effort: null,
     inBatch: true,
     standalone: false,
     body: '',

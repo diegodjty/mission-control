@@ -9,6 +9,7 @@ import { createRepoSerializer, type RepoSerializer } from '../shared/repo-serial
 import type { AfkBranchFacts } from '../shared/worktree-scan';
 import type { BranchPreview, MergePreviewVerdict } from '../shared/merge-preview';
 import type { MergeRunsResult, RunLogRecord } from '../shared/ipc-contract';
+import { classifyAuthority } from '../shared/dispatcher-authority';
 
 /**
  * Exercises the auto-merge lane EXECUTOR (issue 145) with injected fakes — the
@@ -142,7 +143,7 @@ describe('sweepAutoMergeLane — a non-idle main holds and never merges (issue 1
   it('holds (main-dirty) on a dirty tree — no merge, no serializer use', async () => {
     const { deps: d, keys, mergeCalls } = deps({ isCleanTree: async () => false });
     const outcome = await sweepAutoMergeLane(d);
-    expect(outcome).toEqual({ kind: 'hold', reason: 'main-dirty' });
+    expect(outcome).toEqual({ kind: 'hold', reason: 'main-dirty', skipped: [] });
     expect(mergeCalls).toEqual([]);
     expect(keys).toEqual([]);
   });
@@ -156,14 +157,14 @@ describe('sweepAutoMergeLane — a non-idle main holds and never merges (issue 1
       },
     });
     const outcome = await sweepAutoMergeLane(d);
-    expect(outcome).toEqual({ kind: 'hold', reason: 'mid-merge' });
+    expect(outcome).toEqual({ kind: 'hold', reason: 'mid-merge', skipped: [] });
     expect(mergeCalls).toEqual([]);
   });
 
   it('holds (live-solo-run) while a solo Run is live on main', async () => {
     const { deps: d, mergeCalls } = deps({ hasLiveSoloRun: () => true });
     const outcome = await sweepAutoMergeLane(d);
-    expect(outcome).toEqual({ kind: 'hold', reason: 'live-solo-run' });
+    expect(outcome).toEqual({ kind: 'hold', reason: 'live-solo-run', skipped: [] });
     expect(mergeCalls).toEqual([]);
   });
 });
@@ -172,7 +173,7 @@ describe('sweepAutoMergeLane — Receipt-backing and verdict gate the merge (iss
   it('never merges a stray branch (finished-unmerged, clean, but no Receipt in the log)', async () => {
     const { deps: d, mergeCalls } = deps({ runLog: [] }); // no Receipt for issue 5
     const outcome = await sweepAutoMergeLane(d);
-    expect(outcome).toEqual({ kind: 'hold', reason: 'no-clean-branch' });
+    expect(outcome).toEqual({ kind: 'hold', reason: 'no-clean-branch', skipped: [] });
     expect(mergeCalls).toEqual([]);
   });
 
@@ -185,13 +186,13 @@ describe('sweepAutoMergeLane — Receipt-backing and verdict gate the merge (iss
       },
     });
     const outcome = await sweepAutoMergeLane(d);
-    expect(outcome).toEqual({ kind: 'hold', reason: 'no-clean-branch' });
+    expect(outcome).toEqual({ kind: 'hold', reason: 'no-clean-branch', skipped: [] });
     expect(mergeCalls).toEqual([]);
   });
 });
 
-describe('sweepAutoMergeLane — result classification surfaces a conflict as a gate (issue 145)', () => {
-  it('classifies a conflicting merge as a gate (lane-pause is issue 146; this slice only classifies)', async () => {
+describe('sweepAutoMergeLane — an ACTUAL conflict from a merge leaves main mid-merge and gates (issue 145/146)', () => {
+  it('classifies a conflicting merge as a gate — the mid-merge it leaves pauses the lane on the next sweep', async () => {
     const conflict = mergeOk('05-live-map-updates', {
       ok: false,
       conflicted: true,
@@ -209,6 +210,100 @@ describe('sweepAutoMergeLane — result classification surfaces a conflict as a 
       action: 'merge-conflict',
       reason: conflict.message,
     });
+  });
+});
+
+describe('sweepAutoMergeLane — a PREDICTED conflict pauses the lane, never touching git (issue 146)', () => {
+  it('returns `paused` with the blocking merge-conflict approval and runs NO merge', async () => {
+    const { deps: d, mergeCalls, keys } = deps({
+      scanResult: {
+        branches: [finishedUnmerged(6, '06-conflict')],
+        previews: [preview(6, '06-conflict', { kind: 'conflicts', files: ['src/app.ts'] })],
+        midMerge: false,
+      },
+      runLog: [receipt(6, '06-conflict', '2026-07-03T09:00:00.000Z')],
+    });
+    const outcome = await sweepAutoMergeLane(d);
+    expect(outcome).toEqual({
+      kind: 'paused',
+      issueId: 6,
+      slug: '06-conflict',
+      action: 'merge-conflict',
+      reason: expect.stringContaining('src/app.ts'),
+      skipped: [],
+    });
+    // No git touch on a mere prediction — main is left untouched, no serializer use.
+    expect(mergeCalls).toEqual([]);
+    expect(keys).toEqual([]);
+    // The pause rides the ADR-0011 blocking list — the SAME merge-conflict action, no new one.
+    if (outcome.kind === 'paused') expect(classifyAuthority(outcome.action)).toBe('blocking');
+  });
+
+  it('pauses even when a later clean sibling exists — the conflict queues the whole lane', async () => {
+    const { deps: d, mergeCalls } = deps({
+      scanResult: {
+        branches: [finishedUnmerged(6, '06-conflict'), finishedUnmerged(7, '07-clean')],
+        previews: [
+          preview(6, '06-conflict', { kind: 'conflicts', files: ['shared.ts'] }),
+          preview(7, '07-clean', { kind: 'clean' }),
+        ],
+        midMerge: false,
+      },
+      // 06 finished FIRST, so it is finish-first — its conflict pauses before 07 is reached.
+      runLog: [
+        receipt(6, '06-conflict', '2026-07-03T09:00:00.000Z'),
+        receipt(7, '07-clean', '2026-07-03T11:00:00.000Z'),
+      ],
+    });
+    const outcome = await sweepAutoMergeLane(d);
+    expect(outcome.kind).toBe('paused');
+    if (outcome.kind !== 'paused') throw new Error('unreachable');
+    expect(outcome.slug).toBe('06-conflict');
+    expect(mergeCalls).toEqual([]); // 07 queued, never merged
+  });
+});
+
+describe('sweepAutoMergeLane — an artifact offender is skipped while siblings keep merging (issue 106/146)', () => {
+  it('skips the offender, merges a later clean sibling, and reports the skip', async () => {
+    const { deps: d, mergeCalls } = deps({
+      scanResult: {
+        branches: [finishedUnmerged(6, '06-artifact'), finishedUnmerged(7, '07-clean')],
+        previews: [
+          preview(6, '06-artifact', { kind: 'artifact', paths: ['node_modules'] }),
+          preview(7, '07-clean', { kind: 'clean' }),
+        ],
+        midMerge: false,
+      },
+      runLog: [
+        receipt(6, '06-artifact', '2026-07-03T09:00:00.000Z'),
+        receipt(7, '07-clean', '2026-07-03T11:00:00.000Z'),
+      ],
+    });
+    const outcome = await sweepAutoMergeLane(d);
+    expect(outcome.kind).toBe('swept');
+    if (outcome.kind !== 'swept') throw new Error('unreachable');
+    expect(outcome.slug).toBe('07-clean'); // the innocent sibling merged
+    expect(mergeCalls).toEqual([['07-clean']]);
+    expect(outcome.decision.kind).toBe('auto'); // clean sibling → passive note, not a gate
+    expect(outcome.skipped).toEqual([{ issueId: 6, slug: '06-artifact', paths: ['node_modules'] }]);
+  });
+
+  it('holds when the only Receipt-backed branch is an artifact offender, still reporting the skip', async () => {
+    const { deps: d, mergeCalls } = deps({
+      scanResult: {
+        branches: [finishedUnmerged(6, '06-artifact')],
+        previews: [preview(6, '06-artifact', { kind: 'artifact', paths: ['dist'] })],
+        midMerge: false,
+      },
+      runLog: [receipt(6, '06-artifact', '2026-07-03T09:00:00.000Z')],
+    });
+    const outcome = await sweepAutoMergeLane(d);
+    expect(outcome).toEqual({
+      kind: 'hold',
+      reason: 'no-clean-branch',
+      skipped: [{ issueId: 6, slug: '06-artifact', paths: ['dist'] }],
+    });
+    expect(mergeCalls).toEqual([]);
   });
 });
 

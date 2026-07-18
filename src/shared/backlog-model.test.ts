@@ -207,3 +207,59 @@ describe('buildBacklog — issue repo targeting (issue 72, ADR-0015)', () => {
     expect(buildBacklog(files, CONFIG).issues[0].repoKey).toBeNull();
   });
 });
+
+describe('buildBacklog — per-issue model tier (issue 154)', () => {
+  it('parses a known model: tier from frontmatter', () => {
+    const files = [
+      issue('05-w.md', '---\nstatus: open\ndepends_on: []\nmodel: haiku\n---\n\n# 05 — W\n'),
+    ];
+    expect(buildBacklog(files, CONFIG).issues[0].model).toBe('haiku');
+  });
+
+  it('degrades an unknown or absent model: to null (= the CONFIG default)', () => {
+    const files = [
+      issue('06-x.md', '---\nstatus: open\nmodel: turbo\n---\n\n# 06 — X\n'),
+      issue('07-y.md', '---\nstatus: open\n---\n\n# 07 — Y\n'),
+    ];
+    const { issues } = buildBacklog(files, CONFIG);
+    expect(issues[0].model).toBeNull();
+    expect(issues[1].model).toBeNull();
+  });
+});
+
+describe('buildBacklog — per-issue effort level (issue 155)', () => {
+  it('parses a known effort: level from frontmatter', () => {
+    const files = [
+      issue('05-w.md', '---\nstatus: open\ndepends_on: []\neffort: max\n---\n\n# 05 — W\n'),
+    ];
+    expect(buildBacklog(files, CONFIG).issues[0].effort).toBe('max');
+  });
+
+  it('degrades an unknown or absent effort: to null (= CONFIG override / tier default)', () => {
+    const files = [
+      issue('06-x.md', '---\nstatus: open\neffort: turbo\n---\n\n# 06 — X\n'),
+      issue('07-y.md', '---\nstatus: open\n---\n\n# 07 — Y\n'),
+    ];
+    const { issues } = buildBacklog(files, CONFIG);
+    expect(issues[0].effort).toBeNull();
+    expect(issues[1].effort).toBeNull();
+  });
+});
+
+describe('buildBacklog — drain-worker tiering from CONFIG (issues 154/155)', () => {
+  it('reads worker_model / escalation_ceiling / worker_effort from the CONFIG frontmatter', () => {
+    const config = `---\nrepos:\n  a: /x\ndefault_repo: a\nworker_model: haiku\nescalation_ceiling: fable\nworker_effort: high\n---\n\n# proj CONFIG\n`;
+    const backlog = buildBacklog([], config);
+    expect(backlog.workerModel).toBe('haiku');
+    expect(backlog.escalationCeiling).toBe('fable');
+    expect(backlog.workerEffort).toBe('high');
+  });
+
+  it('falls back to defaults when unset (sonnet / opus / null = derive effort from tier)', () => {
+    // The suite's CONFIG has no frontmatter tiering keys at all.
+    const backlog = buildBacklog([], CONFIG);
+    expect(backlog.workerModel).toBe('sonnet');
+    expect(backlog.escalationCeiling).toBe('opus');
+    expect(backlog.workerEffort).toBeNull();
+  });
+});

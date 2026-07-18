@@ -34,6 +34,9 @@ none`;
 function backlog(): Backlog {
   return {
     activePrd: 'docs/PRD.md',
+    workerModel: 'sonnet',
+    escalationCeiling: 'opus',
+    workerEffort: null,
     issues: [
       {
         id: 3,
@@ -46,6 +49,8 @@ function backlog(): Backlog {
         source: null,
         hitl: false,
         repoKey: null,
+        model: null,
+        effort: null,
         inBatch: true,
         standalone: false,
         // A body full of scroll-like noise — the assembler must not carry it.

@@ -19,6 +19,8 @@ function mk(id: number, status: IssueStatus): BacklogIssue {
     source: null,
     hitl: false,
     repoKey: null,
+    model: null,
+    effort: null,
     inBatch: false,
     standalone: true,
     body: '',
@@ -26,7 +28,7 @@ function mk(id: number, status: IssueStatus): BacklogIssue {
 }
 
 function backlog(...issues: BacklogIssue[]): Backlog {
-  return { activePrd: null, issues };
+  return { activePrd: null, workerModel: 'sonnet', escalationCeiling: 'opus', workerEffort: null, issues };
 }
 
 function snap(entries: Array<[number, IssueStatus]>): Map<number, IssueStatus> {

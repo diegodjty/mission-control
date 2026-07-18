@@ -39,6 +39,8 @@ function issue(id: number, status: IssueStatus): BacklogIssue {
     source: null,
     hitl: false,
     repoKey: null,
+    model: null,
+    effort: null,
     inBatch: true,
     standalone: false,
     body: '',
@@ -46,7 +48,7 @@ function issue(id: number, status: IssueStatus): BacklogIssue {
 }
 
 function backlog(issues: BacklogIssue[]): Backlog {
-  return { activePrd: 'docs/PRD.md', issues };
+  return { activePrd: 'docs/PRD.md', workerModel: 'sonnet', escalationCeiling: 'opus', workerEffort: null, issues };
 }
 
 function record(over: Partial<RunLogRecord> & { id: string; outcome: RunOutcome }): RunLogRecord {

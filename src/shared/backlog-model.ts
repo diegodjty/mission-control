@@ -11,6 +11,15 @@
  * `buildBacklog`. Keeping it pure is what makes it unit-testable in isolation
  * (see PRD "Testing Decisions").
  */
+import {
+  DEFAULT_ESCALATION_CEILING,
+  DEFAULT_WORKER_MODEL,
+  parseEffort,
+  parseTier,
+  parseWorkerTieringConfig,
+  type WorkerEffort,
+  type WorkerModelTier,
+} from './worker-model';
 
 export type IssueStatus = 'open' | 'wip' | 'done';
 
@@ -47,6 +56,25 @@ export interface BacklogIssue {
    * exactly one repo.
    */
   repoKey: string | null;
+  /**
+   * The issue's declared `model:` frontmatter tier (issue 154) — the tier this
+   * issue's DRAIN Worker starts on, overriding the project CONFIG's
+   * `worker_model` default. Null when omitted (= the CONFIG default) or when the
+   * value isn't a known tier. Hand-settable and set by the issue-producing
+   * skills at authoring time; it is the STARTING tier, not a lock (escalation
+   * still walks up from it). Interactive Runs ignore it — tiering is drain-only.
+   */
+  model: WorkerModelTier | null;
+  /**
+   * The issue's declared `effort:` frontmatter level (issue 155) — the
+   * reasoning effort this issue's DRAIN Worker spawns on, overriding both the
+   * CONFIG `worker_effort` and the tier-derived default. Null when omitted (=
+   * derive from tier, or the CONFIG override) or when the value isn't a known
+   * level. A per-issue `effort:` PINS the level across escalation; a null one
+   * lets effort re-derive as the tier climbs. Drain-only — interactive Runs
+   * ignore it, exactly like `model`.
+   */
+  effort: WorkerEffort | null;
   /** True when `parent` matches the active PRD from CONFIG. */
   inBatch: boolean;
   /** True when the issue has no `## Parent` section at all. */
@@ -58,9 +86,43 @@ export interface BacklogIssue {
 export interface Backlog {
   /** The active PRD path from `issues/CONFIG.md`, or null if none set. */
   activePrd: string | null;
+  /**
+   * The project's default DRAIN-worker tier from CONFIG `worker_model` (issue
+   * 154), resolved to a known tier (`sonnet` when unset/unknown). Surfaced here
+   * — beside `activePrd` — so the renderer's drain spawn site has it without a
+   * second CONFIG read; interactive Runs never consult it (tiering is drain-only).
+   */
+  workerModel: WorkerModelTier;
+  /**
+   * The tier the failure-escalation ladder may climb to, inclusive, from CONFIG
+   * `escalation_ceiling` (issue 154), resolved to a known tier (`opus` when
+   * unset/unknown).
+   */
+  escalationCeiling: WorkerModelTier;
+  /**
+   * The project-wide drain-worker effort override from CONFIG `worker_effort`
+   * (issue 155), or null when unset/unknown. Null means "derive effort from each
+   * worker's resolved tier" — the derivation happens at the drain spawn site
+   * (`resolveWorkerEffort`), not here. Surfaced beside `workerModel` so the
+   * renderer resolves effort without a second CONFIG read.
+   */
+  workerEffort: WorkerEffort | null;
   /** Issues sorted ascending by id. */
   issues: BacklogIssue[];
 }
+
+/**
+ * The empty backlog — what a project with no readable `issues/` derives from,
+ * at the documented tiering defaults (sonnet / opus). One source of truth so a
+ * new `Backlog` field never has to be back-filled at every empty-backlog site.
+ */
+export const EMPTY_BACKLOG: Backlog = {
+  activePrd: null,
+  workerModel: DEFAULT_WORKER_MODEL,
+  escalationCeiling: DEFAULT_ESCALATION_CEILING,
+  workerEffort: null,
+  issues: [],
+};
 
 const ISSUE_FILE = /^(\d+)-(.+)\.md$/;
 const FRONTMATTER = /^---\s*\n([\s\S]*?)\n---\s*\n?/;
@@ -136,6 +198,13 @@ function parseIssue(file: RawFile, id: number, slug: string): BacklogIssue {
   // in the body is prose. An empty value degrades to null (= default repo).
   const repoRaw = frontmatterValue(frontmatter, 'repo')?.replace(/^['"]|['"]$/g, '').trim();
   const repoKey = repoRaw !== undefined && repoRaw.length > 0 ? repoRaw : null;
+  // The optional `model:` tier (issue 154). Frontmatter only; an unknown or
+  // empty value degrades to null (= the project's `worker_model` default).
+  const model = parseTier(frontmatterValue(frontmatter, 'model'));
+  // The optional `effort:` level (issue 155). Frontmatter only; an unknown or
+  // empty value degrades to null (= the CONFIG `worker_effort` override, else
+  // the tier-derived default). When set it pins the level across escalation.
+  const effort = parseEffort(frontmatterValue(frontmatter, 'effort'));
 
   const heading = firstHeading(body);
   const title = heading ?? slug;
@@ -160,6 +229,8 @@ function parseIssue(file: RawFile, id: number, slug: string): BacklogIssue {
     source,
     hitl,
     repoKey,
+    model,
+    effort,
     inBatch: false, // set once we know the active PRD (below)
     standalone,
     body,
@@ -174,6 +245,10 @@ function parseIssue(file: RawFile, id: number, slug: string): BacklogIssue {
  */
 export function buildBacklog(files: RawFile[], configContent: string | null): Backlog {
   const activePrd = parseActivePrd(configContent);
+  // Drain-worker tiering keys (issues 154/155), read from the CONFIG frontmatter
+  // and resolved to their defaults, so the renderer gets them with the backlog.
+  const { workerModel, escalationCeiling, workerEffort } =
+    parseWorkerTieringConfig(configContent);
 
   const issues: BacklogIssue[] = [];
   for (const file of files) {
@@ -188,5 +263,5 @@ export function buildBacklog(files: RawFile[], configContent: string | null): Ba
   }
 
   issues.sort((a, b) => a.id - b.id);
-  return { activePrd, issues };
+  return { activePrd, workerModel, escalationCeiling, workerEffort, issues };
 }

@@ -59,7 +59,7 @@ sequenceDiagram
   U->>C: press Drain (cap N)
   C->>C: planDrain — startable = eligible + deps done
   C->>C: cut + provision worktree (copy node_modules)
-  C->>W: spawn headless claude -p (stream-json, no pty; NODE_ENV=development)
+  C->>W: spawn headless claude -p --model TIER --effort LEVEL (stream-json, no pty; NODE_ENV=dev)
   W-->>C: stream folded in main → Feed (activity · elapsed · last message · result); session id captured
   W->>F: flip issue open→wip (the claim)
   W->>W: work · verify gate
@@ -79,8 +79,19 @@ the stream; a manual single Run keeps its interactive **Pane**. *Landed (140):*
 main folds the event stream (pure `headless-feed` reducer) into Feed **content** —
 a live activity line, the last assistant message, and the terminal result (usage
 kept intact for 143) — pushed on `RunFeedUpdate`; the renderer consumes snapshots
-and never parses an event. *Queued:* hung Runs killed at `run_timeout` (141), Run
-telemetry — tokens/cost/duration (143), take-over in a Pane (144).
+and never parses an event. *Landed (154):* drain Workers spawn on a **declared,
+cheap-by-default model** — CONFIG `worker_model` (default `sonnet`) with an
+optional per-issue `model:` override — passed as `--model <id>`; a failed
+attempt escalates one tier up from a fresh worktree (capped at
+`escalation_ceiling`, default `opus`, and 3 attempts). Drain Runs only —
+interactive entry points keep the interactive default model. *Landed (155):*
+each drain Worker also carries a declared **effort** (`--effort <level>`),
+**derived from the tier** by default (`haiku`→low, `sonnet`→medium,
+`opus`/`fable`→high) with an issue `effort:` / CONFIG `worker_effort` override —
+a second cost lever beside the model; escalation re-derives it for the bigger
+tier unless a per-issue `effort:` pins it. *Queued:* hung Runs
+killed at `run_timeout` (141), Run telemetry — tokens/cost/duration (143),
+take-over in a Pane (144).
 
 ## 3. Merge lifecycle
 

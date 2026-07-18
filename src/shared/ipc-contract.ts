@@ -15,6 +15,7 @@ import type { PipelineStage } from './project-registry';
 import type { AfkBranchFacts } from './worktree-scan';
 import type { BranchPreview } from './merge-preview';
 import type { FeedContent } from './headless-feed';
+import type { WorkerEffort, WorkerModelTier } from './worker-model';
 
 /** Channel names. Grouped by direction for clarity. */
 export const IpcChannel = {
@@ -380,6 +381,27 @@ export interface RunTarget {
    * Worker seed (prompt, CORE.md, Receipt path) is byte-identical either way.
    */
   headless?: boolean;
+  /**
+   * The declared model tier this DRAIN Worker spawns on (issue 154). Set by the
+   * drain from the project CONFIG `worker_model` default and the issue's
+   * optional `model:` override, so unattended backlog draining runs on a cheap
+   * model instead of the expensive interactive default. Absent for a manual
+   * single Run and every interactive entry point — those inherit the interactive
+   * default model and are never tiered. When present, the session manager injects
+   * `--model <id>` ahead of the prompt via the run-command builders.
+   */
+  model?: WorkerModelTier | null;
+  /**
+   * The declared reasoning effort this DRAIN Worker spawns on (issue 155). Set
+   * by the drain from the issue's optional `effort:` override, else the CONFIG
+   * `worker_effort` override, else DERIVED from the resolved tier (`haiku`→low,
+   * `sonnet`→medium, `opus`/`fable`→high) — a second cost lever beside `model`,
+   * so a mechanical issue doesn't burn deliberate reasoning tokens. Absent for a
+   * manual single Run and every interactive entry point — those are never
+   * tiered. When present, the session manager injects `--effort <level>` ahead
+   * of the prompt via the run-command builders, alongside `--model`.
+   */
+  effort?: WorkerEffort | null;
 }
 
 /**

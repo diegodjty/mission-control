@@ -29,6 +29,8 @@ function mk(id: number, status: IssueStatus, dependsOn: number[], repoKey: strin
     source: null,
     hitl: false,
     repoKey,
+    model: null,
+    effort: null,
     inBatch: true,
     standalone: false,
     body: '',

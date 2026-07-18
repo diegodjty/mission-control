@@ -48,7 +48,7 @@
  * never a throw. Malformed artifacts degrade to no item plus an explicit
  * `notes` entry — never a guess, never silence about a skip.
  */
-import type { Backlog, BacklogIssue } from './backlog-model';
+import { EMPTY_BACKLOG, type Backlog, type BacklogIssue } from './backlog-model';
 import type { ReceiptRecord } from './receipt-parser';
 import { detectAppearedRepos, type RepoCandidate, type SelfHealInput } from './self-heal';
 
@@ -391,9 +391,7 @@ export function deriveAttention(input: AttentionInput): AttentionResult {
   const notes: string[] = [];
   const project = typeof input?.project === 'string' ? input.project : 'unknown-project';
   const backlog: Backlog =
-    input?.backlog && Array.isArray(input.backlog.issues)
-      ? input.backlog
-      : { activePrd: null, issues: [] };
+    input?.backlog && Array.isArray(input.backlog.issues) ? input.backlog : EMPTY_BACKLOG;
 
   const receiptItems = deriveReceiptItems(project, backlog, asArray(input?.receipts), notes);
 

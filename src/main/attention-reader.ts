@@ -25,13 +25,10 @@ import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { readBacklogAt } from './backlog-reader';
 import type { AttentionInput, JournalFile } from '../shared/attention-hub-model';
-import type { Backlog } from '../shared/backlog-model';
+import { EMPTY_BACKLOG } from '../shared/backlog-model';
 import { parseReceipt, type ReceiptRecord } from '../shared/receipt-parser';
 import type { SelfHealInput, WorkspaceEntry } from '../shared/self-heal';
 import { expandTilde, parseProjectConfig } from '../shared/workbench-model';
-
-/** The empty backlog — what a project with no readable `issues/` derives from. */
-const EMPTY_BACKLOG: Backlog = { activePrd: null, issues: [] };
 
 /** Read a directory's `.md` files as `{ name, content }`, sorted by name. */
 async function readMarkdownFiles(dir: string): Promise<JournalFile[]> {

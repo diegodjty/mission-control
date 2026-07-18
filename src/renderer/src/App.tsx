@@ -25,6 +25,7 @@ import {
   type AttentionItem,
 } from '../../shared/attention-hub-model';
 import type { Backlog, IssueStatus } from '../../shared/backlog-model';
+import { resolveWorkerEffort, resolveWorkerModel } from '../../shared/worker-model';
 import type {
   AttentionSnapshot,
   NavigateAttentionMessage,
@@ -3135,8 +3136,16 @@ export function App(): JSX.Element {
     let cancelled = false;
 
     const addRuns = (cwdOf: (issueId: number) => string): void => {
-      const additions = startableIssues.map((issue) =>
-        newRun(
+      const additions = startableIssues.map((issue) => {
+        // The declared drain-worker tier (issue 154): the issue's `model:`
+        // override, else the project CONFIG `worker_model` default, else sonnet
+        // — so unattended draining runs cheap instead of inheriting the
+        // expensive interactive default.
+        const tier = resolveWorkerModel({
+          configDefault: backlog.workerModel,
+          issueModel: issue.model,
+        });
+        return newRun(
           {
             issueId: issue.id,
             issueFileName: issue.fileName,
@@ -3150,12 +3159,26 @@ export function App(): JSX.Element {
             // stream-json` and watched via a read-only Feed, never a Pane. A
             // manual "▶ Run" (startRun) leaves this unset → its interactive Pane.
             headless: true,
+            // Set ONLY here (the drain path); the manual "▶ Run" and Quick-fix
+            // paths never set model/effort, so they stay on the interactive
+            // defaults.
+            model: tier,
+            // The declared drain-worker effort (issue 155): the issue's
+            // `effort:` override, else the CONFIG `worker_effort` override, else
+            // DERIVED from the resolved tier (haiku→low, sonnet→medium,
+            // opus/fable→high). A second cost lever beside the model, so a
+            // mechanical issue doesn't burn deliberate reasoning tokens.
+            effort: resolveWorkerEffort({
+              tier,
+              configDefault: backlog.workerEffort,
+              issueEffort: issue.effort,
+            }),
           },
           // Stamp the Run with THIS drain's generation (issue 132) so a later
           // drain can tell it apart from a leftover Pane it should not count.
           drainSeq.current,
-        ),
-      );
+        );
+      });
       setRuns((prev) => {
         const present = new Set(prev.map((r) => r.target.issueId));
         const fresh = additions.filter((a) => !present.has(a.target.issueId));

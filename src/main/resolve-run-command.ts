@@ -11,6 +11,36 @@
  */
 import type { ShellCommand } from './resolve-shell';
 import { coreMemorySection } from '../shared/workbench-memory';
+import {
+  modelIdForTier,
+  type WorkerEffort,
+  type WorkerModelTier,
+} from '../shared/worker-model';
+
+/**
+ * Spawn-time options a Run's command builder honors (issues 154/155): the model
+ * tier and the reasoning effort. Both are present ONLY for a Run the DRAIN
+ * spawns unattended, absent for every interactive entry point (a manual Run now,
+ * a Simple issue, a Quick fix, a Grill/Planning session, Just talk) — which
+ * keeps inheriting the interactive defaults. The tiering, in other words, fires
+ * purely by whether the caller passes these, so a manual Pane can never be
+ * silently downgraded.
+ */
+export interface RunCommandOptions {
+  /**
+   * The tier this drain Worker spawns on. When set, `--model <id>` is injected
+   * ahead of the positional prompt. The `MC_RUN_CMD` override branch is never
+   * tiered — an override (e.g. the e2e fake Worker) defines its own argv.
+   */
+  model?: WorkerModelTier | null;
+  /**
+   * The reasoning effort this drain Worker spawns on (issue 155). When set,
+   * `--effort <level>` is injected ahead of the positional prompt, alongside
+   * `--model`. Same drain-only scope and same `MC_RUN_CMD`-override exemption as
+   * `model` — an override defines its own argv and is never tiered.
+   */
+  effort?: WorkerEffort | null;
+}
 
 /**
  * The workbench paths a workbench Project's Run carries in its prompt (issue
@@ -135,10 +165,17 @@ export function buildRunPrompt(issue: RunIssueRef): string {
  *      argument so even the override still targets the right issue.
  *   2. `CLAUDE_BIN` (or the bare `claude` on PATH) with the scoped prompt as its
  *      positional initial-prompt argument.
+ *
+ * A drain caller passes `options.model` (issue 154) and `options.effort` (issue
+ * 155) to spawn the Worker on a declared, cheap-by-default tier and effort;
+ * `--model <id>` and `--effort <level>` are injected ahead of the prompt. A
+ * manual/interactive Run passes neither, so its command is byte-identical to
+ * before — it inherits the interactive default model and effort.
  */
 export function resolveRunCommand(
   env: Record<string, string | undefined>,
   issue: RunIssueRef,
+  options: RunCommandOptions = {},
 ): ShellCommand {
   const prompt = buildRunPrompt(issue);
 
@@ -149,7 +186,9 @@ export function resolveRunCommand(
   }
 
   const bin = env.CLAUDE_BIN?.trim() || 'claude';
-  return { file: bin, args: [prompt] };
+  const modelFlag = options.model ? ['--model', modelIdForTier(options.model)] : [];
+  const effortFlag = options.effort ? ['--effort', options.effort] : [];
+  return { file: bin, args: [...modelFlag, ...effortFlag, prompt] };
 }
 
 /**
@@ -176,12 +215,16 @@ export const HEADLESS_CLAUDE_FLAGS = ['-p', '--output-format', 'stream-json', '-
  *      scripted fake Worker that speaks stream-json itself), so forcing `-p` onto
  *      it would be wrong. This is the seam the fake Worker rides — byte-identical
  *      to `resolveRunCommand`'s override branch on purpose.
- *   2. `CLAUDE_BIN` (or bare `claude`) with `HEADLESS_CLAUDE_FLAGS` then the
- *      scoped prompt as the positional initial-prompt argument.
+ *   2. `CLAUDE_BIN` (or bare `claude`) with `HEADLESS_CLAUDE_FLAGS`, then (for a
+ *      drain Worker) `--model <id>` and `--effort <level>`, then the scoped
+ *      prompt as the positional initial-prompt argument. The prompt stays last;
+ *      `--model`/`--effort` sit ahead of it exactly as the interactive Run
+ *      command places them (issues 154/155).
  */
 export function resolveHeadlessRunCommand(
   env: Record<string, string | undefined>,
   issue: RunIssueRef,
+  options: RunCommandOptions = {},
 ): ShellCommand {
   const prompt = buildRunPrompt(issue);
 
@@ -192,7 +235,9 @@ export function resolveHeadlessRunCommand(
   }
 
   const bin = env.CLAUDE_BIN?.trim() || 'claude';
-  return { file: bin, args: [...HEADLESS_CLAUDE_FLAGS, prompt] };
+  const modelFlag = options.model ? ['--model', modelIdForTier(options.model)] : [];
+  const effortFlag = options.effort ? ['--effort', options.effort] : [];
+  return { file: bin, args: [...HEADLESS_CLAUDE_FLAGS, ...modelFlag, ...effortFlag, prompt] };
 }
 
 /**

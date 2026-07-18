@@ -86,7 +86,13 @@ export class PtySessionManager {
           // A workbench project's CORE.md, read at the IPC edge (issue 73);
           // null for legacy Runs and memory-less projects — nothing injected.
           memoryCore: context.memoryCore ?? null,
-        })
+        },
+        // Model + effort tiering (issues 154/155) fires only when the caller
+        // declared them. The interactive Pane path is manual Runs (headless
+        // drain Runs route to the Headless Session Manager), so `req.run.model`
+        // / `req.run.effort` are unset here and the command stays un-tiered — a
+        // manual Run keeps the interactive default model and effort.
+        { model: req.run.model ?? null, effort: req.run.effort ?? null })
       : req.dispatcher
         ? resolveDispatcherCommand(process.env, {
             projectPath: req.dispatcher.projectPath,

@@ -306,6 +306,33 @@ async function makeFinishedBranch(slug: string, edit: () => Promise<void>): Prom
   await git(repo, 'checkout', 'main');
 }
 
+/**
+ * A synthetic Receipt Run-log record for a hand-built finished branch (issue 146
+ * lane scenarios). `makeFinishedBranch` engineers precise per-branch merge content
+ * but writes no Receipt; the lane needs each candidate Receipt-backed AND carrying
+ * a `finished` timestamp to order by. The id encodes `finished` (ADR-0013,
+ * `receipt:<slug>:<finished>`) exactly as the real watcher would, so
+ * `latestFinishedByIssue` / `hasReceiptFor` read it the same way. This is the only
+ * synthetic piece — the branches, previews, and merges are all real.
+ */
+function laneReceipt(issueId: number, slug: string, finished: string): RunLogRecord {
+  return {
+    id: `receipt:${slug}:${finished}`,
+    capturedAt: finished,
+    issue: `${issueId} — ${slug}`,
+    issueId,
+    slug,
+    title: slug,
+    whatChanged: 'engineered lane fixture',
+    tryIt: null,
+    verified: null,
+    bookkeeping: null,
+    docDrift: null,
+    detail: null,
+    outcome: 'completed',
+  };
+}
+
 beforeEach(async () => {
   sandbox = await seedSandbox();
   repo = sandbox.repo;
@@ -2035,6 +2062,217 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
     expect(records.filter((r) => r.issueId === 6)).toHaveLength(1);
     expect(records.length).toBe(baselineRecords);
     expect(existsSync(join(sandbox.scratch, 'workbench'))).toBe(false); // no journal side effect
+  });
+
+  // ---------------------------------------------------------------------------
+  // Scenario 15 — issue 146 (ADR-0021): the always-on lane merges MULTIPLE
+  // finished branches in FINISH order with NO drain live. Three hand-built clean,
+  // disjoint, Receipt-backed branches finish OUT OF id order; firing the lane
+  // sweep directly (as a Receipt / scan-tick trigger would, outside any drain)
+  // lands them one per sweep, earliest-Receipt-first — proving both "always on"
+  // (no dispatcher in sight) and "finish order" (not id order). Every clean merge
+  // stays a passive auto note, never a gate (AC4). Real preview pipeline, real
+  // afk-merge.sh; only the finish timestamps are synthetic (laneReceipt).
+  // ---------------------------------------------------------------------------
+  it('Scenario 15 (issue 146): with no drain live, finished branches auto-merge in finish order, one per sweep — all passive, no gate', async () => {
+    const supported = await probeMergeTreeSupport();
+    expect(supported, 'git ≥ 2.38 required for merge previews').toBe(true);
+
+    // Three clean, disjoint finished branches (ids 04/06/07), each editing its own
+    // file so every sequential merge is clean.
+    await makeFinishedBranch('04-independent', async () => {
+      await writeFile(join(repo, 'file-04.txt'), 'from 04\n');
+    });
+    await makeFinishedBranch('06-parallel-a', async () => {
+      await writeFile(join(repo, 'file-06.txt'), 'from 06\n');
+    });
+    await makeFinishedBranch('07-parallel-b', async () => {
+      await writeFile(join(repo, 'file-07.txt'), 'from 07\n');
+    });
+
+    // Finish order deliberately INVERTS id order: 07 finished first, then 04, then
+    // 06. The lane must merge 07 → 04 → 06 (finish order), never 04 → 06 → 07 (id).
+    const laneLog: RunLogRecord[] = [
+      laneReceipt(7, '07-parallel-b', '2026-07-03T08:00:00.000Z'),
+      laneReceipt(4, '04-independent', '2026-07-03T09:00:00.000Z'),
+      laneReceipt(6, '06-parallel-a', '2026-07-03T10:00:00.000Z'),
+    ];
+
+    const previewDeps = realPreviewDeps(supported);
+    const laneSerializer = createRepoSerializer();
+    const mergeOrder: string[] = [];
+    const laneSweep = () =>
+      sweepAutoMergeLane({
+        scan: async () => {
+          const s = await scanReposWithPreviews([repo], previewDeps);
+          return { branches: s.branches, previews: s.previews, midMerge: s.midMerge };
+        },
+        isCleanTree: async () => (await git(repo, 'status', '--porcelain')).trim() === '',
+        hasLiveSoloRun: () => false, // no solo Run, and — crucially — no drain either
+        runLog: laneLog,
+        merge: (slugs) => {
+          mergeOrder.push(...slugs);
+          return mergeRuns(repo, slugs, { scriptPath: SCRIPT });
+        },
+        serializer: laneSerializer,
+        serializerKey: normalizeProjectKey(repo),
+      });
+
+    // One sweep per branch: warm the preview until every REMAINING branch stamps
+    // clean, then fire the sweep and assert it took the finish-first branch.
+    for (const expected of ['07-parallel-b', '04-independent', '06-parallel-a']) {
+      await pollScan(
+        previewDeps,
+        (s) => s.previews.length > 0 && s.previews.every((p) => p.verdict?.kind === 'clean'),
+        `lane finish-order: previews settle before ${expected}`,
+      );
+      const outcome = await laneSweep();
+      expect(outcome.kind).toBe('swept');
+      if (outcome.kind !== 'swept') throw new Error('lane held instead of merging');
+      expect(outcome.slug).toBe(expected);
+      expect(outcome.result.ok).toBe(true);
+      // Clean merge → passive auto note, never a blocking approval (AC4).
+      expect(outcome.decision.kind).toBe('auto');
+      expect(classifyAuthority('merge')).toBe('passive');
+      expect(outcome.skipped).toEqual([]); // no hygiene offenders in this batch
+    }
+
+    // The lane merged in FINISH order, not id order.
+    expect(mergeOrder).toEqual([['07-parallel-b'], ['04-independent'], ['06-parallel-a']].flat());
+
+    // All three landed, main is clean and not mid-merge, nothing left to merge.
+    for (const f of ['file-04.txt', 'file-06.txt', 'file-07.txt']) {
+      expect(await git(repo, 'ls-files')).toContain(f);
+    }
+    expect((await git(repo, 'status', '--porcelain')).trim()).toBe('');
+    expect(await isMidMerge(repo)).toBe(false);
+    const finalFacts = await scanAfkBranches(repo);
+    expect(finalFacts.filter((f) => !f.mergedIntoMain)).toEqual([]);
+    // A final sweep with nothing unmerged simply holds.
+    const done = await laneSweep();
+    expect(done.kind).toBe('hold');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Scenario 16 — issue 146 (ADR-0021): a PREDICTED conflict pauses the whole
+  // lane, a queued clean branch HOLDS, and resolving/aborting the conflict resumes
+  // the lane so the queued branch lands. Finish order [04 clean, 07 conflict, 06
+  // clean]: sweep 1 lands 04; sweep 2 hits 07's predicted conflict → `paused`
+  // (blocking approval, NO git touch, main not mid-merge) while 06 queues; aborting
+  // 07 (removing it from the candidate set) lets sweep 3 land 06. Real preview, real
+  // afk-merge.sh; the conflict is engineered per-branch (like Scenario 9b).
+  // ---------------------------------------------------------------------------
+  it('Scenario 16 (issue 146): a predicted conflict pauses the lane and queues the clean sibling; resolving it resumes the lane', async () => {
+    const supported = await probeMergeTreeSupport();
+    expect(supported, 'git ≥ 2.38 required for merge previews').toBe(true);
+
+    // A shared line on main that 04 and 07 edit differently → a pairwise conflict.
+    await writeFile(join(repo, 'conflict-target.txt'), 'top\nMIDDLE\nbottom\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-m', 'seed conflict-target on main');
+
+    // 04 edits the shared line; 06 is disjoint (clean); 07 edits the SAME shared
+    // line as 04 → once 04 lands, 07 conflicts. In ascending-id merge order the
+    // preview reads 04 clean, 06 clean, 07 conflicts (07 is highest id → nothing
+    // sits behind it as `blocked`).
+    await makeFinishedBranch('04-independent', async () => {
+      await writeFile(join(repo, 'conflict-target.txt'), 'top\nFROM-04\nbottom\n');
+    });
+    await makeFinishedBranch('06-parallel-a', async () => {
+      await writeFile(join(repo, 'file-06.txt'), 'from 06\n');
+    });
+    await makeFinishedBranch('07-parallel-b', async () => {
+      await writeFile(join(repo, 'conflict-target.txt'), 'top\nFROM-07\nbottom\n');
+    });
+
+    // Finish order: 04 first, 07 second (the conflict), 06 third (queues behind it).
+    const laneLog: RunLogRecord[] = [
+      laneReceipt(4, '04-independent', '2026-07-03T08:00:00.000Z'),
+      laneReceipt(7, '07-parallel-b', '2026-07-03T09:00:00.000Z'),
+      laneReceipt(6, '06-parallel-a', '2026-07-03T10:00:00.000Z'),
+    ];
+
+    const previewDeps = realPreviewDeps(supported);
+    const laneSerializer = createRepoSerializer();
+    const mergeCalls: string[][] = [];
+    const laneSweep = () =>
+      sweepAutoMergeLane({
+        scan: async () => {
+          const s = await scanReposWithPreviews([repo], previewDeps);
+          return { branches: s.branches, previews: s.previews, midMerge: s.midMerge };
+        },
+        isCleanTree: async () => (await git(repo, 'status', '--porcelain')).trim() === '',
+        hasLiveSoloRun: () => false,
+        runLog: laneLog,
+        merge: (slugs) => {
+          mergeCalls.push(slugs);
+          return mergeRuns(repo, slugs, { scriptPath: SCRIPT });
+        },
+        serializer: laneSerializer,
+        serializerKey: normalizeProjectKey(repo),
+      });
+
+    // Sweep 1: warm previews (all three settle), then merge the finish-first 04.
+    await pollScan(
+      previewDeps,
+      (s) => s.previews.length === 3 && s.previews.every((p) => isSettledVerdict(p.verdict)),
+      'issue-146 conflict fixture: initial previews settle',
+    );
+    const first = await laneSweep();
+    expect(first.kind).toBe('swept');
+    if (first.kind !== 'swept') throw new Error('expected 04 to merge');
+    expect(first.slug).toBe('04-independent');
+    expect(await git(repo, 'ls-files')).toContain('conflict-target.txt');
+
+    // Sweep 2: with 04 landed, 07 (finish-second) is predicted to conflict → the
+    // lane PAUSES on it. 06 (clean, finish-third) queues. No git touch: main stays
+    // clean and is NOT mid-merge (a prediction never breaks main).
+    await pollScan(
+      previewDeps,
+      (s) =>
+        s.previews.length === 2 &&
+        s.previews.every((p) => isSettledVerdict(p.verdict)) &&
+        s.previews.some((p) => p.verdict?.kind === 'conflicts'),
+      'issue-146 conflict fixture: 07 predicted to conflict after 04 lands',
+    );
+    const mergesBeforePause = mergeCalls.length;
+    const paused = await laneSweep();
+    expect(paused.kind).toBe('paused');
+    if (paused.kind !== 'paused') throw new Error('expected the lane to pause on 07');
+    expect(paused.slug).toBe('07-parallel-b');
+    expect(paused.action).toBe('merge-conflict');
+    expect(classifyAuthority(paused.action)).toBe('blocking'); // ADR-0011 blocking list
+    expect(mergeCalls.length).toBe(mergesBeforePause); // NO merge attempted
+    expect(await isMidMerge(repo)).toBe(false); // prediction left main untouched
+    expect((await git(repo, 'status', '--porcelain')).trim()).toBe('');
+    // The queued clean sibling 06 held — not merged, still finished-unmerged.
+    expect(await git(repo, 'ls-files')).not.toContain('file-06.txt');
+    const pausedFacts = await scanAfkBranches(repo);
+    expect(pausedFacts.find((f) => f.slug === '06-parallel-a')?.mergedIntoMain).toBe(false);
+
+    // The lane stays paused as long as 07 conflicts — a re-sweep re-`paused`s (no
+    // stored flag), and 06 never sneaks ahead.
+    const stillPaused = await laneSweep();
+    expect(stillPaused.kind).toBe('paused');
+    expect(mergeCalls.length).toBe(mergesBeforePause);
+
+    // Resolve/abort the conflict via the (future) Merge affordance: here we ABORT
+    // 07 — the human defers the conflicting branch, dropping it from the candidate
+    // set. (The resolve path is symmetric: 07 leaves the set by LANDING instead.)
+    await git(repo, 'branch', '-D', branchFor('07-parallel-b'));
+
+    // Sweep 3: the lane resumes on its own — 06 is now the only candidate and clean.
+    await pollScan(
+      previewDeps,
+      (s) => s.previews.length === 1 && s.previews[0].verdict?.kind === 'clean',
+      'issue-146 conflict fixture: lane resumes after 07 aborted',
+    );
+    const resumed = await laneSweep();
+    expect(resumed.kind).toBe('swept');
+    if (resumed.kind !== 'swept') throw new Error('expected 06 to land after resume');
+    expect(resumed.slug).toBe('06-parallel-a');
+    expect(await git(repo, 'ls-files')).toContain('file-06.txt'); // the queued branch landed
+    expect(await isMidMerge(repo)).toBe(false);
   });
 });
 

@@ -18,6 +18,8 @@ function issue(id: number, status: BacklogIssue['status'], dependsOn: number[] =
     source: null,
     hitl: false,
     repoKey: null,
+    model: null,
+    effort: null,
     inBatch: true,
     standalone: false,
     body: '',

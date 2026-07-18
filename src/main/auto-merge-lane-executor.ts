@@ -16,23 +16,35 @@
  * wiring is asserted BY TEST (`auto-merge-lane-executor.test.ts`) and the e2e
  * drives it against real infrastructure, rather than being buried in `index.ts`.
  *
- * Scope of THIS slice (issue 145): a single clean branch per sweep, and the sweep
- * is the pure decision + one merge. **Live subscription** (calling `sweepLane`
- * from the `ReceiptWatch` onReceipt callback and the MergeRuns completion in
- * `index.ts`, and retiring the renderer's Dispatcher-only auto-merge effect) plus
- * multi-branch ordering, the conflict lane-pause, and the artifact skip are the
- * sequenced follow-ons (issues 146/148) — wiring both triggers live now would
- * double-fire alongside the still-present press-time path.
+ * Scope (issues 145 → 146). Issue 145 was the walking skeleton: a single clean
+ * branch per sweep, decision + one merge. **Issue 146 completes the lane doctrine
+ * in this executor**: one sweep now walks the finish-ordered candidates and can
+ * return `paused` (a PREDICTED conflict raises the blocking `merge-conflict`
+ * approval WITHOUT touching main — the pure brain decided it) and carries the
+ * artifact offenders `skipped` this sweep for the caller's per-branch attention
+ * items. An ACTUAL conflict on a `merge` still classifies to `gate` and leaves
+ * main mid-merge, so both conflict kinds pause the whole lane until resolved.
+ *
+ * Still deferred to issue 148 (the Merge-button rejob): the LIVE subscription —
+ * calling `sweepAutoMergeLane` from the `ReceiptWatch` onReceipt callback and the
+ * MergeRuns completion in `index.ts`, and retiring the renderer's Dispatcher-only
+ * auto-merge effect (`App.tsx`). Wiring the triggers live now would double-fire
+ * alongside the still-present press-time path; 148 is where that path becomes the
+ * exceptions entry (resolve/abort a paused lane, adopt strays, force a sweep). The
+ * always-on PROPERTY is proven here and in the e2e by driving a sweep with no
+ * drain live — the executor is stateless per tick, so any trigger can fire it.
  */
 import { mergeReadinessOnDisk, type AfkBranchFacts } from '../shared/worktree-scan';
-import type { BranchPreview } from '../shared/merge-preview';
+import type { BranchPreview, SettledVerdict } from '../shared/merge-preview';
 import type { MergeRunsResult, RunLogRecord } from '../shared/ipc-contract';
 import type { RepoSerializer } from '../shared/repo-serializer';
+import type { DispatcherAction } from '../shared/dispatcher-authority';
 import { hasReceiptFor } from '../shared/receipt-audit';
 import {
   decideAutoMergeLane,
   type LaneBranch,
   type LaneHoldReason,
+  type LaneSkip,
   type MainIdle,
 } from '../shared/auto-merge-lane';
 import { decideDispatcherMerge, type DispatcherMergeDecision } from '../shared/dispatcher-merge';
@@ -72,9 +84,30 @@ export interface AutoMergeLaneSweepDeps {
   serializerKey: string;
 }
 
-/** The outcome of one sweep: it held (and why), or it swept a branch (with the classified result). */
+/**
+ * The outcome of one sweep (issue 146). Every outcome carries `skipped` — the
+ * artifact-hygiene offenders passed this sweep (issue 106), which the caller turns
+ * into per-branch attention items whether or not anything merged.
+ *   - `hold`   — nothing merged (main not idle, or nothing currently mergeable).
+ *   - `paused` — a PREDICTED conflict stopped the lane: NO merge was attempted
+ *     (main is untouched), and the caller raises the blocking `merge-conflict`
+ *     approval on `slug`. The lane stays paused (every sweep re-`paused`s) until the
+ *     branch is resolved or aborted and leaves the candidate set — then it resumes.
+ *   - `swept`  — a branch was merged; `decision` classifies it (`auto` clean note /
+ *     `gate` an ACTUAL conflict that now left main mid-merge / `halt` preflight).
+ */
 export type LaneSweepOutcome =
-  | { kind: 'hold'; reason: LaneHoldReason }
+  | { kind: 'hold'; reason: LaneHoldReason; skipped: LaneSkip[] }
+  | {
+      kind: 'paused';
+      issueId: number;
+      slug: string;
+      /** The ADR-0011 blocking action a paused lane raises — reused, never a new one. */
+      action: Extract<DispatcherAction, 'merge-conflict'>;
+      /** Plain-language cause (the conflicting files, or the branch it is blocked behind). */
+      reason: string;
+      skipped: LaneSkip[];
+    }
   | {
       kind: 'swept';
       issueId: number;
@@ -84,10 +117,11 @@ export type LaneSweepOutcome =
       /**
        * The auto-vs-gate classification (`decideDispatcherMerge`): a clean sweep is
        * `auto` → the caller records the passive `merge` note (silent + note, no
-       * gate); a conflict is `gate`; a preflight failure is `halt`. The lane-PAUSE
-       * a `gate` should raise is issue 146 — this slice only classifies.
+       * gate); an ACTUAL conflict is `gate` (and leaves main mid-merge, pausing the
+       * lane via the idle gate); a preflight failure is `halt`.
        */
       decision: DispatcherMergeDecision;
+      skipped: LaneSkip[];
     };
 
 /**
@@ -144,11 +178,30 @@ export function laneBranchesFrom(
 }
 
 /**
- * Run one sweep of the auto-merge lane for a repo. Reads the current scan +
- * main-idle facts, asks the pure `decideAutoMergeLane`, and — only on a `merge`
- * verdict — runs the real merge UNDER the per-repo serializer, returning the
- * classified result. A `hold` verdict does nothing but report why (no git touch).
- * Idempotent per tick: with no change on disk a re-sweep decides identically.
+ * The plain-language cause a paused lane surfaces on its blocking `merge-conflict`
+ * approval — the conflicting files for a `conflicts` branch, or the earlier branch
+ * a `blocked` one is stuck behind. Mirrors the wording the merge-preview badge uses.
+ */
+function pauseReason(slug: string, verdict: SettledVerdict): string {
+  if (verdict.kind === 'blocked') {
+    return `Auto-merge lane paused: ${slug} is blocked behind issue ${verdict.behindIssueId}'s predicted conflict — resolve or abort it to resume the lane.`;
+  }
+  const files = verdict.kind === 'conflicts' && verdict.files.length > 0 ? ` in ${verdict.files.join(', ')}` : '';
+  return `Auto-merge lane paused: ${slug} is predicted to conflict${files} — resolve or abort it to resume the lane.`;
+}
+
+/**
+ * Run one sweep of the auto-merge lane for a repo (issue 146). Reads the current
+ * scan + main-idle facts, asks the pure `decideAutoMergeLane`, and:
+ *   - `merge` → runs the real merge UNDER the per-repo serializer, returns the
+ *     classified result (an actual conflict there leaves main mid-merge, which the
+ *     idle gate pauses on every following sweep).
+ *   - `pause` → a PREDICTED conflict: touches no git, returns a `paused` outcome
+ *     carrying the blocking `merge-conflict` action + reason for the caller to gate.
+ *   - `hold` → does nothing but report why.
+ * Every outcome carries the artifact offenders `skipped` this sweep. Idempotent per
+ * tick: with no change on disk a re-sweep decides identically, so re-firing on a
+ * scan tick or a merge completion is safe.
  */
 export async function sweepAutoMergeLane(
   deps: AutoMergeLaneSweepDeps,
@@ -162,7 +215,22 @@ export async function sweepAutoMergeLane(
   };
 
   const decision = decideAutoMergeLane({ branches, main });
-  if (decision.kind === 'hold') return { kind: 'hold', reason: decision.reason };
+  if (decision.kind === 'hold') {
+    return { kind: 'hold', reason: decision.reason, skipped: decision.skipped };
+  }
+  if (decision.kind === 'pause') {
+    // A predicted conflict never touches main: raise the blocking approval and let
+    // the queued branches wait. The pause lifts on its own once this branch is
+    // resolved or aborted (it drops from the candidate set on the next sweep).
+    return {
+      kind: 'paused',
+      issueId: decision.issueId,
+      slug: decision.slug,
+      action: 'merge-conflict',
+      reason: pauseReason(decision.slug, decision.verdict),
+      skipped: decision.skipped,
+    };
+  }
 
   // Merge the ONE branch the lane chose, under the per-repo serializer so the
   // merge never races a scan-recompute or a manual Merge on the same repo.
@@ -173,5 +241,6 @@ export async function sweepAutoMergeLane(
     slug: decision.slug,
     result,
     decision: decideDispatcherMerge(result),
+    skipped: decision.skipped,
   };
 }

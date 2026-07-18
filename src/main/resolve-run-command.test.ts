@@ -13,6 +13,7 @@ import {
   CORE_MEMORY_LABEL,
   CORE_TRUNCATION_MARKER,
 } from '../shared/workbench-memory';
+import { modelIdForTier } from '../shared/worker-model';
 
 const ISSUE = {
   id: 3,
@@ -140,6 +141,122 @@ describe('resolveHeadlessRunCommand (issue 139, ADR-0001 amendment)', () => {
     expect(last).toBe(buildRunPrompt(wbIssue));
     expect(last).toContain('/Users/dev/Workbench/billing/issues');
     expect(last).toContain('- The billing repo deploys via Fastlane.');
+  });
+});
+
+describe('drain-worker model tiering (issue 154)', () => {
+  it('resolveHeadlessRunCommand emits --model <id> ahead of the prompt for a drain Worker', () => {
+    const cmd = resolveHeadlessRunCommand({}, ISSUE, { model: 'haiku' });
+    // The headless flags still lead; --model sits between them and the prompt.
+    expect(cmd.args.slice(0, HEADLESS_CLAUDE_FLAGS.length)).toEqual([...HEADLESS_CLAUDE_FLAGS]);
+    const modelIdx = cmd.args.indexOf('--model');
+    expect(modelIdx).toBeGreaterThanOrEqual(HEADLESS_CLAUDE_FLAGS.length);
+    expect(cmd.args[modelIdx + 1]).toBe(modelIdForTier('haiku'));
+    expect(cmd.args[modelIdx + 1]).toBe('claude-haiku-4-5');
+    // The prompt stays the final argument.
+    expect(cmd.args[cmd.args.length - 1]).toContain('issue 03');
+    expect(modelIdx).toBeLessThan(cmd.args.length - 1);
+  });
+
+  it('resolveRunCommand emits --model <id> before the prompt when a tier is given', () => {
+    const cmd = resolveRunCommand({}, ISSUE, { model: 'sonnet' });
+    expect(cmd.args[0]).toBe('--model');
+    expect(cmd.args[1]).toBe('claude-sonnet-5');
+    expect(cmd.args[cmd.args.length - 1]).toContain('issue 03');
+  });
+
+  it('a manual/Planning/Talk Run (no model option) is byte-identical to before — never tiered', () => {
+    // resolveRunCommand is the interactive-Pane path (manual Run now). Without a
+    // model it must be exactly the pre-154 single-arg command — the interactive
+    // default model is inherited, never downgraded.
+    expect(resolveRunCommand({}, ISSUE)).toEqual({ file: 'claude', args: [buildRunPrompt(ISSUE)] });
+    expect(resolveRunCommand({}, ISSUE).args).not.toContain('--model');
+    // The headless path without a model is likewise unchanged.
+    expect(resolveHeadlessRunCommand({}, ISSUE).args).not.toContain('--model');
+    expect(resolveHeadlessRunCommand({}, ISSUE)).toEqual(resolveHeadlessRunCommand({}, ISSUE, {}));
+  });
+
+  it('the MC_RUN_CMD override branch is NEVER tiered, even with a model option', () => {
+    const cmd = resolveHeadlessRunCommand({ MC_RUN_CMD: 'node ./fake.mjs' }, ISSUE, { model: 'opus' });
+    expect(cmd.file).toBe('node');
+    expect(cmd.args).not.toContain('--model');
+    // Byte-identical to the un-tiered override — the fake Worker defines its argv.
+    expect(cmd).toEqual(resolveHeadlessRunCommand({ MC_RUN_CMD: 'node ./fake.mjs' }, ISSUE));
+    const pty = resolveRunCommand({ MC_RUN_CMD: 'node ./fake.mjs' }, ISSUE, { model: 'opus' });
+    expect(pty.args).not.toContain('--model');
+  });
+
+  it('maps every tier to its full model id in the emitted flag', () => {
+    for (const tier of ['haiku', 'sonnet', 'opus', 'fable'] as const) {
+      const cmd = resolveHeadlessRunCommand({}, ISSUE, { model: tier });
+      expect(cmd.args[cmd.args.indexOf('--model') + 1]).toBe(modelIdForTier(tier));
+    }
+  });
+});
+
+describe('drain-worker effort tiering (issue 155)', () => {
+  it('resolveHeadlessRunCommand emits --effort <level> ahead of the prompt for a drain Worker', () => {
+    const cmd = resolveHeadlessRunCommand({}, ISSUE, { model: 'haiku', effort: 'low' });
+    // The headless flags still lead, then --model, then --effort, then prompt.
+    expect(cmd.args.slice(0, HEADLESS_CLAUDE_FLAGS.length)).toEqual([...HEADLESS_CLAUDE_FLAGS]);
+    const effortIdx = cmd.args.indexOf('--effort');
+    expect(effortIdx).toBeGreaterThanOrEqual(HEADLESS_CLAUDE_FLAGS.length);
+    expect(cmd.args[effortIdx + 1]).toBe('low');
+    // --effort sits after --model and both sit before the positional prompt.
+    expect(cmd.args.indexOf('--model')).toBeLessThan(effortIdx);
+    expect(effortIdx).toBeLessThan(cmd.args.length - 1);
+    expect(cmd.args[cmd.args.length - 1]).toContain('issue 03');
+  });
+
+  it('resolveRunCommand emits --effort <level> before the prompt when an effort is given', () => {
+    const cmd = resolveRunCommand({}, ISSUE, { model: 'sonnet', effort: 'medium' });
+    // Order: --model <id> then --effort <level> then the prompt.
+    expect(cmd.args.slice(0, 4)).toEqual(['--model', 'claude-sonnet-5', '--effort', 'medium']);
+    expect(cmd.args[cmd.args.length - 1]).toContain('issue 03');
+  });
+
+  it('passes the effort level VERBATIM — no id mapping, one of the five CLI levels', () => {
+    for (const level of ['low', 'medium', 'high', 'xhigh', 'max'] as const) {
+      const cmd = resolveHeadlessRunCommand({}, ISSUE, { effort: level });
+      expect(cmd.args[cmd.args.indexOf('--effort') + 1]).toBe(level);
+    }
+  });
+
+  it('effort is independent of model — either flag can appear without the other', () => {
+    // Effort with no model: --effort present, --model absent.
+    const effortOnly = resolveHeadlessRunCommand({}, ISSUE, { effort: 'high' });
+    expect(effortOnly.args).toContain('--effort');
+    expect(effortOnly.args).not.toContain('--model');
+    // Model with no effort: --model present, --effort absent (154 byte-shape).
+    const modelOnly = resolveHeadlessRunCommand({}, ISSUE, { model: 'opus' });
+    expect(modelOnly.args).toContain('--model');
+    expect(modelOnly.args).not.toContain('--effort');
+  });
+
+  it('a manual/Planning/Talk Run (no effort option) is byte-identical to before — never tiered', () => {
+    // No options at all: exactly the pre-155 single-arg command.
+    expect(resolveRunCommand({}, ISSUE).args).not.toContain('--effort');
+    expect(resolveHeadlessRunCommand({}, ISSUE).args).not.toContain('--effort');
+    // An empty options object is byte-identical to omitting options entirely.
+    expect(resolveRunCommand({}, ISSUE, {})).toEqual(resolveRunCommand({}, ISSUE));
+    expect(resolveHeadlessRunCommand({}, ISSUE, {})).toEqual(resolveHeadlessRunCommand({}, ISSUE));
+  });
+
+  it('the MC_RUN_CMD override branch is NEVER tiered, even with an effort option', () => {
+    const cmd = resolveHeadlessRunCommand({ MC_RUN_CMD: 'node ./fake.mjs' }, ISSUE, {
+      model: 'opus',
+      effort: 'max',
+    });
+    expect(cmd.file).toBe('node');
+    expect(cmd.args).not.toContain('--effort');
+    expect(cmd.args).not.toContain('--model');
+    // Byte-identical to the un-tiered override — the fake Worker defines its argv.
+    expect(cmd).toEqual(resolveHeadlessRunCommand({ MC_RUN_CMD: 'node ./fake.mjs' }, ISSUE));
+    const pty = resolveRunCommand({ MC_RUN_CMD: 'node ./fake.mjs' }, ISSUE, {
+      model: 'opus',
+      effort: 'max',
+    });
+    expect(pty.args).not.toContain('--effort');
   });
 });
 
