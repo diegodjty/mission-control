@@ -48,7 +48,7 @@ function issue(id: number, status: IssueStatus): BacklogIssue {
 }
 
 function backlog(issues: BacklogIssue[]): Backlog {
-  return { activePrd: 'docs/PRD.md', workerModel: 'sonnet', escalationCeiling: 'opus', workerEffort: null, issues };
+  return { activePrd: 'docs/PRD.md', workerModel: 'sonnet', escalationCeiling: 'opus', workerEffort: null, runTimeoutMinutes: 30, issues };
 }
 
 function record(over: Partial<RunLogRecord> & { id: string; outcome: RunOutcome }): RunLogRecord {

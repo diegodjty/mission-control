@@ -47,6 +47,19 @@ interface HeadlessSession {
    * are reduced HERE, in main; the renderer receives snapshots and never parses.
    */
   content: FeedContent;
+  /**
+   * The armed `run_timeout` kill timer (issue 141), or null when this Run
+   * carries no timeout (no `runTimeoutMs`, or a manual/interactive spawn).
+   * Cleared on any exit path (timeout fire, normal close, manual kill) so it
+   * never fires twice or outlives the process.
+   */
+  timeoutTimer: NodeJS.Timeout | null;
+  /**
+   * True once the timeout timer has fired and killed this session (issue
+   * 141) — distinguishes a policy-driven kill from the Worker's own non-zero
+   * crash exit, so the exit report can name the cause.
+   */
+  timedOut: boolean;
 }
 
 export interface HeadlessSessionManagerCallbacks {
@@ -124,9 +137,26 @@ export class HeadlessSessionManager {
       parser,
       captured: false,
       content: EMPTY_FEED_CONTENT,
+      timeoutTimer: null,
+      timedOut: false,
     };
     this.sessions.set(sessionId, session);
     this.runOutput.set(sessionId, '');
+
+    // Run timeout (issue 141): a headless Run is watched, never talked to, so
+    // nothing else stops it hanging forever. `runTimeoutMs` is the resolved
+    // CONFIG `run_timeout` (default 30 min, `run-timeout.ts`); when the caller
+    // set one, arm a real kill timer HERE — the Headless Session Manager is
+    // the thing that executes the kill on breach, not a policy decision. The
+    // exit report names the cause so the no-Receipt handling can distinguish
+    // a timeout kill from the Worker's own crash.
+    const runTimeoutMs = req.run.runTimeoutMs;
+    if (typeof runTimeoutMs === 'number' && Number.isFinite(runTimeoutMs) && runTimeoutMs > 0) {
+      session.timeoutTimer = setTimeout(() => {
+        session.timedOut = true;
+        proc.kill();
+      }, runTimeoutMs);
+    }
 
     // The prompt rides argv (not stdin); close stdin so `claude -p` doesn't wait
     // on it and exits cleanly after its final result event.
@@ -152,19 +182,29 @@ export class HeadlessSessionManager {
     proc.on('error', () => {
       // The executable could not be spawned (e.g. `claude` not on PATH). Report a
       // non-zero exit so the Run lands in the no-Receipt path rather than hanging.
+      if (session.timeoutTimer) clearTimeout(session.timeoutTimer);
       if (this.sessions.delete(sessionId)) {
-        this.callbacks.onExit({ sessionId, exitCode: 127 });
+        this.callbacks.onExit({ sessionId, exitCode: 127, cause: 'crashed' });
       }
     });
 
     proc.on('close', (code, signal) => {
       // Flush any trailing partial line, folding a late-arriving result event
       // (and capturing a late-arriving session id) before the Run is torn down.
+      if (session.timeoutTimer) clearTimeout(session.timeoutTimer);
       this.foldEvents(sessionId, session, parser.flush());
       this.reportSessionId(sessionId, session);
       this.sessions.delete(sessionId);
       const exitCode = typeof code === 'number' ? code : signal ? 128 : 1;
-      this.callbacks.onExit({ sessionId, exitCode });
+      // `timedOut` wins (a policy-driven kill, even if the process happened to
+      // exit non-zero from the SIGTERM); otherwise a non-zero exit is the
+      // Worker's own crash; a clean 0 exit carries no cause (issue 141).
+      const cause: 'timeout' | 'crashed' | undefined = session.timedOut
+        ? 'timeout'
+        : exitCode !== 0
+          ? 'crashed'
+          : undefined;
+      this.callbacks.onExit({ sessionId, exitCode, cause });
     });
 
     return { sessionId, file };
@@ -221,12 +261,14 @@ export class HeadlessSessionManager {
   kill(sessionId: SessionId): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;
+    if (session.timeoutTimer) clearTimeout(session.timeoutTimer);
     session.proc.kill();
     this.sessions.delete(sessionId);
   }
 
   killAll(): void {
-    for (const { proc } of this.sessions.values()) {
+    for (const { proc, timeoutTimer } of this.sessions.values()) {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
       proc.kill();
     }
     this.sessions.clear();

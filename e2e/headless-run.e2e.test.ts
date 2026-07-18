@@ -35,6 +35,8 @@ import { parseReceipt } from '../src/shared/receipt-parser';
 import { deriveRunStatus } from '../src/shared/run-state';
 import { planDrain, type ActiveRun } from '../src/shared/run-coordinator';
 import { deriveAttention } from '../src/shared/attention-hub-model';
+import { auditMissingReceipts, hasReceiptFor } from '../src/shared/receipt-audit';
+import { reactToLifecycleEvent } from '../src/shared/dispatcher-lifecycle';
 import type {
   PtyExitMessage,
   RunLogRecord,
@@ -64,6 +66,9 @@ const FAKE_ENV_KEYS = [
   'MC_FAKE_OUTCOME',
   'MC_FAKE_NO_RECEIPT',
   'MC_FAKE_DENIED_ACTION',
+  'MC_FAKE_HANG',
+  'MC_FAKE_CRASH',
+  'MC_FAKE_EXIT_CODE',
 ];
 let savedEnv: Record<string, string | undefined>;
 
@@ -90,7 +95,7 @@ function configureFakeWorker(opts: {
 }
 
 /** The RunTarget a workbench-less (legacy layout) drain Run carries, headless. */
-function headlessRunTarget(id: number) {
+function headlessRunTarget(id: number, runTimeoutMs?: number) {
   const issue = sandboxIssue(id);
   return {
     issueId: id,
@@ -99,6 +104,7 @@ function headlessRunTarget(id: number) {
     projectPath: repo,
     workbench: null,
     headless: true,
+    runTimeoutMs,
   };
 }
 
@@ -376,6 +382,153 @@ describe('headless Run tracer (issue 139) — real child process, real modules',
 
     // Process-level: still exactly one child was ever spawned for this issue.
     expect(exits).toHaveLength(1);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Issue 141 — Run timeout: a hung headless Run (never exits on its own) is
+  // KILLED once it exceeds its `run_timeout`, lands in the SAME no-Receipt
+  // path as any other genuinely-unknown death, and the cause is named "timeout"
+  // in the missing-Receipt audit's note (the attention-worthy fact) rather than
+  // the generic "finished without a receipt".
+  // ---------------------------------------------------------------------------
+  it('kills a hung headless Run once it exceeds run_timeout, naming "timeout" as the cause', async () => {
+    const issue = sandboxIssue(2);
+    configureFakeWorker({ sessionId: 'sess-timeout-e2e', slug: issue.slug, id: 2, finished: '2026-07-18T00:00:00.000Z' });
+    process.env.MC_FAKE_HANG = '1';
+
+    const exits: PtyExitMessage[] = [];
+    manager = new HeadlessSessionManager({
+      onExit: (msg) => exits.push(msg),
+      onSessionCaptured: () => {},
+    });
+    // A short run_timeout (150ms) so the real kill timer fires promptly.
+    manager.spawn({ cols: 80, rows: 24, run: headlessRunTarget(2, 150) });
+
+    await waitFor(() => exits.length > 0, 'hung child killed by run_timeout');
+    expect(exits[0].cause).toBe('timeout');
+
+    // No on-disk work: a hung Worker never reached its claim flip or Receipt.
+    const backlog = await readBacklog(repo);
+    expect(backlog.issues.find((i) => i.id === 2)?.status).toBe('open');
+    expect(existsSync(join(repo, 'issues', 'completions', `${issue.slug}.md`))).toBe(false);
+
+    // The genuinely-unknown no-Receipt path (issue 137's conservative case):
+    // sessionAlive=false, no declared Receipt outcome ⇒ blocked, which halts
+    // the drain (issue 141 asks for the SAME handling as any other no-Receipt
+    // death — no new failure vocabulary).
+    const status = deriveRunStatus({
+      sessionAlive: false,
+      stoppedByUser: false,
+      issueStatus: backlog.issues.find((i) => i.id === 2)?.status ?? null,
+      receiptOutcome: null,
+    });
+    expect(status).toBe('blocked');
+    const activeRuns: ActiveRun[] = [{ issueId: 2, status, receiptOutcome: null }];
+    const plan = planDrain({ issues: backlog.issues, maxConcurrent: 1, activeRuns });
+    expect(plan.drain.stop).toBe(true);
+    expect(plan.drain.reason).toBe('run-blocked');
+
+    // The missing-Receipt audit names the cause: "timeout", not a generic note.
+    const audited = auditMissingReceipts(
+      [{ issueId: 2, slug: issue.slug, title: issue.title, status, endCause: 'timeout' }],
+      [],
+    );
+    expect(audited).toHaveLength(1);
+    const reaction = reactToLifecycleEvent(audited[0]);
+    expect(reaction.notification).toContain('killed after exceeding its run timeout');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Issue 141 — Crash path: a headless Worker that exits non-zero with no
+  // Receipt lands in the SAME no-Receipt path, cause "crashed".
+  // ---------------------------------------------------------------------------
+  it('a crashed headless Worker (non-zero exit, no Receipt) lands in the same path, cause "crashed"', async () => {
+    const issue = sandboxIssue(2);
+    configureFakeWorker({ sessionId: 'sess-crash-e2e', slug: issue.slug, id: 2, finished: '2026-07-18T01:00:00.000Z' });
+    process.env.MC_FAKE_CRASH = '1';
+
+    const exits: PtyExitMessage[] = [];
+    manager = new HeadlessSessionManager({
+      onExit: (msg) => exits.push(msg),
+      onSessionCaptured: () => {},
+    });
+    manager.spawn({ cols: 80, rows: 24, run: headlessRunTarget(2) });
+
+    await waitFor(() => exits.length > 0, 'crashed child exits');
+    expect(exits[0].exitCode).toBe(17);
+    expect(exits[0].cause).toBe('crashed');
+    expect(existsSync(join(repo, 'issues', 'completions', `${issue.slug}.md`))).toBe(false);
+
+    const backlog = await readBacklog(repo);
+    const status = deriveRunStatus({
+      sessionAlive: false,
+      stoppedByUser: false,
+      issueStatus: backlog.issues.find((i) => i.id === 2)?.status ?? null,
+      receiptOutcome: null,
+    });
+    expect(status).toBe('blocked');
+    const activeRuns: ActiveRun[] = [{ issueId: 2, status, receiptOutcome: null }];
+    const plan = planDrain({ issues: backlog.issues, maxConcurrent: 1, activeRuns });
+    expect(plan.drain.stop).toBe(true);
+    expect(plan.drain.reason).toBe('run-blocked');
+
+    const audited = auditMissingReceipts(
+      [{ issueId: 2, slug: issue.slug, title: issue.title, status, endCause: 'crashed' }],
+      [],
+    );
+    const reaction = reactToLifecycleEvent(audited[0]);
+    expect(reaction.notification).toContain('crashed');
+    expect(reaction.notification).not.toContain('run timeout');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Issue 141 AC4 — a Run that wrote its Receipt (and flipped `done`) before
+  // its process happened to exit non-zero still completes normally: the
+  // Receipt that landed wins, exactly as ADR-0013 already promises.
+  // ---------------------------------------------------------------------------
+  it('a Run that wrote its Receipt and then exited non-zero still completes normally', async () => {
+    const issue = sandboxIssue(2);
+    const finished = '2026-07-18T02:00:00.000Z';
+    configureFakeWorker({ sessionId: 'sess-late-crash-e2e', slug: issue.slug, id: 2, finished });
+    process.env.MC_FAKE_EXIT_CODE = '1';
+
+    const exits: PtyExitMessage[] = [];
+    manager = new HeadlessSessionManager({
+      onExit: (msg) => exits.push(msg),
+      onSessionCaptured: () => {},
+    });
+    manager.spawn({ cols: 80, rows: 24, run: headlessRunTarget(2) });
+
+    await waitFor(() => exits.length > 0, 'late-crashing child exits');
+    expect(exits[0].exitCode).toBe(1);
+    expect(exits[0].cause).toBe('crashed'); // the process itself DID exit non-zero…
+
+    // …but the Receipt landed first, and it wins: the issue is `done`, and the
+    // ground-truth status is `finished` regardless of the exit code/cause.
+    const backlog = await readBacklog(repo);
+    expect(backlog.issues.find((i) => i.id === 2)?.status).toBe('done');
+    const receiptFile = join(repo, 'issues', 'completions', `${issue.slug}.md`);
+    expect(existsSync(receiptFile)).toBe(true);
+
+    const status = deriveRunStatus({
+      sessionAlive: false,
+      stoppedByUser: false,
+      issueStatus: 'done',
+      receiptOutcome: 'completed',
+    });
+    expect(status).toBe('finished');
+
+    // The missing-Receipt audit stays SILENT — a Receipt exists for this issue.
+    const records: RunLogRecord[] = [];
+    watcher = new ReceiptWatcher({ debounceMs: 40, stabilityMs: 25 });
+    watcher.watch('project', [sandbox.issuesDir], new Map(), (r) => records.push(r));
+    await waitFor(() => records.some((r) => r.issueId === 2), 'watcher ingests the late-crash Receipt');
+    expect(hasReceiptFor(records, 2)).toBe(true);
+    const audited = auditMissingReceipts(
+      [{ issueId: 2, slug: issue.slug, title: issue.title, status, endCause: 'crashed' }],
+      records,
+    );
+    expect(audited).toHaveLength(0);
   });
 
   // ---------------------------------------------------------------------------

@@ -63,7 +63,7 @@ describe('readAttentionInput', () => {
     const input = await readAttentionInput(root, 'ghost', null);
     expect(input).toEqual({
       project: 'ghost',
-      backlog: { activePrd: null, workerModel: 'sonnet', escalationCeiling: 'opus', workerEffort: null, issues: [] },
+      backlog: { activePrd: null, workerModel: 'sonnet', escalationCeiling: 'opus', workerEffort: null, runTimeoutMinutes: 30, issues: [] },
       receipts: [],
       coreProposedPresent: false,
       humanSetup: null,

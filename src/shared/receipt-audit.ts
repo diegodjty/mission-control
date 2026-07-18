@@ -81,6 +81,26 @@ export interface AuditedRun {
   title: string | null;
   /** The Run's derived status (run-state) — its ground-truth lifecycle. */
   status: RunStatus;
+  /**
+   * Why this Run's process ended with no Receipt (issue 141): `timeout` when
+   * the Headless Session Manager killed it for exceeding `run_timeout`,
+   * `crashed` when it exited non-zero on its own, or null/absent when unknown
+   * (a user stop, a legacy pre-cause Run, an interactive Pane). Named in the
+   * audit's note so the cause is visible without a scrape.
+   */
+  endCause?: 'timeout' | 'crashed' | null;
+}
+
+/** The note's cause clause for `endCause`, or null for the unchanged default. */
+function endCauseClause(endCause: 'timeout' | 'crashed' | null | undefined): string | null {
+  switch (endCause) {
+    case 'timeout':
+      return 'was killed after exceeding its run timeout';
+    case 'crashed':
+      return 'crashed';
+    default:
+      return null;
+  }
 }
 
 /**
@@ -114,7 +134,7 @@ export function auditMissingReceipts(
       issueId: run.issueId,
       slug: run.slug,
       title: run.title,
-      detail: null,
+      detail: endCauseClause(run.endCause),
     });
   }
   return events;

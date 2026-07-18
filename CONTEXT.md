@@ -47,6 +47,10 @@ _Avoid_: conflating with the model tier — effort is orthogonal (a cheap model 
 The read-only live view of a **headless Run**, rendered from its event stream (current activity, elapsed time, last assistant message). You *watch* a Feed; you *talk to* a **Pane**. The raw stream tail is retained for debug peeking only — Receipts remain the sole capture input (ADR-0013).
 _Avoid_: Pane (interactive), terminal, log (the Run log is the Receipt feed, not this).
 
+**Run timeout** (issue 141):
+The kill timeout a **headless** drain Run is armed with — a project CONFIG `run_timeout` frontmatter key (minutes, default 30). Watched, never talked-to, a headless Run has nothing else stopping it from hanging forever; the Headless Session Manager arms a real kill timer at spawn and kills the child once it elapses. A killed Run lands in the SAME no-Receipt handling as any other genuinely-unknown death (conservative drain stop, a missing-Receipt note) — no new failure vocabulary — with the cause named "timeout" (vs. "crashed" for a Worker that exits non-zero on its own). A Receipt that lands before death still wins, exactly as ADR-0013 already promises.
+_Avoid_: conflating with a user-initiated **stop** (no cause named) or a declared **blocked** park (a Receipt, not a kill).
+
 **Artifacts**:
 The on-disk files the **Map** reads: `issues/NN-slug.md` (status/depends_on frontmatter), the project CONFIG, git history, and **Receipts** (the on-disk carrier of the completion blocks the afk-issue-runner emits). Pipeline artifacts live in the **Workbench** (ADR-0015); a legacy in-repo `issues/` layout remains supported (QA sandbox, external skill users).
 

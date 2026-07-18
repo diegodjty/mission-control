@@ -28,7 +28,7 @@ function mk(id: number, status: IssueStatus): BacklogIssue {
 }
 
 function backlog(...issues: BacklogIssue[]): Backlog {
-  return { activePrd: null, workerModel: 'sonnet', escalationCeiling: 'opus', workerEffort: null, issues };
+  return { activePrd: null, workerModel: 'sonnet', escalationCeiling: 'opus', workerEffort: null, runTimeoutMinutes: 30, issues };
 }
 
 function snap(entries: Array<[number, IssueStatus]>): Map<number, IssueStatus> {

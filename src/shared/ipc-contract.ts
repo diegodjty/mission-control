@@ -414,6 +414,15 @@ export interface RunTarget {
    * session runs in the same working directory (worktree or main).
    */
   resume?: { claudeSessionId: string } | null;
+  /**
+   * The headless kill timeout, in MILLISECONDS, this Run is armed with (issue
+   * 141) — CONFIG `run_timeout` (default 30 minutes) resolved by the drain
+   * spawn site (`run-timeout.ts`). Present only for a headless drain Run; the
+   * Headless Session Manager kills the child process once it elapses. Absent
+   * for a manual single Run / every interactive entry point — timeout
+   * enforcement is drain-only, exactly like `model`/`effort`.
+   */
+  runTimeoutMs?: number | null;
 }
 
 /**
@@ -507,6 +516,14 @@ export interface PtyExitMessage {
   sessionId: SessionId;
   exitCode: number;
   signal?: number;
+  /**
+   * Why a HEADLESS Run's process ended without a declared outcome (issue
+   * 141): `timeout` when the Headless Session Manager killed it for
+   * exceeding `run_timeout`; `crashed` when it exited non-zero on its own.
+   * Absent for a clean (0) exit, an interactive Pane, or a user-initiated
+   * stop — those are not the no-Receipt failure path this names.
+   */
+  cause?: 'timeout' | 'crashed';
 }
 
 /**

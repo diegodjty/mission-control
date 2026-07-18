@@ -25,7 +25,7 @@ function mk(id: number, status: IssueStatus, over: Partial<BacklogIssue> = {}): 
 }
 
 function backlog(issues: BacklogIssue[], activePrd: string | null = 'docs/PRD.md'): Backlog {
-  return { activePrd, workerModel: 'sonnet', escalationCeiling: 'opus', workerEffort: null, issues };
+  return { activePrd, workerModel: 'sonnet', escalationCeiling: 'opus', workerEffort: null, runTimeoutMinutes: 30, issues };
 }
 
 describe('isRelevantChange', () => {
