@@ -1,23 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import {
-  shouldAutoMerge,
-  decideDispatcherMerge,
-  type AutoMergeContext,
-} from './dispatcher-merge';
+import { decideDispatcherMerge } from './dispatcher-merge';
 import { classifyAuthority } from './dispatcher-authority';
 import type { MergeRunsResult } from './ipc-contract';
-
-/** A live-drain context where auto-merge is allowed; override per-case. */
-function ctx(overrides: Partial<AutoMergeContext> = {}): AutoMergeContext {
-  return {
-    dispatcherActive: true,
-    mergeableCount: 1,
-    midMerge: false,
-    merging: false,
-    alreadyAttempted: false,
-    ...overrides,
-  };
-}
 
 /** A completed clean merge result; override per-case. */
 function result(overrides: Partial<MergeRunsResult> = {}): MergeRunsResult {
@@ -31,32 +15,6 @@ function result(overrides: Partial<MergeRunsResult> = {}): MergeRunsResult {
     ...overrides,
   };
 }
-
-describe('shouldAutoMerge (pre-run guard)', () => {
-  it('auto-merges when a drain is live and there is exactly a mergeable set to take', () => {
-    expect(shouldAutoMerge(ctx())).toBe(true);
-  });
-
-  it('does not auto-merge outside a Dispatcher drain (manual button only)', () => {
-    expect(shouldAutoMerge(ctx({ dispatcherActive: false }))).toBe(false);
-  });
-
-  it('does not auto-merge when nothing is mergeable', () => {
-    expect(shouldAutoMerge(ctx({ mergeableCount: 0 }))).toBe(false);
-  });
-
-  it('does not auto-merge onto a mid-merge main (a prior conflict must be resolved first)', () => {
-    expect(shouldAutoMerge(ctx({ midMerge: true }))).toBe(false);
-  });
-
-  it('does not fire a second merge while one is already in flight', () => {
-    expect(shouldAutoMerge(ctx({ merging: true }))).toBe(false);
-  });
-
-  it('does not re-fire the same mergeable set (guards a preflight-failure loop)', () => {
-    expect(shouldAutoMerge(ctx({ alreadyAttempted: true }))).toBe(false);
-  });
-});
 
 describe('decideDispatcherMerge (post-run classification)', () => {
   it('a clean merge auto-proceeds as a passive note carrying the merge summary', () => {

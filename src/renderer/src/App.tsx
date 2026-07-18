@@ -66,7 +66,9 @@ import {
   type LifecycleEvent,
 } from '../../shared/dispatcher-lifecycle';
 import type { DispatcherAction } from '../../shared/dispatcher-authority';
-import { shouldAutoMerge, decideDispatcherMerge } from '../../shared/dispatcher-merge';
+import { decideDispatcherMerge } from '../../shared/dispatcher-merge';
+import { decideAutoMergeLane, laneBranchesFrom } from '../../shared/auto-merge-lane';
+import { decideMergeAffordance, type MergeAffordance } from '../../shared/merge-affordance';
 import {
   describeDocDrift,
   detectCrossRunOverlap,
@@ -922,7 +924,8 @@ export function App(): JSX.Element {
   const protectedLandTargets = useRef<
     Record<
       string,
-      { kind: 'merge'; auto: boolean } | { kind: 'solo'; issueId: number; nextPhase: SoloCommitPhase }
+      | { kind: 'merge'; slugs: string[]; auto: boolean }
+      | { kind: 'solo'; issueId: number; nextPhase: SoloCommitPhase }
     >
   >({});
   // The solo-commit path resolves its withheld landings here (a state queue),
@@ -1070,6 +1073,7 @@ export function App(): JSX.Element {
     setMerging(false);
     setAborting(false);
     setMergeDisplay(null);
+    setSweepNote(null);
     autoMergeSig.current = null;
     setAfkScan(null);
     setWorktreeCommitErrors({});
@@ -3284,43 +3288,45 @@ export function App(): JSX.Element {
   }, [draining, backlog, runs, cap, projectPath, midMerge, runStatusOf, isIsolated, needsIsolation, runLog, surfaceNarrative, writeDrainJournalFor, issueRepoResolutions, repoForIssueId, workbenchPathsForRun, activeProject, logNote]);
 
   // --- Merge readiness (issue 08, ADR-0002; issue 16) ---------------------
-  // Whether a human-triggered Merge is offered — and which branches it targets —
-  // is derived from the ON-DISK `afk/` state, not the in-memory tracked Runs, so
-  // the affordance survives closing every Pane (issue 16). It appears once every
-  // isolated Run's branch is committed-done (issue 15) and none is still in
-  // flight, and never triggers on its own (ADR-0002).
+  // Retained ONLY as a defensive fallback for the (currently unreachable)
+  // Dispatcher `merge` proposal kind below — everyday merging now belongs to
+  // the always-on lane (ADR-0021, issue 148); the Map button targets EXPLICIT
+  // slugs (a paused conflict, adopted strays) instead of this whole-batch plan.
   const mergePlan = mergeReadinessOnDisk(activeScan.branches, liveRunIssueIds);
 
-  // The single merge invocation, shared by the manual Map button (`auto=false`)
-  // and the Dispatcher's auto-proceed path (`auto=true`, issue 46). The git work,
-  // the merge-status display, and the on-disk/tracking cleanup are IDENTICAL in
-  // both modes — so the manual button behaves exactly as before. The only thing
-  // `auto` adds is the Dispatcher posture on the RESULT: a clean merge records a
-  // passive `merge` note and relays its summary; a conflict / preflight failure
-  // records a blocking `merge-conflict` proposal and surfaces the reason (never
-  // auto-resolved). The pure `decideDispatcherMerge` makes that auto-vs-gate call.
-  const runMergeCore = useCallback((auto: boolean, confirmProtected = false): void => {
+  // The single merge invocation, shared by the Map's exceptions affordance
+  // (`auto=false` — resolving a conflict, merging a stray) and the always-on
+  // lane's own merge (`auto=true`, issues 145/146/148). The git work, the
+  // merge-status display, and the on-disk/tracking cleanup are IDENTICAL in
+  // both modes. The only thing `auto` adds is the Dispatcher posture on the
+  // RESULT: a clean merge records a passive `merge` note and relays its
+  // summary; a conflict / preflight failure records a blocking `merge-conflict`
+  // proposal and surfaces the reason (never auto-resolved). The pure
+  // `decideDispatcherMerge` makes that auto-vs-gate call. `targetSlugs` names
+  // exactly which `afk/NN-slug` branches to integrate this invocation.
+  const runMergeCore = useCallback((targetSlugs: string[], auto: boolean, confirmProtected = false): void => {
     if (projectPath === null || merging) return;
     // Merge stays PER REPO (issue 72): one afk-merge invocation integrates one
-    // repo's branches. Group the mergeable set by the repo each branch lives
-    // in (from the scan facts) and merge the FIRST group this invocation; a
+    // repo's branches. Group the target set by the repo each branch lives in
+    // (from the scan facts) and merge the FIRST group this invocation; a
     // remaining group re-derives as ready once the scan refreshes, so the next
-    // click / auto-proceed round integrates it — sequential by construction.
+    // click / lane-sweep round integrates it — sequential by construction.
     // A legacy Project has one repo, so the "first group" is the whole set,
     // byte-identical to before.
     const repoOf = (slug: string): string =>
       activeScan.branches.find((b) => b.slug === slug)?.repoPath ?? '';
-    const firstRepo = mergePlan.mergeable.length > 0 ? repoOf(mergePlan.mergeable[0].slug) : '';
-    const candidates = mergePlan.mergeable.filter((c) => repoOf(c.slug) === firstRepo);
-    if (candidates.length === 0) {
+    const firstRepo = targetSlugs.length > 0 ? repoOf(targetSlugs[0]) : '';
+    const slugs = targetSlugs.filter((slug) => repoOf(slug) === firstRepo);
+    if (slugs.length === 0) {
       // Triggered with nothing mergeable on disk (e.g. stale in-memory
       // readiness after the branches were removed): say so plainly rather than
       // silently doing nothing or later showing "could not run".
       setMergeDisplay(emptyMergeDisplay());
       return;
     }
-    const slugs = candidates.map((c) => c.slug);
-    const mergedIds = new Set(candidates.map((c) => c.issueId));
+    const mergedIds = new Set(
+      activeScan.branches.filter((b) => slugs.includes(b.slug)).map((b) => b.issueId),
+    );
     // Stable per-mergeable-set id so a re-render can't duplicate the note/gate.
     const sig = [...slugs].sort().join(',');
 
@@ -3344,7 +3350,7 @@ export function App(): JSX.Element {
         if (result.protectedBranch && !confirmProtected) {
           const branch = result.protectedBranch;
           const pid = `protected-branch-land:merge:${sig}`;
-          protectedLandTargets.current[pid] = { kind: 'merge', auto };
+          protectedLandTargets.current[pid] = { kind: 'merge', slugs, auto };
           setDispatcherActivities((prev) =>
             prev.some((a) => a.id === pid)
               ? prev
@@ -3437,35 +3443,104 @@ export function App(): JSX.Element {
       .finally(() => setMerging(false));
   }, [projectPath, merging, mergePlan, activeScan, logNote, surfaceEvent, surfaceNarrative]);
 
-  // The manual Map Merge button — the unchanged, human-triggered path (ADR-0002).
-  const runMerge = useCallback((): void => runMergeCore(false), [runMergeCore]);
+  // --- Merge affordance (issue 148, ADR-0021) ------------------------------
+  // Everyday merging belongs to the lane; the Map button changes job to the
+  // lane's EXCEPTIONS entry — a predicted conflict pausing the lane (named),
+  // and/or adopted stray branches (no Receipt — the lane never touches them).
+  // Both are independent facts, computed from the same on-disk scan + Run log
+  // the lane itself reads. `main.liveSoloRun` is only knowable HERE (a live
+  // solo Run is in-memory renderer state), so the prediction is evaluated
+  // against an otherwise-idle main (a real mid-merge/dirty tree already gates
+  // via the unchanged `midMerge` banner below).
+  const liveSoloRun = useMemo(
+    () => runs.some((r) => runStatusOf(r) === 'running' && !isIsolated(r)),
+    [runs, runStatusOf, isIsolated],
+  );
+  const mergeAffordance: MergeAffordance = useMemo(
+    () =>
+      decideMergeAffordance({
+        branches: activeScan.branches,
+        previews: activeScan.previews ?? [],
+        runLog,
+        main: { cleanTree: true, midMerge, liveSoloRun },
+      }),
+    [activeScan, runLog, midMerge, liveSoloRun],
+  );
 
-  // --- Dispatcher auto-merge (issue 46, ADR-0011 refining ADR-0002) --------
-  // Under a Dispatcher-driven drain a CLEAN merge of finished parallel work
-  // AUTO-PROCEEDS — the Dispatcher invokes it on its own and leaves a passive
-  // note ("merged 05 clean") — while a CONFLICT or preflight failure BLOCKS for a
-  // one-click approval (the `merge-conflict` item on issue 45's blocking list) and
-  // surfaces the reason (issues 17/23/24), never auto-resolving. The pure
-  // `shouldAutoMerge` decides WHEN to fire (a live Dispatcher session, mergeable
-  // `afk/` branches on disk, `main` not mid-merge, no merge already in flight, and
-  // this mergeable set not already auto-attempted); `decideDispatcherMerge` (in
-  // the shared core's result handler) makes the auto-note-vs-conflict-gate call.
-  // `autoMergeSig` records the attempted set so a persistent preflight failure —
-  // which leaves the branch set unchanged — can't loop the effect (a clean merge
-  // drops the branches and a conflict sets `midMerge`, so those self-guard).
-  useEffect(() => {
-    const sig = mergePlan.mergeable.map((c) => c.slug).sort().join(',');
-    const go = shouldAutoMerge({
-      dispatcherActive: (dispatcher?.sessionId ?? null) !== null,
-      mergeableCount: mergePlan.mergeable.length,
-      midMerge,
-      merging,
-      alreadyAttempted: autoMergeSig.current === sig,
+  // Resolve a paused conflict: attempt the real merge of THIS branch (the
+  // prediction may be stale — the tip may have moved — so this can also just
+  // succeed). A genuine conflict leaves `main` mid-merge, which the unchanged
+  // banner + Abort button below handles exactly as before (ADR-0021).
+  const resolveConflict = useCallback(
+    (slug: string): void => runMergeCore([slug], false),
+    [runMergeCore],
+  );
+  // Merge adopted stray branches (no Receipt) — a manual human action the
+  // lane deliberately never takes on its own.
+  const mergeStrays = useCallback(
+    (slugs: string[]): void => runMergeCore(slugs, false),
+    [runMergeCore],
+  );
+
+  const [sweepNote, setSweepNote] = useState<string | null>(null);
+  // Force one lane sweep NOW (issue 148): the same decision the always-on
+  // effect below makes, just invoked on demand and always reporting an
+  // outcome — a merge (via the unified `mergeDisplay`), the named pause, or
+  // plainly that nothing was mergeable.
+  const forceSweep = useCallback((): void => {
+    setSweepNote(null);
+    const laneBranches = laneBranchesFrom(
+      { branches: activeScan.branches, previews: activeScan.previews ?? [], midMerge },
+      runLog,
+    );
+    const decision = decideAutoMergeLane({
+      branches: laneBranches,
+      main: { cleanTree: true, midMerge, liveSoloRun },
     });
-    if (!go) return;
+    if (decision.kind === 'merge') {
+      runMergeCore([decision.slug], false);
+      return;
+    }
+    if (decision.kind === 'pause') {
+      setSweepNote(mergeAffordance.pausedConflict?.reason ?? `Auto-merge lane paused on ${decision.slug}.`);
+      return;
+    }
+    setSweepNote(
+      decision.reason === 'no-clean-branch'
+        ? 'Nothing mergeable — the lane has no clean, Receipt-backed branch to merge right now.'
+        : `Main is not idle (${decision.reason}) — the lane held.`,
+    );
+  }, [activeScan, runLog, midMerge, liveSoloRun, mergeAffordance, runMergeCore]);
+
+  // --- Auto-merge lane (issues 145/146/148, ADR-0021) ----------------------
+  // Everyday merging is ALWAYS ON now — no live Dispatcher session required
+  // (replaces the old Dispatcher-only auto-merge effect, issue 46). On every
+  // scan tick, ask the pure lane brain (fed by facts only a live Window has —
+  // the in-memory live-solo-Run fact) whether to merge the next clean,
+  // Receipt-backed branch, and fire the same (already-serialized) MergeRuns
+  // IPC if so. A predicted conflict raises the same blocking `merge-conflict`
+  // approval the press-time path always has; strays never enter this — only
+  // the human merges them, via the Map's exceptions affordance above.
+  // `autoMergeSig` records the attempted branch so a persistent preflight
+  // failure — which leaves the branch set unchanged — can't loop the effect (a
+  // clean merge drops the branch and a conflict sets `midMerge`, so those
+  // self-guard).
+  useEffect(() => {
+    if (merging) return;
+    const laneBranches = laneBranchesFrom(
+      { branches: activeScan.branches, previews: activeScan.previews ?? [], midMerge },
+      runLog,
+    );
+    const decision = decideAutoMergeLane({
+      branches: laneBranches,
+      main: { cleanTree: true, midMerge, liveSoloRun },
+    });
+    if (decision.kind !== 'merge') return;
+    const sig = `${decision.issueId}:${decision.slug}`;
+    if (autoMergeSig.current === sig) return;
     autoMergeSig.current = sig;
-    runMergeCore(true);
-  }, [mergePlan, dispatcher, midMerge, merging, runMergeCore]);
+    runMergeCore([decision.slug], true);
+  }, [activeScan, runLog, midMerge, liveSoloRun, merging, runMergeCore]);
 
   // Approve a pending proposal: mark it approved, then EXECUTE the action (the
   // gate's whole point — nothing ran until this click). Execution is dispatched
@@ -3481,8 +3556,12 @@ export function App(): JSX.Element {
           return resolveActivity(a, 'approved');
         }),
       );
-      if (action === 'merge') runMerge();
-      else if (action === 'abort-drain') stopDrain();
+      if (action === 'merge') {
+        // Defensive fallback (this proposal kind is not currently raised —
+        // everyday merging is the always-on lane's job now, ADR-0021): merge
+        // whatever the whole-batch plan still reads as ready.
+        runMergeCore(mergePlan.mergeable.map((c) => c.slug), false);
+      } else if (action === 'abort-drain') stopDrain();
       else if (action === 'discard-and-continue') {
         // Execute issue 22's discard for the stranded/blocked Run's worktree, if
         // it has one; a blocked solo Run has no worktree, so approving simply
@@ -3499,7 +3578,7 @@ export function App(): JSX.Element {
           // Re-run the withheld merge WITH confirmation. The direct call handles
           // it; the auto-merge effect stays guarded (a clean merge drops the
           // branches; a conflict sets midMerge — both self-guard against a re-fire).
-          runMergeCore(target.auto, true);
+          runMergeCore(target.slugs, target.auto, true);
         } else if (target?.kind === 'solo') {
           protectedGatedSoloIds.current.delete(target.issueId);
           const run = runs.find((r) => r.target.issueId === target.issueId);
@@ -3507,7 +3586,7 @@ export function App(): JSX.Element {
         }
       }
     },
-    [runMerge, stopDrain, discardRun, runMergeCore, commitSoloRun, runs],
+    [mergePlan, stopDrain, discardRun, runMergeCore, commitSoloRun, runs],
   );
 
   // Reject a pending proposal: drop it (mark rejected) and DO NOT execute — the
@@ -3983,9 +4062,11 @@ export function App(): JSX.Element {
             drainMessage={drainMessage}
             cap={cap}
             onCapChange={setCap}
-            mergeReady={mergePlan.ready}
-            mergeCount={mergePlan.mergeable.length}
-            onMerge={runMerge}
+            mergeAffordance={mergeAffordance}
+            onResolveConflict={resolveConflict}
+            onMergeStrays={mergeStrays}
+            onForceSweep={forceSweep}
+            sweepNote={sweepNote}
             merging={merging}
             mergeDisplay={mergeDisplay}
             midMerge={midMerge}
