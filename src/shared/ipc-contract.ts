@@ -16,6 +16,7 @@ import type { AfkBranchFacts } from './worktree-scan';
 import type { BranchPreview } from './merge-preview';
 import type { FeedContent } from './headless-feed';
 import type { WorkerEffort, WorkerModelTier } from './worker-model';
+import type { RunUsage } from './run-telemetry';
 
 /** Channel names. Grouped by direction for clarity. */
 export const IpcChannel = {
@@ -974,6 +975,17 @@ export interface RunLogRecord extends CompletionRecord {
   slug: string | null;
   /** The issue title, for the card header. */
   title: string | null;
+  /**
+   * Telemetry stamped from the Run's terminal result event (issue 143, ADR-0001
+   * amendment) — tokens, cost, duration, and the Worker model tier. Null for a
+   * Pane Run whose exit hasn't been correlated yet, or for a log persisted
+   * before this field existed; a Receipt-derived record starts `null` here and
+   * main patches it in once the underlying Run's process actually exits (a
+   * Receipt is written before the process exits, so the two arrive out of
+   * order). The Receipt file itself is NEVER touched — this rides only the
+   * MC-owned Run-log record.
+   */
+  usage: RunUsage | null;
 }
 
 /** Re-export the parser's outcome enum so consumers need one import. */

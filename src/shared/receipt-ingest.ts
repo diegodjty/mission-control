@@ -114,5 +114,9 @@ export function toReceiptRunLogRecord(
     capturedAt,
     slug: stem,
     title: null,
+    // A Receipt never carries telemetry (producer-owned, ADR-0013) — main
+    // patches this in once the Run's process exits and reports usage
+    // (issue 143).
+    usage: null,
   };
 }

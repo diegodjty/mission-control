@@ -4,6 +4,8 @@ import { Badge, type BadgeTone } from './components';
 import type { Backlog, BacklogIssue } from '../../shared/backlog-model';
 import { deleteRefusal } from '../../shared/issue-file-ops';
 import type { LauncherProject, RunLogRecord, RunTarget } from '../../shared/ipc-contract';
+import { formatElapsed } from '../../shared/headless-feed';
+import { formatCostUsd, formatTokens } from '../../shared/run-telemetry';
 import { QuickFixForm, type QuickFixIssueRef } from './QuickFixForm';
 import { START_VERB_LABELS, startSomething, type StartVerb } from '../../shared/launcher-model';
 import { type InFlightRuns } from '../../shared/run-eligibility';
@@ -1040,6 +1042,23 @@ function outcomeTone(outcome: RunLogRecord['outcome']): BadgeTone {
   }
 }
 
+/**
+ * The Run card's telemetry line (issue 143): tokens/cost/duration for a
+ * headless Run, duration only for a Pane Run (every token/cost field null —
+ * the asymmetry is by design, not a missing feature). Empty for a Run with no
+ * telemetry at all (e.g. one captured before this field existed).
+ */
+function usageLine(usage: RunLogRecord['usage']): string | null {
+  if (usage == null) return null;
+  const parts: string[] = [];
+  if (usage.inputTokens !== null || usage.outputTokens !== null) {
+    parts.push(`${formatTokens(usage.inputTokens ?? 0)} in / ${formatTokens(usage.outputTokens ?? 0)} out tok`);
+  }
+  if (usage.costUsd !== null) parts.push(formatCostUsd(usage.costUsd));
+  if (usage.durationMs !== null) parts.push(formatElapsed(usage.durationMs));
+  return parts.length > 0 ? parts.join(' · ') : null;
+}
+
 /** One captured Completion block as a card, showing only its present fields. */
 function RunLogCard({
   record,
@@ -1065,6 +1084,7 @@ function RunLogCard({
     fields.push(['Report', record.detail]);
   }
   const shown = fields.filter(([, v]) => v !== null && v !== '');
+  const usage = usageLine(record.usage);
   return (
     <li className="runlog-card" onClick={onSelect} title="Show this issue in the backlog">
       <div className="runlog-card__head">
@@ -1075,6 +1095,7 @@ function RunLogCard({
           {new Date(record.capturedAt).toLocaleString()}
         </span>
       </div>
+      {usage !== null && <div className="runlog-card__usage">{usage}</div>}
       {shown.length > 0 ? (
         <dl className="runlog-card__fields">
           {shown.map(([label, value]) => (

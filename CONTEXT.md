@@ -47,6 +47,10 @@ _Avoid_: conflating with the model tier — effort is orthogonal (a cheap model 
 The read-only live view of a **headless Run**, rendered from its event stream (current activity, elapsed time, last assistant message). You *watch* a Feed; you *talk to* a **Pane**. The raw stream tail is retained for debug peeking only — Receipts remain the sole capture input (ADR-0013).
 _Avoid_: Pane (interactive), terminal, log (the Run log is the Receipt feed, not this).
 
+**Run telemetry** (issue 143, ADR-0001 amendment):
+Tokens, cost, and duration, stamped from a **headless Run**'s terminal result event into the MC-owned **Run-log** record and drain journal — never into the **Receipt** (producer-owned, untouched, ADR-0013). A **Pane Run** carries duration only, every token/cost field null — by design, not a gap. The drain journal's per-Run line gets a telemetry suffix and the entry gets a `## Totals` section summing across whatever mix of headless/Pane Runs it holds.
+_Avoid_: conflating with the Receipt's own narrative fields (whatChanged/verified/etc.) — telemetry is numeric and MC-derived, never producer-written prose.
+
 **Artifacts**:
 The on-disk files the **Map** reads: `issues/NN-slug.md` (status/depends_on frontmatter), the project CONFIG, git history, and **Receipts** (the on-disk carrier of the completion blocks the afk-issue-runner emits). Pipeline artifacts live in the **Workbench** (ADR-0015); a legacy in-repo `issues/` layout remains supported (QA sandbox, external skill users).
 

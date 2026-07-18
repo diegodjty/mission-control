@@ -230,6 +230,7 @@ describe('recallBlock', () => {
       docDrift: 'none',
       detail: null,
       outcome: 'completed',
+      usage: null,
       ...over,
     };
   }

@@ -26,6 +26,7 @@ function record(over: Partial<RunLogRecord>): RunLogRecord {
     docDrift: 'none',
     detail: null,
     outcome: 'completed',
+    usage: null,
     ...over,
   };
 }
@@ -126,6 +127,57 @@ describe('buildJournalEntry', () => {
     // Sorted by issue id, so the entry reads like the backlog.
     expect(entry.indexOf('02-second-step')).toBeLessThan(entry.indexOf('04-independent'));
     expect(entry.indexOf('04-independent')).toBeLessThan(entry.indexOf('05-manual-check'));
+  });
+
+  it('carries a per-Run telemetry suffix and a per-drain totals line (issue 143)', () => {
+    const entry = buildJournalEntry({
+      endedAt: '2026-07-04T18:30:00.000Z',
+      reason: 'done',
+      records: [
+        record({
+          id: 'receipt:02-second-step:x',
+          usage: {
+            durationMs: 192_000,
+            inputTokens: 1200,
+            outputTokens: 340,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0,
+            costUsd: 0.02,
+            tier: 'sonnet',
+          },
+        }),
+        record({
+          id: 'receipt:03-pane-run:x',
+          slug: '03-pane-run',
+          issueId: 3,
+          usage: {
+            durationMs: 60_000,
+            inputTokens: null,
+            outputTokens: null,
+            cacheReadTokens: null,
+            cacheCreationTokens: null,
+            costUsd: null,
+            tier: null,
+          },
+        }),
+      ],
+    });
+    expect(entry).toContain(
+      '- 02-second-step: completed — The app now does the thing. (sonnet · 1.2k in / 340 out tok · $0.02 · 3:12)',
+    );
+    // Pane Run: time-only — no tier, no tokens, no cost.
+    expect(entry).toContain('- 03-pane-run: completed — The app now does the thing. (1:00)');
+    expect(entry).toContain('## Totals');
+    expect(entry).toContain('- 2/2 Runs with telemetry — 1.2k in / 340 out tok · $0.02 · 4:12');
+  });
+
+  it('omits the Totals section entirely when nothing carries telemetry', () => {
+    const entry = buildJournalEntry({
+      endedAt: '2026-07-04T18:30:00.000Z',
+      reason: 'done',
+      records: [record({})],
+    });
+    expect(entry).not.toContain('## Totals');
   });
 
   it('flags real doc drift and omits the section when every Run says none', () => {

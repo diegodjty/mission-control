@@ -30,6 +30,7 @@ function record(over: Partial<RunLogRecord> = {}): RunLogRecord {
     docDrift: 'none',
     detail: null,
     outcome: 'completed',
+    usage: null,
     ...over,
   };
 }
@@ -79,6 +80,43 @@ describe('RunLogStore — persist and read', () => {
     expect(back).toHaveLength(1);
     expect(back[0].outcome).toBe('completed');
     expect(back[0].whatChanged).toBe('final');
+  });
+
+  it('round-trips usage telemetry, and a later re-append patches it in (issue 143)', async () => {
+    const store = new RunLogStore(base);
+    const projectPath = join(base, 'projA');
+    // A Receipt lands with no telemetry yet (the process hasn't exited).
+    await store.append(projectPath, record({ id: 'sT' }));
+    let back = await store.read(projectPath);
+    expect(back[0].usage).toBeNull();
+
+    // The process exits later; main patches the SAME id with usage.
+    await store.append(
+      projectPath,
+      record({
+        id: 'sT',
+        usage: {
+          durationMs: 12_000,
+          inputTokens: 100,
+          outputTokens: 40,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+          costUsd: 0.02,
+          tier: 'sonnet',
+        },
+      }),
+    );
+    back = await store.read(projectPath);
+    expect(back).toHaveLength(1);
+    expect(back[0].usage).toEqual({
+      durationMs: 12_000,
+      inputTokens: 100,
+      outputTokens: 40,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      costUsd: 0.02,
+      tier: 'sonnet',
+    });
   });
 
   it('skips a corrupt trailing line rather than failing the read', async () => {

@@ -64,6 +64,7 @@ function record(over: Partial<RunLogRecord> & { id: string; outcome: RunOutcome 
     capturedAt: '2026-07-03T00:00:00.000Z',
     slug: null,
     title: null,
+    usage: null,
     ...over,
   };
 }

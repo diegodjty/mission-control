@@ -65,6 +65,7 @@ sequenceDiagram
   W->>W: work · verify gate
   W->>F: flip wip→done, write Receipt (before final message)
   F-->>MC: receipt-watcher ingests → Run log card + journal
+  W-->>MC: process exits → usage stamped onto the SAME Run-log record
   MC-->>C: re-plan → next issue fills the slot
 ```
 
@@ -98,8 +99,12 @@ drain Worker also carries a declared **effort** (`--effort <level>`), **derived
 from the tier** by default (`haiku`→low, `sonnet`→medium, `opus`/`fable`→high)
 with an issue `effort:` / CONFIG `worker_effort` override — a second cost lever
 beside the model; escalation re-derives it for the bigger tier unless a per-issue
-`effort:` pins it. *Queued:* hung Runs killed at `run_timeout` (141), Run
-telemetry — tokens/cost/duration (143).
+`effort:` pins it. *Landed (143):* the terminal result's **usage** (tokens, cost,
+duration) is stamped onto the Run-log record once the process exits — before or
+after its Receipt, whichever lands first — and shown on the Run card and the
+drain journal's per-Run line plus a `## Totals` line; a Pane Run's record
+carries duration only. The Receipt itself is never touched. *Queued:* hung Runs
+killed at `run_timeout` (141).
 
 ## 3. Merge lifecycle
 

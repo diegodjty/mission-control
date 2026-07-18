@@ -335,6 +335,7 @@ function laneReceipt(issueId: number, slug: string, finished: string): RunLogRec
     docDrift: null,
     detail: null,
     outcome: 'completed',
+    usage: null,
   };
 }
 

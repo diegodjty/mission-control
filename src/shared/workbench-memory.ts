@@ -19,6 +19,8 @@
  * `src/main/memory-files.ts`; the wiring in the main process and App.
  */
 import type { RunLogRecord } from './ipc-contract';
+import { formatElapsed } from './headless-feed';
+import { formatCostUsd, formatTokens, sumRunUsage, type RunUsage } from './run-telemetry';
 
 // ---------------------------------------------------------------------------
 // CORE.md injection — cap and label
@@ -121,6 +123,26 @@ function outcomeLabel(outcome: RunLogRecord['outcome']): string {
   return 'unknown';
 }
 
+/**
+ * A Run's telemetry as a one-line parenthetical (issue 143): the tier it
+ * spawned on, tokens, cost, and duration — whichever of those it carries.
+ * A Pane Run's `usage` only ever carries `durationMs` (every token/cost field
+ * null), so it renders as `(3:12)` beside a headless Run's fuller
+ * `(sonnet · 1.2k in / 340 out tok · $0.02 · 3:12)`. Empty when there's no
+ * telemetry at all (e.g. a Run that finished before this field existed).
+ */
+function formatUsageSuffix(usage: RunUsage | null | undefined): string {
+  if (usage == null) return '';
+  const parts: string[] = [];
+  if (usage.tier) parts.push(usage.tier);
+  if (usage.inputTokens !== null || usage.outputTokens !== null) {
+    parts.push(`${formatTokens(usage.inputTokens ?? 0)} in / ${formatTokens(usage.outputTokens ?? 0)} out tok`);
+  }
+  if (usage.costUsd !== null) parts.push(formatCostUsd(usage.costUsd));
+  if (usage.durationMs !== null) parts.push(formatElapsed(usage.durationMs));
+  return parts.length > 0 ? ` (${parts.join(' · ')})` : '';
+}
+
 /** True when a doc-drift section carries an actual finding (not "none"). */
 function isRealDrift(docDrift: string | null): docDrift is string {
   return docDrift !== null && docDrift.trim().length > 0 && !/^none\b/i.test(docDrift.trim());
@@ -157,7 +179,29 @@ export function buildJournalEntry(input: DrainJournalInput): string {
   for (const rec of runs) {
     const name = rec.slug ?? (rec.issueId !== null ? `issue ${rec.issueId}` : 'unknown issue');
     const summary = oneLine(rec.whatChanged ?? rec.detail ?? '');
-    lines.push(`- ${name}: ${outcomeLabel(rec.outcome)}${summary ? ` — ${summary}` : ''}`);
+    lines.push(
+      `- ${name}: ${outcomeLabel(rec.outcome)}${summary ? ` — ${summary}` : ''}${formatUsageSuffix(rec.usage)}`,
+    );
+  }
+
+  // Per-drain totals (issue 143): sums across whatever mix of headless
+  // (tokens/cost/duration) and Pane (duration-only) Runs this drain produced.
+  // Omitted entirely when nothing in the drain carried any telemetry, so an
+  // all-Pane or pre-143 drain's journal shape is unchanged.
+  const totals = sumRunUsage(runs.map((rec) => rec.usage));
+  if (totals.runsWithUsage > 0) {
+    const parts: string[] = [];
+    if (totals.inputTokens > 0 || totals.outputTokens > 0) {
+      parts.push(`${formatTokens(totals.inputTokens)} in / ${formatTokens(totals.outputTokens)} out tok`);
+    }
+    if (totals.costUsd > 0) parts.push(formatCostUsd(totals.costUsd));
+    parts.push(formatElapsed(totals.durationMs));
+    lines.push(
+      '',
+      '## Totals',
+      '',
+      `- ${totals.runsWithUsage}/${totals.totalRuns} Runs with telemetry — ${parts.join(' · ')}`,
+    );
   }
 
   const drifts = runs.filter((rec) => isRealDrift(rec.docDrift));
