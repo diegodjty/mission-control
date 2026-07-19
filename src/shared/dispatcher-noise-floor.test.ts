@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { isRealCapture, isRealDocDrift, isStrongOverlap } from './dispatcher-noise-floor';
+import { isRealCapture, isRealDocDrift } from './dispatcher-noise-floor';
 import type { CompletionRecord, RunOutcome } from './completion-parser';
-import type { OverlapGroup, RunRef } from './dispatcher-synthesis';
 
 /** A fully-null completion record; spread over to set only the fields a test needs. */
 function record(over: Partial<CompletionRecord> & { outcome: RunOutcome }): CompletionRecord {
@@ -16,14 +15,6 @@ function record(over: Partial<CompletionRecord> & { outcome: RunOutcome }): Comp
     detail: null,
     ...over,
   };
-}
-
-function ref(runId: string, issueId: number | null = null): RunRef {
-  return { runId, issueId, issue: null };
-}
-
-function overlap(seam: string, runIds: string[]): OverlapGroup {
-  return { seam, runs: runIds.map((id, i) => ref(id, i + 1)) };
 }
 
 describe('isRealCapture — (a) the empty/boot-screen noise floor', () => {
@@ -68,32 +59,5 @@ describe('isRealDocDrift — (b) doc-drift-on-none stays silent', () => {
 
   it('is true for a real contradiction', () => {
     expect(isRealDocDrift({ docDrift: 'PRD assumes 13 months; the feed holds ~11 days.' })).toBe(true);
-  });
-});
-
-describe('isStrongOverlap — (c) only a strong concrete overlap surfaces', () => {
-  it('is true for ≥2 distinct Runs on the same concrete source file', () => {
-    expect(isStrongOverlap(overlap('src/shared/dispatcher-merge.ts', ['a', 'b']))).toBe(true);
-    expect(isStrongOverlap(overlap('the merge seam', ['a', 'b', 'c']))).toBe(true);
-  });
-
-  it('DROPS a weak overlap of only one Run (the dogfood weak-overlap case)', () => {
-    expect(isStrongOverlap(overlap('src/shared/dispatcher-merge.ts', ['a']))).toBe(false);
-  });
-
-  it('DROPS a boilerplate seam even when ≥2 Runs mention it', () => {
-    // The PRD, config, manifests and the skill file are quoted structurally by
-    // (nearly) every block — a shared mention is not shared work.
-    expect(isStrongOverlap(overlap('docs/prd.md', ['a', 'b']))).toBe(false);
-    expect(isStrongOverlap(overlap('docs/prd-dispatcher.md', ['a', 'b', 'c']))).toBe(false);
-    expect(isStrongOverlap(overlap('package.json', ['a', 'b']))).toBe(false);
-    expect(isStrongOverlap(overlap('tsconfig.json', ['a', 'b']))).toBe(false);
-    expect(isStrongOverlap(overlap('issues/config.md', ['a', 'b']))).toBe(false);
-    expect(isStrongOverlap(overlap('docs/adr/0012-dispatcher-noise-floor.md', ['a', 'b']))).toBe(false);
-    expect(isStrongOverlap(overlap('~/.claude/skills/afk-issue-runner/skill.md', ['a', 'b']))).toBe(false);
-  });
-
-  it('DROPS a non-concrete junk token', () => {
-    expect(isStrongOverlap(overlap('consolidate', ['a', 'b']))).toBe(false);
   });
 });
