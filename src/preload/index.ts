@@ -31,6 +31,12 @@ import {
   type RepoRegisterResult,
   type GitInitRequest,
   type GitInitResult,
+  type GitBranchStatusRequest,
+  type GitBranchStatusResult,
+  type GitListBranchesRequest,
+  type GitListBranchesResult,
+  type GitBranchOpRequest,
+  type GitBranchOpResult,
   type PlanningChangedMessage,
   type PlanningDocReadRequest,
   type PlanningDocReadResult,
@@ -209,6 +215,18 @@ const api: MissionControlApi = {
 
   gitInit: (req: GitInitRequest): Promise<GitInitResult> =>
     ipcRenderer.invoke(IpcChannel.GitInit, req),
+
+  getGitBranchStatus: (req: GitBranchStatusRequest): Promise<GitBranchStatusResult> =>
+    ipcRenderer.invoke(IpcChannel.GitBranchStatus, req),
+
+  listGitBranches: (req: GitListBranchesRequest): Promise<GitListBranchesResult> =>
+    ipcRenderer.invoke(IpcChannel.GitListBranches, req),
+
+  createGitBranch: (req: GitBranchOpRequest): Promise<GitBranchOpResult> =>
+    ipcRenderer.invoke(IpcChannel.GitCreateBranch, req),
+
+  switchGitBranch: (req: GitBranchOpRequest): Promise<GitBranchOpResult> =>
+    ipcRenderer.invoke(IpcChannel.GitSwitchBranch, req),
 
   readIssueFile: (req: IssueFileReadRequest): Promise<IssueFileReadResult> =>
     ipcRenderer.invoke(IpcChannel.IssueFileRead, req),

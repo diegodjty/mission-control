@@ -195,6 +195,75 @@ export async function detectDefaultBranch(projectPath: string): Promise<string> 
   return resolveDefaultBranch(out);
 }
 
+/** The main checkout's actual current branch (issue 167), or detached. */
+export interface BranchStatus {
+  /** Current branch name, or null when HEAD is detached. */
+  branch: string | null;
+  /** True when HEAD is detached (not on any branch). */
+  detached: boolean;
+}
+
+/**
+ * The Project checkout's CURRENT branch, for the Map's pre-start branch
+ * awareness (issue 167). Unlike `detectDefaultBranch` — which exists to give
+ * the merge path a always-usable integration-target name and so silently
+ * falls back to `main` on a detached HEAD — this reports detachment
+ * explicitly, so the UI can name it rather than imply the repo is on `main`.
+ */
+export async function getBranchStatus(projectPath: string): Promise<BranchStatus> {
+  try {
+    const out = await git(projectPath, ['symbolic-ref', '--short', 'HEAD']);
+    const trimmed = out.trim();
+    return trimmed.length > 0 ? { branch: trimmed, detached: false } : { branch: null, detached: true };
+  } catch {
+    return { branch: null, detached: true };
+  }
+}
+
+/** Every local branch name (issue 167's Switch-branch picker). */
+export async function listLocalBranches(projectPath: string): Promise<string[]> {
+  let out: string;
+  try {
+    out = await git(projectPath, ['for-each-ref', '--format=%(refname:short)', 'refs/heads']);
+  } catch {
+    return [];
+  }
+  return out
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+/** The outcome of a branch-mutating git op (create/switch), never throws. */
+export interface BranchOpOutcome {
+  ok: boolean;
+  error: string | null;
+}
+
+/**
+ * Create a new branch off HEAD and check it out — issue 167's pre-start
+ * "Create a new branch" action. The ensuing Run/drain then integrates into
+ * it, since the integration target follows HEAD (`detectDefaultBranch`).
+ */
+export async function createBranch(projectPath: string, name: string): Promise<BranchOpOutcome> {
+  try {
+    await git(projectPath, ['checkout', '-b', name]);
+    return { ok: true, error: null };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** Check out an existing branch — issue 167's pre-start "Switch branch" action. */
+export async function switchBranch(projectPath: string, name: string): Promise<BranchOpOutcome> {
+  try {
+    await git(projectPath, ['checkout', name]);
+    return { ok: true, error: null };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 /**
  * Is the `afk/<slug>` branch tip already an ancestor of the repo's default branch
  * (i.e. merged)? The default branch is DETECTED and passed in (issue 27) rather

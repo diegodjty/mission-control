@@ -34,6 +34,7 @@ import type {
   RunLogRecord,
   RunTarget,
   TalkTarget,
+  GitBranchStatusResult,
 } from '../../shared/ipc-contract';
 import {
   renderCompletionEvent,
@@ -53,7 +54,7 @@ import {
   reactToLifecycleEvent,
   type LifecycleEvent,
 } from '../../shared/dispatcher-lifecycle';
-import type { DispatcherAction } from '../../shared/dispatcher-authority';
+import { isProtectedBranch, type DispatcherAction } from '../../shared/dispatcher-authority';
 import { decideDispatcherMerge } from '../../shared/dispatcher-merge';
 import { decideAutoMergeLane, laneBranchesFrom } from '../../shared/auto-merge-lane';
 import { decideMergeAffordance, type MergeAffordance } from '../../shared/merge-affordance';
@@ -459,6 +460,24 @@ export function App(): JSX.Element {
   const [gitInitPrompt, setGitInitPrompt] = useState<{ cap: number } | null>(null);
   const [gitInitBusy, setGitInitBusy] = useState(false);
   const [gitInitError, setGitInitError] = useState<string | null>(null);
+  // Branch awareness before Run/drain (issue 167): the Project checkout's
+  // CURRENT branch, polled live so the Map badge and the pre-start gate below
+  // never act on a stale read (the human may switch branches outside MC).
+  const [branchStatus, setBranchStatus] = useState<GitBranchStatusResult | null>(null);
+  // A pending Run/drain caught on a protected branch or detached HEAD (issue
+  // 167): null when nothing is held. `create`/`switch` sub-modes reuse the
+  // same dialog; resolving either (or Proceed anyway) resumes the held action.
+  const [branchPrompt, setBranchPrompt] = useState<
+    { kind: 'run'; target: RunTarget } | { kind: 'drain'; cap: number } | null
+  >(null);
+  const [branchPromptMode, setBranchPromptMode] = useState<'choose' | 'create' | 'switch'>(
+    'choose',
+  );
+  const [branchPromptName, setBranchPromptName] = useState('');
+  const [branchPromptBranches, setBranchPromptBranches] = useState<string[]>([]);
+  const [branchPromptSelected, setBranchPromptSelected] = useState('');
+  const [branchPromptBusy, setBranchPromptBusy] = useState(false);
+  const [branchPromptError, setBranchPromptError] = useState<string | null>(null);
   // Mirrors `activeProjectKey` for the callbacks/effects that need the CURRENT
   // active Project without re-subscribing (issue 26): they compare it against
   // an incoming key via `isProjectSwitch` to decide whether to reset
@@ -1477,6 +1496,41 @@ export function App(): JSX.Element {
     };
   }, [projectPath]);
 
+  // The Project checkout's current branch (issue 167), polled on the same
+  // cadence as the afk scan so the Map badge and the pre-start gate below stay
+  // live even when the human switches branches outside Mission Control.
+  useEffect(() => {
+    if (projectPath === null) {
+      setBranchStatus(null);
+      return;
+    }
+    let cancelled = false;
+    const poll = (): void => {
+      void window.mc
+        .getGitBranchStatus({ projectPath })
+        .then((res) => {
+          if (cancelled) return;
+          setBranchStatus((prev) =>
+            prev &&
+            prev.branch === res.branch &&
+            prev.detached === res.detached &&
+            prev.protectedBranch === res.protectedBranch
+              ? prev
+              : res,
+          );
+        })
+        .catch(() => {
+          // Transient read error: keep the last known status; the next tick retries.
+        });
+    };
+    poll();
+    const timer = setInterval(poll, 1500);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [projectPath]);
+
   // The issue ids whose Run session is currently LIVE (still `running`) in this
   // Window. This is the fact the on-disk scan can't supply on its own and the
   // reason a blocked/stopped Run used to read `running` forever (issue 22): a
@@ -1871,6 +1925,25 @@ export function App(): JSX.Element {
       activeProject,
       backlog,
     ],
+  );
+
+  // Branch-aware Run start (issue 167): a genuinely FRESH Run on a protected
+  // branch (`main`/`master`) or a detached HEAD gets caught here — the human
+  // picks Create/Switch/Proceed before `startRun` ever touches the checkout.
+  // An already-tracked Run (surfacing its Pane, no new git effect) always
+  // bypasses the gate.
+  const guardedStartRun = useCallback(
+    (target: RunTarget): void => {
+      const tracked = runs.some((r) => r.target.issueId === target.issueId);
+      if (tracked || branchStatus === null || (!branchStatus.protectedBranch && !branchStatus.detached)) {
+        startRun(target);
+        return;
+      }
+      setBranchPromptMode('choose');
+      setBranchPromptError(null);
+      setBranchPrompt({ kind: 'run', target });
+    },
+    [runs, branchStatus, startRun],
   );
 
   // --- Launcher actions (issue 81, ADR-0016) --------------------------------
@@ -2650,6 +2723,34 @@ export function App(): JSX.Element {
     },
     [midMerge, backlog, runs, runStatusOf, notUnderGit, proceedDrain],
   );
+
+  // Branch-aware drain start (issue 167): a drain on a protected branch or a
+  // detached HEAD is caught here, BEFORE `startDrain`'s own gates run — so the
+  // human resolves the branch first and every gate below sees the branch they
+  // actually chose.
+  const guardedStartDrain = useCallback(
+    (chosenCap: number): void => {
+      if (branchStatus === null || (!branchStatus.protectedBranch && !branchStatus.detached)) {
+        startDrain(chosenCap);
+        return;
+      }
+      setBranchPromptMode('choose');
+      setBranchPromptError(null);
+      setBranchPrompt({ kind: 'drain', cap: chosenCap });
+    },
+    [branchStatus, startDrain],
+  );
+
+  // Resume whichever Run/drain the branch prompt is holding, bypassing the
+  // guard (it just got resolved) — fired by Create/Switch (after the git op
+  // lands) and by Proceed anyway.
+  const resumeBranchPrompt = useCallback((): void => {
+    if (branchPrompt === null) return;
+    const pending = branchPrompt;
+    setBranchPrompt(null);
+    if (pending.kind === 'run') startRun(pending.target);
+    else startDrain(pending.cap);
+  }, [branchPrompt, startRun, startDrain]);
 
   const stopDrain = useCallback((): void => {
     setDraining(false);
@@ -3681,6 +3782,210 @@ export function App(): JSX.Element {
     </Dialog>
   );
 
+  // Pre-start branch-awareness prompt (issue 167): caught by `guardedStartRun`
+  // / `guardedStartDrain` when the checkout is on a protected branch
+  // (`main`/`master`) or a detached HEAD — BEFORE any Run/drain work starts,
+  // so the branch choice is still free (unlike issue 113's merge-time-only
+  // warning). Create/Switch perform the git op then resume the held action;
+  // Proceed anyway resumes unchanged, landing on the current branch.
+  const submitCreateBranch = (): void => {
+    if (projectPath === null) return;
+    const name = branchPromptName.trim();
+    if (name === '') return;
+    setBranchPromptBusy(true);
+    setBranchPromptError(null);
+    void window.mc
+      .createGitBranch({ projectPath, name })
+      .then((res) => {
+        setBranchPromptBusy(false);
+        if (!res.ok) {
+          setBranchPromptError(res.error ?? 'Could not create the branch.');
+          return;
+        }
+        setBranchStatus({ branch: res.branch, detached: false, protectedBranch: false });
+        resumeBranchPrompt();
+      })
+      .catch((err) => {
+        setBranchPromptBusy(false);
+        setBranchPromptError(err instanceof Error ? err.message : String(err));
+      });
+  };
+
+  const submitSwitchBranch = (): void => {
+    if (projectPath === null) return;
+    const name = branchPromptSelected;
+    if (name === '') return;
+    setBranchPromptBusy(true);
+    setBranchPromptError(null);
+    void window.mc
+      .switchGitBranch({ projectPath, name })
+      .then((res) => {
+        setBranchPromptBusy(false);
+        if (!res.ok) {
+          setBranchPromptError(res.error ?? 'Could not switch branches.');
+          return;
+        }
+        setBranchStatus({
+          branch: res.branch,
+          detached: false,
+          protectedBranch: res.branch !== null && isProtectedBranch(res.branch),
+        });
+        resumeBranchPrompt();
+      })
+      .catch((err) => {
+        setBranchPromptBusy(false);
+        setBranchPromptError(err instanceof Error ? err.message : String(err));
+      });
+  };
+
+  const branchPromptDialog = (
+    <Dialog
+      open={branchPrompt !== null}
+      onOpenChange={(open) => {
+        if (!open) {
+          setBranchPrompt(null);
+          setBranchPromptMode('choose');
+          setBranchPromptError(null);
+        }
+      }}
+    >
+      {branchPrompt !== null && (
+        <DialogContent>
+          <DialogTitle>
+            {branchStatus?.detached
+              ? 'Detached HEAD'
+              : `On a protected branch (${branchStatus?.branch ?? ''})`}
+          </DialogTitle>
+          <DialogDescription>
+            {branchStatus?.detached ? (
+              <>
+                <strong>{activeProject?.label ?? 'This project'}</strong>'s checkout isn't on any
+                branch right now — a {branchPrompt.kind === 'drain' ? 'drain' : 'Run'} would land
+                its work with nowhere to come back to. Create a branch, switch to one, or proceed
+                anyway (work lands on a detached commit).
+              </>
+            ) : (
+              <>
+                <strong>{activeProject?.label ?? 'This project'}</strong> is checked out on{' '}
+                <strong>{branchStatus?.branch}</strong> — a protected branch. A{' '}
+                {branchPrompt.kind === 'drain' ? 'drain' : 'Run'} would land its work directly
+                there. Create a new branch, switch to an existing one, or proceed anyway.
+              </>
+            )}
+          </DialogDescription>
+          {branchPromptError && <p className="app__gitinit-error">{branchPromptError}</p>}
+          {branchPromptMode === 'choose' && (
+            <DialogActions>
+              <Button
+                variant="primary"
+                onClick={() => {
+                  setBranchPromptName('');
+                  setBranchPromptError(null);
+                  setBranchPromptMode('create');
+                }}
+              >
+                Create a new branch
+              </Button>
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  setBranchPromptError(null);
+                  setBranchPromptSelected('');
+                  setBranchPromptMode('switch');
+                  if (projectPath !== null) {
+                    void window.mc
+                      .listGitBranches({ projectPath })
+                      .then((res) => setBranchPromptBranches(res.branches));
+                  }
+                }}
+              >
+                Switch to an existing branch
+              </Button>
+              <Button
+                variant="ghost"
+                className="ui-btn--end"
+                onClick={resumeBranchPrompt}
+                title="Start anyway, landing work on the current branch"
+              >
+                Proceed anyway
+              </Button>
+            </DialogActions>
+          )}
+          {branchPromptMode === 'create' && (
+            <>
+              <label className="launcher__label">
+                New branch name
+                <input
+                  className="launcher__input"
+                  type="text"
+                  autoFocus
+                  value={branchPromptName}
+                  onChange={(e) => setBranchPromptName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') submitCreateBranch();
+                  }}
+                />
+              </label>
+              <DialogActions>
+                <Button
+                  variant="primary"
+                  disabled={branchPromptBusy || branchPromptName.trim() === ''}
+                  onClick={submitCreateBranch}
+                >
+                  {branchPromptBusy ? 'Creating…' : 'Create + check out'}
+                </Button>
+                <Button
+                  variant="ghost"
+                  disabled={branchPromptBusy}
+                  onClick={() => setBranchPromptMode('choose')}
+                >
+                  Back
+                </Button>
+              </DialogActions>
+            </>
+          )}
+          {branchPromptMode === 'switch' && (
+            <>
+              <label className="launcher__label">
+                Branch
+                <select
+                  className="launcher__select"
+                  value={branchPromptSelected}
+                  onChange={(e) => setBranchPromptSelected(e.target.value)}
+                >
+                  <option value="" disabled>
+                    Pick a branch…
+                  </option>
+                  {branchPromptBranches.map((b) => (
+                    <option key={b} value={b}>
+                      {b}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <DialogActions>
+                <Button
+                  variant="primary"
+                  disabled={branchPromptBusy || branchPromptSelected === ''}
+                  onClick={submitSwitchBranch}
+                >
+                  {branchPromptBusy ? 'Switching…' : 'Switch + check out'}
+                </Button>
+                <Button
+                  variant="ghost"
+                  disabled={branchPromptBusy}
+                  onClick={() => setBranchPromptMode('choose')}
+                >
+                  Back
+                </Button>
+              </DialogActions>
+            </>
+          )}
+        </DialogContent>
+      )}
+    </Dialog>
+  );
+
   const openChoiceDialog = (
     <Dialog
       open={pendingOpenChoice !== null}
@@ -3853,6 +4158,7 @@ export function App(): JSX.Element {
           {interruptDialog}
           {openChoiceDialog}
           {gitInitDialog}
+          {branchPromptDialog}
           <CommandPalette
             open={paletteOpen}
             onOpenChange={setPaletteOpen}
@@ -3911,7 +4217,7 @@ export function App(): JSX.Element {
           )}
           <Map
             projectPath={activeProjectKey}
-            onRun={startRun}
+            onRun={guardedStartRun}
             onBacklogLoaded={handleBacklogLoaded}
             runLog={runLog}
             activeRunIssueIds={activeRunIssueIds}
@@ -3920,7 +4226,7 @@ export function App(): JSX.Element {
             strandedIds={strandedIds}
             commitFailedIds={commitFailedIds}
             onDiscard={(slug, issueId) => discardRun(issueId, slug)}
-            onDrain={startDrain}
+            onDrain={guardedStartDrain}
             onStopDrain={stopDrain}
             draining={draining}
             drainMessage={drainMessage}
@@ -3929,6 +4235,7 @@ export function App(): JSX.Element {
             cap={cap}
             onCapChange={setCap}
             notUnderGit={notUnderGit}
+            branchStatus={branchStatus}
             mergeAffordance={mergeAffordance}
             onResolveConflict={resolveConflict}
             onMergeStrays={mergeStrays}

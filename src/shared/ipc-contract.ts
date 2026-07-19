@@ -382,6 +382,36 @@ export const IpcChannel = {
    * explicit call — never from a load/scan path. Resolves to a GitInitResult.
    */
   GitInit: 'git:init',
+  /**
+   * renderer → main (invoke): the Project's default repo's CURRENT branch
+   * (issue 167) — read fresh via `git symbolic-ref --short HEAD`, so the Map
+   * can show the branch a Run/drain will integrate into (ADR-0002/0021 — the
+   * integration target follows HEAD) and warn BEFORE starting on a protected
+   * branch (`main`/`master`) or a detached HEAD, rather than only at merge
+   * time (issue 113). Detached HEAD is reported explicitly — never silently
+   * folded into `main` the way `detectDefaultBranch`'s merge-time fallback
+   * does. Resolves to a GitBranchStatusResult.
+   */
+  GitBranchStatus: 'git:branch-status',
+  /**
+   * renderer → main (invoke): every local branch name (issue 167), for the
+   * pre-start prompt's Switch-branch picker. Resolves to a
+   * GitListBranchesResult.
+   */
+  GitListBranches: 'git:list-branches',
+  /**
+   * renderer → main (invoke): create a new branch off HEAD and check it out
+   * (issue 167's pre-start "Create a new branch" action) — the ensuing
+   * Run/drain then integrates into it, since the integration target follows
+   * HEAD. Resolves to a GitBranchOpResult.
+   */
+  GitCreateBranch: 'git:create-branch',
+  /**
+   * renderer → main (invoke): check out an existing branch (issue 167's
+   * pre-start "Switch to an existing branch" action). Resolves to a
+   * GitBranchOpResult.
+   */
+  GitSwitchBranch: 'git:switch-branch',
 } as const;
 
 export type IpcChannel = (typeof IpcChannel)[keyof typeof IpcChannel];
@@ -1342,6 +1372,45 @@ export interface GitInitResult {
   key: string | null;
 }
 
+export interface GitBranchStatusRequest {
+  /** The Project's ownership key (workbench project dir, or legacy repo path). */
+  projectPath: string;
+}
+
+export interface GitBranchStatusResult {
+  /** Current branch name, or null when HEAD is detached. */
+  branch: string | null;
+  /** True when HEAD is detached (not on any branch). */
+  detached: boolean;
+  /** True when `branch` is `main`/`master` (case-insensitive); never true while detached. */
+  protectedBranch: boolean;
+}
+
+export interface GitListBranchesRequest {
+  /** The Project's ownership key (workbench project dir, or legacy repo path). */
+  projectPath: string;
+}
+
+export interface GitListBranchesResult {
+  branches: string[];
+}
+
+export interface GitBranchOpRequest {
+  /** The Project's ownership key (workbench project dir, or legacy repo path). */
+  projectPath: string;
+  /** The branch to create (off HEAD) or switch to. */
+  name: string;
+}
+
+export interface GitBranchOpResult {
+  /** True when the checkout landed. */
+  ok: boolean;
+  /** A human-readable git failure reason when `ok` is false, else null. */
+  error: string | null;
+  /** The branch now checked out, on success. */
+  branch: string | null;
+}
+
 export interface IssueFileReadRequest {
   /** The Project key whose resolved issues root holds the file. */
   projectPath: string;
@@ -1654,6 +1723,17 @@ export interface MissionControlApi {
    * uses. Fires only on this explicit call.
    */
   gitInit(req: GitInitRequest): Promise<GitInitResult>;
+  /**
+   * The Project's current branch + protected/detached flags (issue 167), for
+   * the Map's branch badge and the pre-start Run/drain prompt.
+   */
+  getGitBranchStatus(req: GitBranchStatusRequest): Promise<GitBranchStatusResult>;
+  /** Every local branch name, for the pre-start prompt's Switch picker (issue 167). */
+  listGitBranches(req: GitListBranchesRequest): Promise<GitListBranchesResult>;
+  /** Create a new branch off HEAD and check it out (issue 167's pre-start Create action). */
+  createGitBranch(req: GitBranchOpRequest): Promise<GitBranchOpResult>;
+  /** Check out an existing branch (issue 167's pre-start Switch action). */
+  switchGitBranch(req: GitBranchOpRequest): Promise<GitBranchOpResult>;
   /**
    * Read one issue file's raw text for the Map's editor (issue 89) — fresh
    * off disk, restricted to the Project's issues root.

@@ -206,6 +206,15 @@ interface MapProps {
    * signal to offer "Initialize git" instead of silently proceeding.
    */
   notUnderGit?: boolean;
+  /**
+   * The Project checkout's CURRENT branch (issue 167) — the one a Run/drain
+   * integrates into (ADR-0002/0021, the target follows HEAD). Shown next to
+   * the run controls; a protected (`main`/`master`) branch or a detached HEAD
+   * gets an amber badge (the parent's `onRun`/`onDrain` wrapper shows the
+   * pre-start Create/Switch/Proceed prompt before acting). Null/absent hides
+   * the badge (no read yet).
+   */
+  branchStatus?: { branch: string | null; detached: boolean; protectedBranch: boolean } | null;
 }
 
 /**
@@ -255,6 +264,7 @@ export function Map({
   onGrillFeature,
   onQuickFixRunNow,
   notUnderGit,
+  branchStatus,
 }: MapProps = {}): JSX.Element {
   const activeRunSet = new Set(activeRunIssueIds ?? []);
   // Merge-preview verdicts keyed by issue id (issues 104 & 105): the
@@ -668,6 +678,21 @@ export function Map({
               )}
 
             <div className="map__controls-run">
+              {branchStatus && (
+                <Badge
+                  tone={branchStatus.detached || branchStatus.protectedBranch ? 'amber' : 'neutral'}
+                  className="map__branch-badge"
+                  title={
+                    branchStatus.detached
+                      ? 'This checkout has no branch checked out (detached HEAD) — a Run/drain will prompt to create or switch one first.'
+                      : branchStatus.protectedBranch
+                        ? `On ${branchStatus.branch} — a protected branch. A Run/drain will prompt to create or switch first.`
+                        : `A Run/drain integrates into ${branchStatus.branch}.`
+                  }
+                >
+                  ⎇ {branchStatus.detached ? 'detached HEAD' : branchStatus.branch}
+                </Badge>
+              )}
               {notUnderGit && (
                 <Badge
                   tone="amber"
