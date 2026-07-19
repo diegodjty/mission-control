@@ -1,6 +1,6 @@
 # Dispatcher noise floor, confidence bar, and interaction model
 
-**Status:** completes ADR-0011 (silent-autonomy default). Refines issues 37/38/43's surfacing behavior.
+**Status:** superseded-and-rehomed by ADR-0022 (2026-07-18). Completes ADR-0011 (silent-autonomy default). Refines issues 37/38/43's surfacing behavior. The Dispatcher framing is retired; the noise-floor logic survives, re-homed to the notification/Run-log noise floor (issue 138).
 
 The dogfood run flooded the user with non-blocking noise (≈15 boot-screen "unclassifiable" Runs, dozens of garbled "consolidate?" proposals, doc-drift on "none"). Silent-autonomy (ADR-0011) removes most *approvals*; this ADR removes most *surfacing* and fixes the interaction racing.
 

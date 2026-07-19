@@ -1,5 +1,7 @@
 # The Dispatcher keeps its own context bounded via rolling synthesis; the Run log on disk is the durable record
 
+**Status:** retired by ADR-0022 (2026-07-18). Cross-run synthesis is dropped outright — per-issue doc-drift is caught at the source by the completion-block rule, and cross-run pattern-spotting is now `/debrief`.
+
 The **Dispatcher** manages its own context so it doesn't become the bloated thing it exists to avoid. It folds finished/merged issues into a compact running "situation summary," keeps full detail in active context only for **open or flagged** threads, and drops verbatim **Completion blocks** from active context once they're folded in and persisted to the **Run log** on disk. Its active context is therefore a bounded sliding window: seed (backlog + PRD/CONTEXT) + rolling synthesis + recent-N blocks + open threads. The Run log (on disk) is the complete, durable history, re-readable on demand.
 
 ## Considered Options

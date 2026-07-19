@@ -140,7 +140,7 @@ flowchart TD
   P --> CMP["completions/ (Receipts)"]
   P --> PRD["PRD-*.md + CONFIG.md"]
   P --> MEM["memory/ CORE.md · topics · journal"]
-  MEM -->|"CORE injected into every Worker/Dispatcher/bare session"| SESS["sessions"]
+  MEM -->|"CORE injected into every Worker/Just-talk/bare session"| SESS["sessions"]
   CMP -->|"drain journal + Run log"| MEM
 ```
 
