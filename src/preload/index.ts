@@ -41,6 +41,8 @@ import {
   type CuratorReportMarkSeenResult,
   type CoreProposalReadRequest,
   type CoreProposalReadResult,
+  type CoreProposalActionRequest,
+  type CoreProposalActionResult,
   type QuickFixCreateRequest,
   type QuickFixCreateResult,
   type IssueFileReadRequest,
@@ -248,6 +250,12 @@ const api: MissionControlApi = {
 
   readCoreProposal: (req: CoreProposalReadRequest): Promise<CoreProposalReadResult> =>
     ipcRenderer.invoke(IpcChannel.CoreProposalRead, req),
+
+  acceptCoreProposal: (req: CoreProposalActionRequest): Promise<CoreProposalActionResult> =>
+    ipcRenderer.invoke(IpcChannel.CoreProposalAccept, req),
+
+  dismissCoreProposal: (req: CoreProposalActionRequest): Promise<CoreProposalActionResult> =>
+    ipcRenderer.invoke(IpcChannel.CoreProposalDismiss, req),
 
   spawnPty: (req: PtySpawnRequest): Promise<PtySpawnResult> =>
     ipcRenderer.invoke(IpcChannel.PtySpawn, req),

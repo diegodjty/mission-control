@@ -2,7 +2,7 @@
  * Memory files (main process) — the file-I/O edge of the workbench memory
  * loop (issue 73, ADR-0015).
  *
- * Two thin operations over a workbench project's `memory/` directory:
+ * Operations over a workbench project's `memory/` directory:
  *
  *  - `readCoreMemory` — the curated `CORE.md` content a spawn injects into a
  *    Worker prompt / Dispatcher seed (missing/unreadable → null, so the spawn
@@ -12,13 +12,19 @@
  *    `memory/journal/`, written as a single save so a watcher never ingests a
  *    half-written entry, named so a second drain the same day gets its own
  *    file (no clobber — `wx`, never overwrite).
+ *  - `acceptCoreProposal` / `dismissCoreProposal` — the ONLY code path that
+ *    writes `memory/CORE.md` (issue 169). The curator agent never writes
+ *    CORE.md directly (it only ever writes `CORE.proposed.md`, per ADR-0015);
+ *    a human's confirmed Accept click in the Attention surface is the sign-off
+ *    channel that promotes the proposal to CORE.md. Dismiss only ever removes
+ *    the proposal — CORE.md is untouched.
  *
  * All decisions (the token cap, the labeling, the entry content, the file
  * name) live in the pure `shared/workbench-memory`; this file only touches
  * the filesystem. The workbench auto-commit for the journal rides the issue-72
  * commit path in the main process wiring, not here. Never throws.
  */
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   buildJournalEntry,
@@ -89,5 +95,44 @@ export async function writeDrainJournal(
       fileName: null,
       error: err instanceof Error ? err.message : String(err),
     };
+  }
+}
+
+export interface CoreProposalActionOutcome {
+  /** True when the action landed on disk. */
+  ok: boolean;
+  /** Why the action was refused/failed, else null. */
+  error: string | null;
+}
+
+/**
+ * Accept a proposed CORE.md (issue 169) — the human's confirmed sign-off.
+ * Reads `memory/CORE.proposed.md`, writes its content over `memory/CORE.md`,
+ * then removes the proposal. A missing proposal is refused, never silently
+ * a no-op — the caller (a confirmed Accept click) always expects a proposal
+ * to exist.
+ */
+export async function acceptCoreProposal(memoryRoot: string): Promise<CoreProposalActionOutcome> {
+  const proposedPath = join(memoryRoot, 'CORE.proposed.md');
+  try {
+    const proposed = await readFile(proposedPath, 'utf8');
+    await writeFile(join(memoryRoot, 'CORE.md'), proposed, 'utf8');
+    await unlink(proposedPath);
+    return { ok: true, error: null };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * Dismiss a proposed CORE.md (issue 169) — removes `memory/CORE.proposed.md`
+ * only. `memory/CORE.md` is never touched by this path.
+ */
+export async function dismissCoreProposal(memoryRoot: string): Promise<CoreProposalActionOutcome> {
+  try {
+    await unlink(join(memoryRoot, 'CORE.proposed.md'));
+    return { ok: true, error: null };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }

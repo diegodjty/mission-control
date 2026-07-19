@@ -53,7 +53,7 @@ import { repoKeyFor } from '../shared/onboarding-model';
 import { listWorkbenchProjectNames } from './workbench-projects';
 import { registerAppearedRepo } from './register-repo';
 import { deleteIssueFile, readIssueText, writeIssueText } from './issue-file-store';
-import { readCoreMemory, writeDrainJournal } from './memory-files';
+import { acceptCoreProposal, dismissCoreProposal, readCoreMemory, writeDrainJournal } from './memory-files';
 import { extractRunUsage, timeOnlyUsage, type RunUsage } from '../shared/run-telemetry';
 import type { TerminalResult } from '../shared/headless-feed';
 import type { WorkerModelTier } from '../shared/worker-model';
@@ -128,6 +128,8 @@ import {
   type CuratorReportMarkSeenResult,
   type CoreProposalReadRequest,
   type CoreProposalReadResult,
+  type CoreProposalActionRequest,
+  type CoreProposalActionResult,
   type QuickFixCreateRequest,
   type QuickFixCreateResult,
   type MainCommitRequest,
@@ -1473,9 +1475,9 @@ function registerIpc(): void {
   );
 
   // Read a project's proposed CORE.md beside its current CORE.md for the
-  // attention surface's proposal-diff view (issue 151). Read-only — no write
-  // path exists for either file from this surface. `project` is restricted to
-  // a bare workbench directory name, matching an attention item's `project`.
+  // attention surface's proposal-diff view (issue 151). `project` is
+  // restricted to a bare workbench directory name, matching an attention
+  // item's `project`. Accept/Dismiss (issue 169) are separate handlers below.
   ipcMain.handle(
     IpcChannel.CoreProposalRead,
     async (_event, req: CoreProposalReadRequest): Promise<CoreProposalReadResult> => {
@@ -1496,6 +1498,70 @@ function registerIpc(): void {
       );
       const current = await readCoreMemory(memoryRoot);
       return { proposed, current, error: null };
+    },
+  );
+
+  /** Shared validation for the CORE-proposal Accept/Dismiss requests — the
+   *  same bare-workbench-directory-name rule as CoreProposalRead. */
+  const invalidCoreProposalProject = (project: unknown): string | null =>
+    typeof project !== 'string' ||
+    project.length === 0 ||
+    project.includes('/') ||
+    project.includes('\\') ||
+    project === '.' ||
+    project === '..'
+      ? 'invalid project name'
+      : null;
+
+  // Accept a proposed CORE.md (issue 169) — the human's confirmed sign-off.
+  // This is the ONLY code path in Mission Control that writes memory/CORE.md;
+  // the curator agent only ever writes CORE.proposed.md (ADR-0015). Commits
+  // through the same serialized workbench-commit path as every other Run
+  // event, then re-derives the attention snapshot so the proposal item drops
+  // out immediately rather than waiting for the next watch tick.
+  ipcMain.handle(
+    IpcChannel.CoreProposalAccept,
+    async (_event, req: CoreProposalActionRequest): Promise<CoreProposalActionResult> => {
+      const invalid = invalidCoreProposalProject(req.project);
+      if (invalid !== null) return { ok: false, error: invalid };
+      const projectRoot = join(WORKBENCH_ROOT, req.project);
+      const outcome = await acceptCoreProposal(join(projectRoot, 'memory'));
+      if (outcome.ok) {
+        const identity = identityFor(projectRoot);
+        if (identity !== null && identity.kind === 'workbench') {
+          void repoSerializer
+            .run(normalizeProjectKey(identity.key), () =>
+              commitWorkbenchProject(identity.key, `${identity.label}: CORE proposal accepted`),
+            )
+            .catch(() => {});
+        }
+        attentionWatcher?.rederiveAll();
+      }
+      return outcome;
+    },
+  );
+
+  // Dismiss a proposed CORE.md (issue 169) — removes CORE.proposed.md only;
+  // memory/CORE.md is never touched by this path.
+  ipcMain.handle(
+    IpcChannel.CoreProposalDismiss,
+    async (_event, req: CoreProposalActionRequest): Promise<CoreProposalActionResult> => {
+      const invalid = invalidCoreProposalProject(req.project);
+      if (invalid !== null) return { ok: false, error: invalid };
+      const projectRoot = join(WORKBENCH_ROOT, req.project);
+      const outcome = await dismissCoreProposal(join(projectRoot, 'memory'));
+      if (outcome.ok) {
+        const identity = identityFor(projectRoot);
+        if (identity !== null && identity.kind === 'workbench') {
+          void repoSerializer
+            .run(normalizeProjectKey(identity.key), () =>
+              commitWorkbenchProject(identity.key, `${identity.label}: CORE proposal dismissed`),
+            )
+            .catch(() => {});
+        }
+        attentionWatcher?.rederiveAll();
+      }
+      return outcome;
     },
   );
 

@@ -3,7 +3,12 @@ import { mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readCoreMemory, writeDrainJournal } from './memory-files';
+import {
+  acceptCoreProposal,
+  dismissCoreProposal,
+  readCoreMemory,
+  writeDrainJournal,
+} from './memory-files';
 import type { RunLogRecord } from '../shared/ipc-contract';
 
 let memoryRoot: string;
@@ -120,5 +125,70 @@ describe('writeDrainJournal', () => {
     });
     expect(outcome.written).toBe(false);
     expect(outcome.error).toBeTruthy();
+  });
+});
+
+describe('acceptCoreProposal (issue 169 — the human sign-off)', () => {
+  it('replaces CORE.md with the proposed content and removes the proposal', async () => {
+    await writeFile(join(memoryRoot, 'CORE.md'), '- old fact.\n', 'utf8');
+    await writeFile(join(memoryRoot, 'CORE.proposed.md'), '- new fact.\n', 'utf8');
+    const outcome = await acceptCoreProposal(memoryRoot);
+    expect(outcome).toEqual({ ok: true, error: null });
+    expect(await readFile(join(memoryRoot, 'CORE.md'), 'utf8')).toBe('- new fact.\n');
+    await expect(readFile(join(memoryRoot, 'CORE.proposed.md'), 'utf8')).rejects.toThrow();
+  });
+
+  it('creates CORE.md from the proposal when none existed yet', async () => {
+    await writeFile(join(memoryRoot, 'CORE.proposed.md'), '- first fact.\n', 'utf8');
+    const outcome = await acceptCoreProposal(memoryRoot);
+    expect(outcome.ok).toBe(true);
+    expect(await readFile(join(memoryRoot, 'CORE.md'), 'utf8')).toBe('- first fact.\n');
+  });
+
+  it('refuses (never throws) when there is no proposal to accept', async () => {
+    await writeFile(join(memoryRoot, 'CORE.md'), '- old fact.\n', 'utf8');
+    const outcome = await acceptCoreProposal(memoryRoot);
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error).toBeTruthy();
+    // CORE.md is untouched by a refused accept.
+    expect(await readFile(join(memoryRoot, 'CORE.md'), 'utf8')).toBe('- old fact.\n');
+  });
+});
+
+describe('dismissCoreProposal (issue 169)', () => {
+  it('removes only the proposal — CORE.md stays byte-identical', async () => {
+    await writeFile(join(memoryRoot, 'CORE.md'), '- old fact.\n', 'utf8');
+    await writeFile(join(memoryRoot, 'CORE.proposed.md'), '- new fact.\n', 'utf8');
+    const outcome = await dismissCoreProposal(memoryRoot);
+    expect(outcome).toEqual({ ok: true, error: null });
+    expect(await readFile(join(memoryRoot, 'CORE.md'), 'utf8')).toBe('- old fact.\n');
+    await expect(readFile(join(memoryRoot, 'CORE.proposed.md'), 'utf8')).rejects.toThrow();
+  });
+
+  it('refuses (never throws) when there is no proposal to dismiss', async () => {
+    const outcome = await dismissCoreProposal(memoryRoot);
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error).toBeTruthy();
+  });
+});
+
+describe('no code path writes CORE.md except a confirmed accept (issue 169 guard)', () => {
+  it('readCoreMemory and dismissCoreProposal never create or modify CORE.md', async () => {
+    await readCoreMemory(memoryRoot);
+    await dismissCoreProposal(memoryRoot).catch(() => {});
+    await expect(readFile(join(memoryRoot, 'CORE.md'), 'utf8')).rejects.toThrow();
+
+    await writeFile(join(memoryRoot, 'CORE.md'), '- untouched.\n', 'utf8');
+    await readCoreMemory(memoryRoot);
+    await writeFile(join(memoryRoot, 'CORE.proposed.md'), '- proposed.\n', 'utf8');
+    await dismissCoreProposal(memoryRoot);
+    expect(await readFile(join(memoryRoot, 'CORE.md'), 'utf8')).toBe('- untouched.\n');
+  });
+
+  it('acceptCoreProposal only writes CORE.md when a proposal was actually present', async () => {
+    // No proposal: refused, CORE.md stays absent.
+    const refused = await acceptCoreProposal(memoryRoot);
+    expect(refused.ok).toBe(false);
+    await expect(readFile(join(memoryRoot, 'CORE.md'), 'utf8')).rejects.toThrow();
   });
 });
