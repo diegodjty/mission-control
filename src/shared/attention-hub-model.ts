@@ -16,6 +16,12 @@
  *       - `hitl-park` — an `hitl: true` issue at `wip` whose latest Receipt
  *         declares `needs-verification`: a park awaiting the human's sign-off.
  *         A `needs-verification` Receipt on a non-HITL issue is NOT a park.
+ *       - `run-timeout` (issue 170) — a Run killed for exceeding `run_timeout`
+ *         (issue 141), its worktree still standing with the Worker's
+ *         (possibly finished, possibly broken) uncommitted work. Distinct from
+ *         `blocked-run`: a timeout kill writes no Receipt at all, so it must
+ *         never read as an ordinary no-Receipt death. Clears once the human
+ *         resolves it (complete-from-worktree or discard-and-requeue).
  *       - `curator-proposal` — `memory/CORE.proposed.md` exists: a curated CORE
  *         change awaiting human review (CORE edits always need sign-off).
  *       - `blocked-run` — an issue whose latest Receipt declares `blocked` while
@@ -51,9 +57,11 @@
 import { EMPTY_BACKLOG, type Backlog, type BacklogIssue } from './backlog-model';
 import type { ReceiptRecord } from './receipt-parser';
 import { detectAppearedRepos, type RepoCandidate, type SelfHealInput } from './self-heal';
+import type { TimeoutSalvageRecord } from './timeout-salvage';
 
 export type AttentionKind =
   | 'hitl-park'
+  | 'run-timeout'
   | 'curator-proposal'
   | 'curator-report'
   | 'blocked-run'
@@ -115,6 +123,14 @@ export interface AttentionInput {
    * which then derives no candidates. The adapter gathers the facts.
    */
   selfHeal?: SelfHealInput | null;
+  /**
+   * Pending timeout-salvage records (issue 170) — Runs killed for exceeding
+   * `run_timeout` whose worktree still stands unresolved. Read from the
+   * project's persisted `completions/.timeout-salvage.json` (main writes it
+   * at kill time; this model only derives the item). Absent/empty ⇒ no
+   * `run-timeout` items for this project.
+   */
+  timeoutSalvage?: readonly TimeoutSalvageRecord[];
 }
 
 export interface AttentionResult {
@@ -219,6 +235,38 @@ function deriveReceiptItems(
         id: `${project}:blocked-run:${issueId}`,
       });
     }
+  }
+
+  return items.sort((a, b) => (a.issueId ?? 0) - (b.issueId ?? 0));
+}
+
+// ---------------------------------------------------------------------------
+// run-timeout — pending timeout-salvage records (issue 170)
+// ---------------------------------------------------------------------------
+
+function deriveTimeoutSalvageItems(
+  project: string,
+  backlog: Backlog,
+  records: readonly TimeoutSalvageRecord[],
+): AttentionItem[] {
+  const issuesById = new Map(asArray(backlog?.issues).map((i) => [i.id, i]));
+  const items: AttentionItem[] = [];
+
+  for (const rec of asArray(records)) {
+    if (!rec || typeof rec !== 'object') continue;
+    const issue = issuesById.get(rec.issueId);
+    // Already resolved (salvaged to done, or the issue was otherwise finished)
+    // — a lingering record for a `done` issue derives no item.
+    if (issue && issue.status === 'done') continue;
+    const label = issue ? issueLabel(issue) : `issue ${String(rec.issueId).padStart(2, '0')}`;
+    items.push({
+      project,
+      kind: 'run-timeout',
+      issueId: rec.issueId,
+      fileRef: rec.worktreePath,
+      text: `${label} timed out at its run_timeout — uncommitted work in ${rec.worktreePath}`,
+      id: `${project}:run-timeout:${rec.issueId}`,
+    });
   }
 
   return items.sort((a, b) => (a.issueId ?? 0) - (b.issueId ?? 0));
@@ -376,6 +424,7 @@ function deriveRepoCandidates(project: string, selfHeal: SelfHealInput | null): 
 
 const KIND_ORDER: readonly AttentionKind[] = [
   'hitl-park',
+  'run-timeout',
   'curator-proposal',
   'blocked-run',
   'setup-gate',
@@ -395,6 +444,7 @@ export function deriveAttention(input: AttentionInput): AttentionResult {
     input?.backlog && Array.isArray(input.backlog.issues) ? input.backlog : EMPTY_BACKLOG;
 
   const receiptItems = deriveReceiptItems(project, backlog, asArray(input?.receipts), notes);
+  const timeoutItems = deriveTimeoutSalvageItems(project, backlog, asArray(input?.timeoutSalvage));
 
   const proposal: AttentionItem[] = input?.coreProposedPresent
     ? [
@@ -413,7 +463,7 @@ export function deriveAttention(input: AttentionInput): AttentionResult {
   const candidates = deriveRepoCandidates(project, input?.selfHeal ?? null);
   const briefing = deriveBriefing(project, asArray(input?.journal), input?.lastSeen ?? null, notes);
 
-  const items = [...receiptItems, ...proposal, ...gates, ...candidates, ...briefing].sort(
+  const items = [...receiptItems, ...timeoutItems, ...proposal, ...gates, ...candidates, ...briefing].sort(
     (a, b) => {
       const kind = KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind);
       if (kind !== 0) return kind;
@@ -555,6 +605,8 @@ export function kindLabel(kind: AttentionKind): string {
   switch (kind) {
     case 'hitl-park':
       return 'PARKED';
+    case 'run-timeout':
+      return 'TIMEOUT';
     case 'curator-proposal':
       return 'PROPOSAL';
     case 'curator-report':

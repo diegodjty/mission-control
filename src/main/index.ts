@@ -58,6 +58,9 @@ import { repoKeyFor } from '../shared/onboarding-model';
 import { listWorkbenchProjectNames } from './workbench-projects';
 import { registerAppearedRepo } from './register-repo';
 import { deleteIssueFile, readIssueText, writeIssueText } from './issue-file-store';
+import { verifyWorktree } from './worktree-verify';
+import { recordTimeoutSalvage, resolveTimeoutSalvage } from './timeout-salvage-store';
+import { slugFromFileName } from './git-worktree-adapter';
 import { acceptCoreProposal, dismissCoreProposal, readCoreMemory, writeDrainJournal } from './memory-files';
 import { extractRunUsage, timeOnlyUsage, type RunUsage } from '../shared/run-telemetry';
 import type { TerminalResult } from '../shared/headless-feed';
@@ -122,6 +125,11 @@ import {
   type ProjectRemoveResult,
   type RepoRegisterRequest,
   type RepoRegisterResult,
+  type TimeoutSalvageVerifyRequest,
+  type TimeoutSalvageVerifyResult,
+  type TimeoutSalvageCompleteRequest,
+  type TimeoutSalvageDiscardRequest,
+  type TimeoutSalvageResolveResult,
   type GitInitRequest,
   type GitInitResult,
   type GitBranchStatusRequest,
@@ -548,6 +556,16 @@ interface RunSpawnMeta {
   tier: WorkerModelTier | null;
   /** Last terminal result folded from a HEADLESS Run's stream (issue 140), if any. */
   lastResult: TerminalResult | null;
+  /**
+   * The workbench project this Run belongs to (issue 170's timeout-salvage
+   * record needs it — `identityFor`'s key is the resolved workbench root, not
+   * the bare directory name attention-hub-model keys its items by). Null for
+   * a legacy (non-workbench) Run: a timeout kill on one is never recorded (the
+   * cross-project Attention Hub is workbench-only, ADR-0016).
+   */
+  workbench: { issuesRoot: string; completionsRoot: string } | null;
+  /** The issue file name (`NN-slug.md`), for the timeout-salvage slug. */
+  issueFileName: string;
 }
 const runSpawnMeta = new Map<string, RunSpawnMeta>();
 
@@ -618,6 +636,24 @@ const headlessManager = new HeadlessSessionManager({
   onExit: (msg) => {
     broadcast(IpcChannel.PtyExit, msg);
     if (runSessionProject.delete(msg.sessionId)) broadcastRegistryChanged();
+    // Timeout salvage (issue 170): a `run_timeout` kill (issue 141) strands the
+    // worktree with no Receipt at all — read the meta BEFORE `finishRunSpawn`
+    // deletes it, so the killed Run's identity survives to be recorded.
+    if (msg.cause === 'timeout') {
+      const meta = runSpawnMeta.get(msg.sessionId);
+      if (meta?.workbench) {
+        const project = basename(dirname(meta.workbench.issuesRoot));
+        void recordTimeoutSalvage(meta.workbench.completionsRoot, {
+          project,
+          issueId: meta.issueId,
+          slug: slugFromFileName(meta.issueFileName),
+          // The resolved cwd IS the worktree for an isolated drain Run (every
+          // eligible issue starts in its own worktree — issue 147, ADR-0021).
+          worktreePath: meta.projectPath,
+          timedOutAt: new Date().toISOString(),
+        });
+      }
+    }
     finishRunSpawn(msg.sessionId);
   },
   onSessionCaptured: (msg) => broadcast(IpcChannel.RunSessionCaptured, msg),
@@ -1208,6 +1244,8 @@ function registerIpc(): void {
         headless: req.run.headless === true,
         tier: req.run.model ?? null,
         lastResult: null,
+        workbench: req.run.workbench ?? null,
+        issueFileName: req.run.issueFileName,
       });
     }
     // Track a Run's live session per workbench project (issue 118) so the home
@@ -1954,6 +1992,131 @@ function registerIpc(): void {
         warning: outcome.warnings[0] ?? null,
         key: outcome.key,
       };
+    },
+  );
+
+  /** Flip an issue file's `status:` frontmatter line to `next`, verbatim otherwise. */
+  function withStatus(content: string, next: string): string {
+    if (/^status:\s*\S+/m.test(content)) {
+      return content.replace(/^status:\s*\S+/m, `status: ${next}`);
+    }
+    return `---\nstatus: ${next}\n---\n${content}`;
+  }
+
+  // Timeout salvage (issue 170): a `run_timeout` kill (issue 141) strands a
+  // worktree mid-flight — this trio turns that strand into a recoverable,
+  // human-driven decision instead of a silent no-Receipt death.
+  ipcMain.handle(
+    IpcChannel.TimeoutSalvageVerify,
+    async (event, req: TimeoutSalvageVerifyRequest): Promise<TimeoutSalvageVerifyResult> => {
+      const denied = ownershipError(event, req.projectPath);
+      if (denied) return { passed: false, output: '', error: denied };
+      const repo = requestRepoFor(req.projectPath, req.repoPath);
+      const worktreePath = worktreePathFor(repo, req.slug);
+      if (!existsSync(worktreePath)) {
+        return { passed: false, output: '', error: `No worktree found for ${req.slug}.` };
+      }
+      const result = await verifyWorktree(worktreePath);
+      return { ...result, error: null };
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannel.TimeoutSalvageComplete,
+    async (event, req: TimeoutSalvageCompleteRequest): Promise<TimeoutSalvageResolveResult> => {
+      const denied = ownershipError(event, req.projectPath);
+      if (denied) return { ok: false, error: denied };
+      const repo = requestRepoFor(req.projectPath, req.repoPath);
+      const identity = identityFor(req.projectPath);
+      const fileName = `${req.slug}.md`;
+
+      try {
+        if (identity?.kind === 'workbench') {
+          // Workbench (ADR-0015): the issue file lives OUTSIDE the code repo —
+          // flip it to `done` there, then commit the worktree with an explicit
+          // override (it has no `issues/<slug>.md` of its own to read).
+          const read = await readIssueText(identity.issuesRoot, fileName);
+          if (read.content === null) return { ok: false, error: read.error };
+          const flip = await writeIssueText(identity.issuesRoot, fileName, withStatus(read.content, 'done'));
+          if (!flip.ok) return { ok: false, error: flip.error };
+          const outcome = await commitFinishedWorktree(repo, req.slug, {
+            statusOverride: 'done',
+            adoptStrays: false,
+          });
+          if (outcome.error) return { ok: false, error: outcome.error };
+        } else {
+          // Legacy: the issue file lives IN the worktree's own `issues/` — flip
+          // it there so the normal (un-overridden) commit reads `done` itself.
+          const worktreeIssuesRoot = join(worktreePathFor(repo, req.slug), 'issues');
+          const read = await readIssueText(worktreeIssuesRoot, fileName);
+          if (read.content === null) return { ok: false, error: read.error };
+          const flip = await writeIssueText(worktreeIssuesRoot, fileName, withStatus(read.content, 'done'));
+          if (!flip.ok) return { ok: false, error: flip.error };
+          const outcome = await commitFinishedWorktree(repo, req.slug);
+          if (outcome.error) return { ok: false, error: outcome.error };
+        }
+
+        // Write the Receipt Mission Control owes on the killed Worker's behalf
+        // (ADR-0013: every Worker exit gets one) — a real `completed` outcome,
+        // since the salvage verify pass just proved the work is genuinely done.
+        const completionsRoot = identity?.completionsRoot ?? join(req.projectPath, 'issues', 'completions');
+        await mkdir(completionsRoot, { recursive: true });
+        const finished = new Date().toISOString();
+        const receipt = [
+          '---',
+          `issue: ${req.issueId}`,
+          `slug: ${req.slug}`,
+          'outcome: completed',
+          `finished: ${finished}`,
+          '---',
+          `## Completed issue ${req.issueId} — ${req.slug}`,
+          '',
+          '**What changed** — this Run was killed after exceeding its `run_timeout` ' +
+            '(issue 141), but its worktree carried genuinely finished work. Mission ' +
+            'Control verified it (type-check + test, both green) and completed it on ' +
+            'the Worker\'s behalf (issue 170 salvage).',
+          '',
+          '**Doc drift** — none beyond this salvage note.',
+          '',
+        ].join('\n');
+        await writeFile(join(completionsRoot, fileName), receipt, 'utf8');
+
+        await resolveTimeoutSalvage(completionsRoot, req.project, req.issueId);
+        broadcastRegistryChanged();
+        return { ok: true, error: null };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannel.TimeoutSalvageDiscard,
+    async (event, req: TimeoutSalvageDiscardRequest): Promise<TimeoutSalvageResolveResult> => {
+      const denied = ownershipError(event, req.projectPath);
+      if (denied) return { ok: false, error: denied };
+      const repo = requestRepoFor(req.projectPath, req.repoPath);
+      const identity = identityFor(req.projectPath);
+      const fileName = `${req.slug}.md`;
+
+      try {
+        await discardWorktree(repo, req.slug);
+
+        // Reopen the issue so the drain can retry it — the killed Run wrote no
+        // Receipt and produced no committable work, so nothing here is done.
+        const issuesRoot = identity?.kind === 'workbench' ? identity.issuesRoot : issuesRootFor(req.projectPath);
+        const read = await readIssueText(issuesRoot, fileName);
+        if (read.content !== null) {
+          await writeIssueText(issuesRoot, fileName, withStatus(read.content, 'open'));
+        }
+
+        const completionsRoot = identity?.completionsRoot ?? join(req.projectPath, 'issues', 'completions');
+        await resolveTimeoutSalvage(completionsRoot, req.project, req.issueId);
+        broadcastRegistryChanged();
+        return { ok: true, error: null };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
     },
   );
 

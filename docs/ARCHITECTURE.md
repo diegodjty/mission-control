@@ -100,12 +100,20 @@ from the tier** by default (`haiku`→low, `sonnet`→medium, `opus`/`fable`→h
 with an issue `effort:` / CONFIG `worker_effort` override — a second cost lever
 beside the model; escalation re-derives it for the bigger tier unless a per-issue
 `effort:` pins it. *Landed (141):* a hung headless Run is **killed at
-`run_timeout`** (CONFIG frontmatter, minutes, default 30) — the Headless
-Session Manager arms a real kill timer at spawn; breach kills the child, and
-the exit (like any headless exit non-zero with no Receipt) lands in the SAME
-no-Receipt handling (conservative drain stop, a missing-Receipt note), naming
-the cause ("timeout" vs. "crashed") — no new failure vocabulary. A Receipt
-that lands before death still wins. *Landed (143):* the terminal result's
+`run_timeout`** (CONFIG frontmatter, minutes, default 30, resolvable per-issue
+or scaled by effort — issue 170) — the Headless Session Manager arms a real
+kill timer at spawn; breach kills the child, naming the cause ("timeout" vs.
+"crashed") on exit. A Receipt that lands before death still wins. *Landed
+(170):* a timeout kill is now a DISTINCT, recoverable event rather than folding
+into the generic no-Receipt path: main persists a pending timeout-salvage
+record (`completions/.timeout-salvage.json`, inside the Attention Watcher's
+existing watch) naming the issue and its stranded worktree, which derives its
+own `run-timeout` Attention item and its own drain-stop clause ("N timed out
+awaiting salvage"), distinct from an ordinary blocked-run/no-Receipt note. The
+human runs a real verify pass (`npm run type-check` + `npm run test` against
+the worktree) and gets an evidence-based choice: **Complete from worktree**
+(commit + Receipt + `done` flip) when green, **Discard & requeue** (throw the
+worktree away, reopen the issue) when red. *Landed (143):* the terminal result's
 **usage** (tokens, cost, duration) is stamped onto the Run-log record once the
 process exits — before or after its Receipt, whichever lands first — and shown
 on the Run card and the drain journal's per-Run line plus a `## Totals` line; a

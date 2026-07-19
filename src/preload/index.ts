@@ -29,6 +29,11 @@ import {
   type ProjectRemoveResult,
   type RepoRegisterRequest,
   type RepoRegisterResult,
+  type TimeoutSalvageVerifyRequest,
+  type TimeoutSalvageVerifyResult,
+  type TimeoutSalvageCompleteRequest,
+  type TimeoutSalvageDiscardRequest,
+  type TimeoutSalvageResolveResult,
   type GitInitRequest,
   type GitInitResult,
   type GitBranchStatusRequest,
@@ -214,6 +219,21 @@ const api: MissionControlApi = {
 
   registerRepo: (req: RepoRegisterRequest): Promise<RepoRegisterResult> =>
     ipcRenderer.invoke(IpcChannel.RepoRegister, req),
+
+  timeoutSalvageVerify: (
+    req: TimeoutSalvageVerifyRequest,
+  ): Promise<TimeoutSalvageVerifyResult> =>
+    ipcRenderer.invoke(IpcChannel.TimeoutSalvageVerify, req),
+
+  timeoutSalvageComplete: (
+    req: TimeoutSalvageCompleteRequest,
+  ): Promise<TimeoutSalvageResolveResult> =>
+    ipcRenderer.invoke(IpcChannel.TimeoutSalvageComplete, req),
+
+  timeoutSalvageDiscard: (
+    req: TimeoutSalvageDiscardRequest,
+  ): Promise<TimeoutSalvageResolveResult> =>
+    ipcRenderer.invoke(IpcChannel.TimeoutSalvageDiscard, req),
 
   gitInit: (req: GitInitRequest): Promise<GitInitResult> =>
     ipcRenderer.invoke(IpcChannel.GitInit, req),

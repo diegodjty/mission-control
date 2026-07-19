@@ -58,6 +58,36 @@ describe('readAttentionInput', () => {
     expect(input.lastSeen).toBe('2026-06-30');
   });
 
+  it('reads pending timeout-salvage records from completions/.timeout-salvage.json (issue 170), never mistaking it for a Receipt', async () => {
+    const root = await makeWorkbench();
+    const project = join(root, 'proj');
+    await mkdir(join(project, 'issues'), { recursive: true });
+    await mkdir(join(project, 'completions'), { recursive: true });
+    const record = {
+      project: 'proj',
+      issueId: 61,
+      slug: '61-refactor',
+      worktreePath: '/tmp/.afk-worktrees/61-refactor',
+      timedOutAt: '2026-07-19T12:00:00.000Z',
+    };
+    await writeFile(
+      join(project, 'completions', '.timeout-salvage.json'),
+      JSON.stringify([record]),
+    );
+
+    const input = await readAttentionInput(root, 'proj', null);
+
+    expect(input.timeoutSalvage).toEqual([record]);
+    // The stray JSON file is not a `.md` Receipt — it must never surface here.
+    expect(input.receipts).toEqual([]);
+  });
+
+  it('degrades a missing/corrupt timeout-salvage file to the empty list', async () => {
+    const root = await makeWorkbench();
+    const input = await readAttentionInput(root, 'ghost-project', null);
+    expect(input.timeoutSalvage).toEqual([]);
+  });
+
   it('a project with nothing on disk degrades to the empty shape, never a throw', async () => {
     const root = await makeWorkbench();
     const input = await readAttentionInput(root, 'ghost', null);
@@ -72,6 +102,7 @@ describe('readAttentionInput', () => {
       // No CONFIG.md → no workspace_root → the self-heal input is null (issue
       // 95): a project with nothing on disk has no appeared-repo candidates.
       selfHeal: null,
+      timeoutSalvage: [],
     });
   });
 
