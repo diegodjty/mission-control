@@ -1,5 +1,7 @@
 # The Dispatcher is per-Project, on-demand, and is the intelligent layer behind Drain
 
+**Status:** retired by ADR-0022 (2026-07-18). There is no Dispatcher lifecycle to spin up or dismiss — the drain loop drives the Run Coordinator directly, with no orchestrator session in the loop.
+
 The **Dispatcher** is spun up **on demand, per Project** — when a drain starts or the user explicitly opens it — lives for that drain/work session, and is dismissable; it is not an always-on daemon. Starting a **drain** *is* starting a Dispatcher session (it drives the deterministic **Run Coordinator** and spawns worker Panes). A **single manual Run stays bare**: just its one Pane, no Dispatcher. In the UI it is a **chat panel beside the Map**, with the **Run log** (Completion-block cards) as its visible history; worker Panes are one click away.
 
 ## Considered Options

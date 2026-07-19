@@ -25,13 +25,13 @@
  * lives in `run-merge.ts` (via `mergeRuns` + the issue-23/24 output parsing);
  * this module only maps its already-classified result onto the Dispatcher's
  * auto-vs-gate posture. It reuses the same `merge` / `merge-conflict` actions the
- * authority classifier (`dispatcher-authority`) already tiers as passive vs
+ * authority classifier (`action-authority`) already tiers as passive vs
  * blocking, so the gate builds on that one tested line.
  *
  * PURE: no I/O, no Electron, no LLM — safe to share across main/renderer.
  */
 import type { MergeRunsResult } from './ipc-contract';
-import type { DispatcherAction } from './dispatcher-authority';
+import type { DispatcherAction } from './action-authority';
 
 /**
  * The post-run classification of a completed auto-merge:

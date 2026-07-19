@@ -41,7 +41,7 @@ import {
 import { ensureLocallyIgnored } from './local-ignore';
 import { afkMergeConfContent } from '../shared/merge-plan';
 import { branchFor } from '../shared/isolation-policy';
-import { isProtectedBranch } from '../shared/dispatcher-authority';
+import { isProtectedBranch } from '../shared/action-authority';
 import {
   ignoredArtifactPaths,
   artifactMergeRefusalMessage,

@@ -4,8 +4,8 @@ import {
   reactToLifecycleEvent,
   type LifecycleEvent,
   type LifecycleEventKind,
-} from './dispatcher-lifecycle';
-import { classifyAuthority } from './dispatcher-authority';
+} from './run-lifecycle';
+import { classifyAuthority } from './action-authority';
 import type { RunOutcome } from './completion-parser';
 
 /** A base event; each test overrides the kind/fields it cares about. */

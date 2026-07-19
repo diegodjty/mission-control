@@ -29,6 +29,8 @@ import { EMPTY_BACKLOG } from '../shared/backlog-model';
 import { parseReceipt, type ReceiptRecord } from '../shared/receipt-parser';
 import type { SelfHealInput, WorkspaceEntry } from '../shared/self-heal';
 import { expandTilde, parseProjectConfig } from '../shared/workbench-model';
+import { parseTimeoutSalvageRecords, type TimeoutSalvageRecord } from '../shared/timeout-salvage';
+import { TIMEOUT_SALVAGE_FILE_NAME } from './timeout-salvage-store';
 
 /** Read a directory's `.md` files as `{ name, content }`, sorted by name. */
 async function readMarkdownFiles(dir: string): Promise<JournalFile[]> {
@@ -118,6 +120,21 @@ async function readSelfHealInput(
 }
 
 /**
+ * Read the project's pending timeout-salvage records (issue 170) — a plain
+ * JSON sibling of the Receipt `.md` files under `completions/`, written by
+ * main at kill time (`timeout-salvage-store.ts`). Never a Receipt itself (not
+ * `.md`), so `readMarkdownFiles`/`parseReceipt` above never see it. Missing or
+ * corrupt content degrades to `[]` via the pure parser — never a throw.
+ */
+async function readTimeoutSalvageRecords(projectRoot: string): Promise<TimeoutSalvageRecord[]> {
+  const content = await readFile(
+    join(projectRoot, 'completions', TIMEOUT_SALVAGE_FILE_NAME),
+    'utf8',
+  ).catch(() => null);
+  return parseTimeoutSalvageRecords(content);
+}
+
+/**
  * Read one workbench project's artifacts into the pure model's input shape.
  * `lastSeen` is the caller's briefing stamp (app userData, issue 80) — this
  * adapter never persists or invents one.
@@ -146,5 +163,17 @@ export async function readAttentionInput(
 
   const selfHeal = await readSelfHealInput(workbenchRoot, projectRoot, homeDir);
 
-  return { project, backlog, receipts, coreProposedPresent, humanSetup, journal, lastSeen, selfHeal };
+  const timeoutSalvage = await readTimeoutSalvageRecords(projectRoot);
+
+  return {
+    project,
+    backlog,
+    receipts,
+    coreProposedPresent,
+    humanSetup,
+    journal,
+    lastSeen,
+    selfHeal,
+    timeoutSalvage,
+  };
 }

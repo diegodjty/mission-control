@@ -1,5 +1,5 @@
 /**
- * Unit tests for the Dispatcher status model (PURE) — issue 43.
+ * Unit tests for the drain status model (PURE) — issue 43.
  *
  * Pins the reconciliation the acceptance criteria call for:
  *   - the done-set matches the backlog, NOT the fed block stream;
@@ -19,9 +19,9 @@ import {
   REGRESSION_CHECKPOINTS,
   type StatusModelInput,
   type StatusDebounceState,
-  type DispatcherStatusModel,
+  type DrainStatusModel,
   type GroundedStatus,
-} from './dispatcher-status-model';
+} from './drain-status-model';
 import type { Backlog, BacklogIssue, IssueStatus } from './backlog-model';
 import type { WorktreeRunState } from './worktree-scan';
 import type { RunLogRecord } from './ipc-contract';
@@ -203,7 +203,7 @@ describe('debounceStatusModel — backward moves held, forward moves immediate (
   // pure fold over the reconciled model, independent of how reconcile produced it
   // (so this exercises `finished-unmerged`, which only ever comes from the afk
   // scan, as cleanly as backlog statuses).
-  function model(entries: Array<[number, GroundedStatus]>): DispatcherStatusModel {
+  function model(entries: Array<[number, GroundedStatus]>): DrainStatusModel {
     const issues = entries.map(([issueId, status]) => ({ issueId, slug: null, title: null, status }));
     const ids = (s: GroundedStatus): number[] => issues.filter((i) => i.status === s).map((i) => i.issueId);
     return {
@@ -480,7 +480,7 @@ describe('buildRunDigest — Completion-block digest for the on-ask injection (i
 });
 
 describe('buildStatusSnapshotMessage — with the Completion-block digest (issue 61)', () => {
-  const model = (): DispatcherStatusModel =>
+  const model = (): DrainStatusModel =>
     reconcileStatusModel(input({ backlog: backlog([issue(1, 'done'), issue(2, 'open')]) }));
 
   it('appends the digest after the authoritative status body', () => {

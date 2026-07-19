@@ -7,6 +7,7 @@ import {
   mergeBriefing,
   projectDirNameFromKey,
   scopeAttentionToWindow,
+  workbenchProjectPath,
 } from '../../shared/attention-hub-model';
 import { parsePlanningDoc } from '../../shared/planning-model';
 import { PlanningBlockView } from './PlanningView';
@@ -212,6 +213,7 @@ export function Attention({
         {isWindowScoped && windowView.own && (
           <AttentionGroupSection
             group={windowView.own}
+            workbenchRoot={snapshot.workbenchRoot}
             onOpenItem={onOpenItem}
             onOpenProject={onOpenProject}
             onRegisterRepo={onRegisterRepo}
@@ -272,6 +274,7 @@ export function Attention({
             <AttentionGroupSection
               key={group.project}
               group={group}
+              workbenchRoot={snapshot.workbenchRoot}
               onOpenItem={onOpenItem}
               onOpenProject={onOpenProject}
               onRegisterRepo={onRegisterRepo}
@@ -306,6 +309,9 @@ export function Attention({
 
 interface AttentionGroupSectionProps {
   group: AttentionGroup;
+  /** The workbench root (issue 170): resolves a `run-timeout` item's project
+   *  name to the project KEY its salvage actions need (ownership/identity). */
+  workbenchRoot: string;
   onOpenItem: (item: AttentionItem) => void;
   onOpenProject: (project: string) => void;
   onRegisterRepo: (item: AttentionItem) => void;
@@ -318,6 +324,7 @@ interface AttentionGroupSectionProps {
  *  (no project open) and for the Window-scoped own-project section. */
 function AttentionGroupSection({
   group,
+  workbenchRoot,
   onOpenItem,
   onOpenProject,
   onRegisterRepo,
@@ -347,7 +354,9 @@ function AttentionGroupSection({
       </header>
       <ul className="attention__list">
         {group.items.map((item) =>
-          item.kind === 'new-repo-candidate' && item.candidate ? (
+          item.kind === 'run-timeout' ? (
+            <TimeoutSalvageItem key={item.id} item={item} workbenchRoot={workbenchRoot} />
+          ) : item.kind === 'new-repo-candidate' && item.candidate ? (
             /* A candidate isn't opened — it's registered in place (issue
                95). One click confirms; a new repo is new state, so MC
                proposes and the human decides (never auto-registered). */
@@ -410,6 +419,113 @@ function AttentionGroupSection({
         )}
       </ul>
     </section>
+  );
+}
+
+interface TimeoutSalvageItemProps {
+  item: AttentionItem;
+  workbenchRoot: string;
+}
+
+type SalvagePhase =
+  | { stage: 'idle' }
+  | { stage: 'verifying' }
+  | { stage: 'verified'; passed: boolean; output: string }
+  | { stage: 'resolving' }
+  | { stage: 'resolved' }
+  | { stage: 'error'; message: string };
+
+/**
+ * A `run-timeout` item's action (issue 170): a killed Run's worktree still
+ * stands with unknown-quality work. One click runs the project's verify
+ * commands (type-check + test) against it — never guessed, never skipped —
+ * then offers the evidence-based next step: **Complete from worktree** when
+ * green, **Discard & requeue** when red.
+ */
+function TimeoutSalvageItem({ item, workbenchRoot }: TimeoutSalvageItemProps): JSX.Element {
+  const [phase, setPhase] = useState<SalvagePhase>({ stage: 'idle' });
+
+  const projectPath = workbenchProjectPath(workbenchRoot, item.project);
+  // The worktree path IS `<worktreeBase>/<slug>` by construction — its
+  // basename is always the `NN-slug` (git-worktree-adapter's `worktreePathFor`).
+  const slug = item.fileRef?.split('/').filter(Boolean).pop() ?? null;
+  const target =
+    projectPath && slug && item.issueId !== null
+      ? { project: item.project, projectPath, slug, issueId: item.issueId }
+      : null;
+
+  const runVerify = (): void => {
+    if (!target || phase.stage === 'verifying' || phase.stage === 'resolving') return;
+    setPhase({ stage: 'verifying' });
+    void window.mc
+      .timeoutSalvageVerify(target)
+      .then((res) => {
+        if (res.error) setPhase({ stage: 'error', message: res.error });
+        else setPhase({ stage: 'verified', passed: res.passed, output: res.output });
+      })
+      .catch((err: unknown) => {
+        setPhase({ stage: 'error', message: err instanceof Error ? err.message : String(err) });
+      });
+  };
+
+  const resolve = (action: 'complete' | 'discard'): void => {
+    if (!target) return;
+    setPhase({ stage: 'resolving' });
+    const call = action === 'complete' ? window.mc.timeoutSalvageComplete : window.mc.timeoutSalvageDiscard;
+    void call(target)
+      .then((res) => {
+        if (res.ok) setPhase({ stage: 'resolved' });
+        else setPhase({ stage: 'error', message: res.error ?? 'The action failed.' });
+      })
+      .catch((err: unknown) => {
+        setPhase({ stage: 'error', message: err instanceof Error ? err.message : String(err) });
+      });
+  };
+
+  return (
+    <li key={item.id} className="attention__item-cell">
+      <div className={`attention__item attention__item--${item.kind}`}>
+        <span className={`attention__badge attention__badge--${item.kind}`}>
+          {kindLabel(item.kind)}
+        </span>
+        <span className="attention__text">{item.text}</span>
+        {phase.stage === 'idle' && target && (
+          <button type="button" className="attention__action" onClick={runVerify}>
+            Verify &amp; resolve
+          </button>
+        )}
+        {phase.stage === 'verifying' && <span className="attention__action">Verifying…</span>}
+        {phase.stage === 'resolving' && <span className="attention__action">Working…</span>}
+        {phase.stage === 'resolved' && <span className="attention__action">Resolved</span>}
+        {phase.stage === 'error' && (
+          <span className="attention__action" title={phase.message}>
+            Failed
+          </span>
+        )}
+      </div>
+      {phase.stage === 'verified' && (
+        <div className="attention__salvage-detail">
+          <p>
+            Verify {phase.passed ? 'PASSED' : 'FAILED'} — {phase.passed
+              ? 'the worktree can be completed as-is.'
+              : 'discard and let the drain retry from a fresh worktree.'}
+          </p>
+          <details>
+            <summary>output</summary>
+            <pre>{phase.output}</pre>
+          </details>
+          {phase.passed ? (
+            <button type="button" onClick={() => resolve('complete')}>
+              Complete from worktree
+            </button>
+          ) : (
+            <button type="button" onClick={() => resolve('discard')}>
+              Discard &amp; requeue
+            </button>
+          )}
+        </div>
+      )}
+    </li>
   );
 }
 

@@ -1,6 +1,6 @@
 # The Dispatcher defaults to silent autonomy; interruptions are a tiny explicit list
 
-**Status:** refines ADR-0007 (hybrid authority) and ADR-0002 (human-triggered Merge).
+**Status:** superseded-and-rehomed by ADR-0022 (2026-07-18). Refines ADR-0007 (hybrid authority) and ADR-0002 (human-triggered Merge). The Dispatcher framing is retired; auto-merge-on-clean and the three-item blocking set survive, moved to ADR-0021's auto-merge lane.
 
 A dogfood run showed the previous "auto vs approve, both common" model floods the user with interruptions (dozens of proposals + several approval gates for a single drain) — "defeats the purpose." So the Dispatcher's posture is **inverted**: it acts **silently and autonomously by default**, and interruptions are a small, explicit exception in three tiers:
 

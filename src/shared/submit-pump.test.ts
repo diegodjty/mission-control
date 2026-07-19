@@ -1,5 +1,5 @@
 /**
- * Issue 60 — the Dispatcher submit-pump must be unstallable.
+ * Issue 60 — the submit-pump must be unstallable.
  *
  * The live failure this guards: issue 05's `needs-verification` Receipt was
  * ingested, the pure derivation was unit-green, yet the HITL-waiting chat
@@ -22,7 +22,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  createDispatcherPump,
+  createSubmitPump,
   PUMP_WATCHDOG_MS,
   CHAT_IDLE_MS,
   COMPOSE_DECAY_MS,
@@ -35,8 +35,8 @@ import {
   type DeliveryPhase,
   type PumpScheduler,
   type TypingState,
-} from './dispatcher-pump';
-import { SUBMIT_KEY } from './dispatcher-feed';
+} from './submit-pump';
+import { SUBMIT_KEY } from './submit-sequence';
 
 /** Deterministic manual scheduler: tasks run only when the test advances time. */
 class FakeScheduler implements PumpScheduler {
@@ -76,7 +76,7 @@ interface Harness {
   phases: { key: string; phase: DeliveryPhase }[];
   setCanFlush(v: boolean): void;
   setFailWrites(v: boolean): void;
-  pump: ReturnType<typeof createDispatcherPump>;
+  pump: ReturnType<typeof createSubmitPump>;
 }
 
 function makeHarness(): Harness {
@@ -85,7 +85,7 @@ function makeHarness(): Harness {
   const phases: { key: string; phase: DeliveryPhase }[] = [];
   let canFlush = true;
   let failWrites = false;
-  const pump = createDispatcherPump({
+  const pump = createSubmitPump({
     write: (session, data) => {
       if (failWrites) throw new Error('EPIPE: session is gone');
       writes.push({ session, data });

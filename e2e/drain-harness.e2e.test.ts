@@ -127,16 +127,16 @@ import {
   lifecycleKindForOutcome,
   actionForLifecycle,
   reactToLifecycleEvent,
-} from '../src/shared/dispatcher-lifecycle';
-import { classifyAuthority, isProtectedBranch } from '../src/shared/dispatcher-authority';
-import { narrativeChannelFor, narrativeKindForLifecycle } from '../src/shared/dispatcher-narrative';
-import { createDispatcherPump, type DeliveryPhase } from '../src/shared/dispatcher-pump';
+} from '../src/shared/run-lifecycle';
+import { classifyAuthority, isProtectedBranch } from '../src/shared/action-authority';
+import { narrativeChannelFor, narrativeKindForLifecycle } from '../src/shared/run-narrative';
+import { createSubmitPump, type DeliveryPhase } from '../src/shared/submit-pump';
 import {
   auditMissingReceipts,
   isReceiptRecord,
   latestReceiptOutcomeFor,
 } from '../src/shared/receipt-audit';
-import { isRealCapture } from '../src/shared/dispatcher-noise-floor';
+import { isRealCapture } from '../src/shared/notification-noise-floor';
 import { parseReceipt } from '../src/shared/receipt-parser';
 import { deriveAttention } from '../src/shared/attention-hub-model';
 import type { RunLogRecord } from '../src/shared/ipc-contract';
@@ -438,7 +438,7 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
     pty.create('dispatcher-A');
     pty.create('dispatcher-B');
     const phases: { key: string; phase: DeliveryPhase }[] = [];
-    const pump = createDispatcherPump({
+    const pump = createSubmitPump({
       write: pty.write,
       canFlush: () => true,
       onDelivery: (key, phase) => phases.push({ key, phase }),
@@ -584,7 +584,7 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
 
     const pty = new FakePty();
     pty.create('dispatcher');
-    const pump = createDispatcherPump({ write: pty.write, canFlush: () => true });
+    const pump = createSubmitPump({ write: pty.write, canFlush: () => true });
     pump.attachSession('dispatcher');
     for (const rec of hitlRecords) {
       const reaction = reactToLifecycleEvent({

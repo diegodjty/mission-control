@@ -33,7 +33,7 @@ import { promisify } from 'node:util';
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SUBMIT_KEY } from '../src/shared/dispatcher-feed';
+import { SUBMIT_KEY } from '../src/shared/submit-sequence';
 
 const exec = promisify(execFile);
 

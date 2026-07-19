@@ -387,6 +387,26 @@ export const IpcChannel = {
    */
   RepoRegister: 'repo:register',
   /**
+   * renderer → main (invoke): run the project's verify commands (type-check +
+   * test) against a timed-out Run's stranded worktree (issue 170), so the
+   * human's salvage choice — complete-from-worktree / discard-and-requeue —
+   * rests on evidence. Resolves to a TimeoutSalvageVerifyResult.
+   */
+  TimeoutSalvageVerify: 'timeout-salvage:verify',
+  /**
+   * renderer → main (invoke): commit a timed-out Run's worktree as `done` (its
+   * verify pass was green), write its Receipt, flip the issue `done`, and
+   * clear the pending salvage record. Resolves to a TimeoutSalvageResolveResult.
+   */
+  TimeoutSalvageComplete: 'timeout-salvage:complete',
+  /**
+   * renderer → main (invoke): throw away a timed-out Run's worktree (its
+   * verify pass was red, or the human chose not to trust it), reopen the issue
+   * for the drain to retry, and clear the pending salvage record. Resolves to
+   * a TimeoutSalvageResolveResult.
+   */
+  TimeoutSalvageDiscard: 'timeout-salvage:discard',
+  /**
    * renderer → main (invoke): one-click "Initialize git" (issue 158, ADR-0017)
    * for a repo-less project whose workspace root is not yet a git repository —
    * the human's fix for the "Runs can't isolate here" state issue 157's engine
@@ -829,6 +849,37 @@ export interface AfkDiscardResult {
   /** True when the worktree + branch were discarded (or were already gone). */
   ok: boolean;
   /** A human-readable error when the discard failed, else null. */
+  error: string | null;
+}
+
+/** The identity of one pending timeout-salvage strand (issue 170). */
+export interface TimeoutSalvageTarget {
+  /** The workbench project directory name. */
+  project: string;
+  /** The Project repo path (`main` checkout); the worktree base derives from it. */
+  projectPath: string;
+  repoPath?: string;
+  /** The `NN-slug` of the timed-out Run's `afk/NN-slug` branch. */
+  slug: string;
+  issueId: number;
+}
+
+export type TimeoutSalvageVerifyRequest = TimeoutSalvageTarget;
+
+export interface TimeoutSalvageVerifyResult {
+  /** True only when every verify command exited 0. */
+  passed: boolean;
+  /** A human-readable tail of the verify commands' combined output. */
+  output: string;
+  /** Set when the worktree itself could not be found. */
+  error: string | null;
+}
+
+export type TimeoutSalvageCompleteRequest = TimeoutSalvageTarget;
+export type TimeoutSalvageDiscardRequest = TimeoutSalvageTarget;
+
+export interface TimeoutSalvageResolveResult {
+  ok: boolean;
   error: string | null;
 }
 
@@ -1743,6 +1794,22 @@ export interface MissionControlApi {
    * the CONFIG `repos:` entry + a registry line, auto-committed.
    */
   registerRepo(req: RepoRegisterRequest): Promise<RepoRegisterResult>;
+  /**
+   * Run the project's verify commands (type-check + test) against a timed-out
+   * Run's stranded worktree (issue 170), so the salvage choice is
+   * evidence-based. See `TimeoutSalvageVerifyResult`.
+   */
+  timeoutSalvageVerify(req: TimeoutSalvageVerifyRequest): Promise<TimeoutSalvageVerifyResult>;
+  /**
+   * Commit a timed-out Run's verified-green worktree, write its Receipt, flip
+   * the issue `done`, and clear the pending salvage record (issue 170).
+   */
+  timeoutSalvageComplete(req: TimeoutSalvageCompleteRequest): Promise<TimeoutSalvageResolveResult>;
+  /**
+   * Discard a timed-out Run's worktree, reopen the issue for the drain to
+   * retry, and clear the pending salvage record (issue 170).
+   */
+  timeoutSalvageDiscard(req: TimeoutSalvageDiscardRequest): Promise<TimeoutSalvageResolveResult>;
   /**
    * One-click "Initialize git" (issue 158, ADR-0017): `git init` + an initial
    * commit in a repo-less project's non-git workspace root, then registers it

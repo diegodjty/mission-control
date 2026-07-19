@@ -642,6 +642,46 @@ describe('planDrain — a declared-blocked Run parks and the drain continues (is
     expect(plan.drain.message).toBe('Stopped: no eligible issue remains.');
   });
 
+  it('names a pending timeout-salvage strand distinctly from "blocked awaiting you" (issue 170)', () => {
+    // Issue 9 timed out (its Run killed, worktree stranded) — no Receipt, so it
+    // stays `wip` with NO tracked active Run at all in this drain's view.
+    const issues = [mk(9, 'wip'), mk(6, 'done')];
+    const plan = planDrain({
+      issues,
+      maxConcurrent: 2,
+      activeRuns: [],
+      timeoutSalvageIssueIds: [9],
+    });
+    expect(plan.drain.stop).toBe(true);
+    expect(plan.drain.reason).toBe('no-eligible');
+    expect(plan.drain.message).toMatch(/no eligible issue remains/i);
+    expect(plan.drain.message).toMatch(/1 timed out awaiting salvage \(issue 9\)/i);
+    expect(plan.drain.message).not.toMatch(/blocked awaiting you/i);
+  });
+
+  it('lists multiple timeout-salvage strands by id, ascending, deduped', () => {
+    const issues = [mk(9, 'wip'), mk(11, 'wip'), mk(6, 'done')];
+    const plan = planDrain({
+      issues,
+      maxConcurrent: 2,
+      activeRuns: [],
+      timeoutSalvageIssueIds: [11, 9, 9],
+    });
+    expect(plan.drain.message).toMatch(/2 timed out awaiting salvage \(issues 9, 11\)/i);
+  });
+
+  it('combines a blocked park AND a timeout-salvage strand, each named separately', () => {
+    const issues = [mk(3, 'wip'), mk(9, 'wip'), mk(6, 'done')];
+    const plan = planDrain({
+      issues,
+      maxConcurrent: 2,
+      activeRuns: [{ issueId: 3, status: 'blocked', receiptOutcome: 'blocked' }],
+      timeoutSalvageIssueIds: [9],
+    });
+    expect(plan.drain.message).toMatch(/1 blocked awaiting you \(issue 3\)/i);
+    expect(plan.drain.message).toMatch(/1 timed out awaiting salvage \(issue 9\)/i);
+  });
+
   it('a LEFTOVER declared-blocked Run neither halts nor is reported as this drain\'s park', () => {
     // A prior-drain Run that declared blocked (Receipt and all) is not THIS
     // drain's concern: it neither halts nor swells the "awaiting you" list.

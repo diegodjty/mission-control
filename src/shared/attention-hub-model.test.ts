@@ -238,6 +238,53 @@ describe('blocked-run', () => {
   });
 });
 
+describe('run-timeout (issue 170)', () => {
+  const salvage = (issueId: number, worktreePath = '/afk-worktrees/07-parallel-isolation') => ({
+    project: 'demo',
+    issueId,
+    slug: 'parallel-isolation',
+    worktreePath,
+    timedOutAt: '2026-07-19T12:00:00.000Z',
+  });
+
+  it('derives a distinct run-timeout item, not blocked-run, naming the worktree path', () => {
+    const { items } = deriveAttention(input({ timeoutSalvage: [salvage(7)] }));
+    const timeouts = itemsOfKind(items, 'run-timeout');
+    expect(timeouts).toHaveLength(1);
+    expect(timeouts[0]).toMatchObject({
+      issueId: 7,
+      fileRef: '/afk-worktrees/07-parallel-isolation',
+      id: 'demo:run-timeout:7',
+    });
+    expect(timeouts[0].text).toContain('/afk-worktrees/07-parallel-isolation');
+    expect(itemsOfKind(items, 'blocked-run')).toEqual([]);
+  });
+
+  it('derives even for a wip issue (no Receipt exists for a timeout kill)', () => {
+    const { items } = deriveAttention(input({ timeoutSalvage: [salvage(12)] }));
+    expect(itemsOfKind(items, 'run-timeout')).toHaveLength(1);
+  });
+
+  it('disappears once the issue is done (salvaged and completed)', () => {
+    const { items } = deriveAttention(input({ timeoutSalvage: [salvage(8)] }));
+    expect(itemsOfKind(items, 'run-timeout')).toEqual([]);
+  });
+
+  it('a record for an issue not in the backlog still surfaces (best-effort label)', () => {
+    const { items } = deriveAttention(input({ timeoutSalvage: [salvage(99)] }));
+    expect(itemsOfKind(items, 'run-timeout')).toHaveLength(1);
+  });
+
+  it('is absent when there is no pending timeout-salvage record', () => {
+    const { items } = deriveAttention(input());
+    expect(itemsOfKind(items, 'run-timeout')).toEqual([]);
+  });
+
+  it('kindLabel reports TIMEOUT', () => {
+    expect(kindLabel('run-timeout')).toBe('TIMEOUT');
+  });
+});
+
 describe('setup-gate', () => {
   const HUMAN_SETUP = [
     '# Human setup',

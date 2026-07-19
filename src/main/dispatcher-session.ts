@@ -7,7 +7,7 @@
  *
  * The Dispatcher session is the LLM integration in this slice: the app feeds it
  * the input contract (seed + a stream of Completion blocks, never raw Pane
- * output — see `dispatcher-input-contract`), and it synthesizes across Runs and
+ * output — see `capture-contract`), and it synthesizes across Runs and
  * answers questions ("what's left?") from those summaries. The cross-Run
  * synthesis behaviour (issue 38) is prompt-level and verified via the QA
  * walkthrough: flag a Run's doc-drift and PROPOSE an approval-gated plan

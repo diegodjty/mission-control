@@ -9,7 +9,7 @@ import { createRepoSerializer, type RepoSerializer } from '../shared/repo-serial
 import type { AfkBranchFacts } from '../shared/worktree-scan';
 import type { BranchPreview, MergePreviewVerdict } from '../shared/merge-preview';
 import type { MergeRunsResult, RunLogRecord } from '../shared/ipc-contract';
-import { classifyAuthority } from '../shared/dispatcher-authority';
+import { classifyAuthority } from '../shared/action-authority';
 
 /**
  * Exercises the auto-merge lane EXECUTOR (issue 145) with injected fakes — the

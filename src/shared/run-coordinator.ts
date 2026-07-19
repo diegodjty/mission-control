@@ -241,6 +241,16 @@ export interface DrainInput {
    * ⇒ no dependency is held back for being unmerged (legacy/test callers).
    */
   finishedUnmergedIds?: readonly number[];
+  /**
+   * Issue ids with a pending timeout-salvage record (issue 170) — their Run
+   * was killed for exceeding `run_timeout` and their worktree awaits a human
+   * salvage decision (complete-from-worktree / discard-and-requeue). Ascending,
+   * deduped by the caller. Optional/absent ⇒ none pending (legacy/test
+   * callers, or a project with no such Runs). Named in the drain-stop message
+   * distinctly from `blockedParkedIssueIds` — a timeout kill wrote no Receipt
+   * at all, so it must never read as an ordinary "blocked awaiting you".
+   */
+  timeoutSalvageIssueIds?: readonly number[];
 }
 
 /**
@@ -265,6 +275,18 @@ function blockedAwaitingClause(ids: readonly number[]): string {
   if (ids.length === 0) return '';
   const noun = ids.length === 1 ? 'issue' : 'issues';
   return ` — ${ids.length} blocked awaiting you (${noun} ${ids.join(', ')})`;
+}
+
+/**
+ * The trailing "— N timed out awaiting salvage (issue(s) …)" clause (issue
+ * 170): named SEPARATELY from `blockedAwaitingClause` so a timeout kill (no
+ * Receipt at all) never reads as an ordinary "blocked awaiting you" — the
+ * drain-end reason must name it as its own distinct thing.
+ */
+function timeoutSalvageClause(ids: readonly number[]): string {
+  if (ids.length === 0) return '';
+  const noun = ids.length === 1 ? 'issue' : 'issues';
+  return ` — ${ids.length} timed out awaiting salvage (${noun} ${ids.join(', ')})`;
 }
 
 /**
@@ -451,13 +473,18 @@ export function planDrain(input: DrainInput): DrainPlan {
     // Runs parked blocked along the way (issue 137), the drain still FINISHED —
     // it did not halt on them — so the message stays "no eligible issue remains"
     // (which `classifyDrainStop` reads as a finished drain) and appends who is
-    // awaiting the human, rather than reporting a run-blocked stop.
+    // awaiting the human, rather than reporting a run-blocked stop. A pending
+    // timeout-salvage strand (issue 170) gets its OWN named clause — it must
+    // never be silently folded into "no eligible" with no further explanation.
+    const timeoutSalvageIssueIds = [...new Set(input.timeoutSalvageIssueIds ?? [])].sort(
+      (a, b) => a - b,
+    );
     drain = {
       stop: true,
       reason: 'no-eligible',
       blockedIssueId: null,
       blockedParkedIssueIds,
-      message: `Stopped: no eligible issue remains${blockedAwaitingClause(blockedParkedIssueIds)}.`,
+      message: `Stopped: no eligible issue remains${blockedAwaitingClause(blockedParkedIssueIds)}${timeoutSalvageClause(timeoutSalvageIssueIds)}.`,
     };
   } else {
     drain = { stop: false, reason: null, blockedIssueId: null, blockedParkedIssueIds, message: '' };

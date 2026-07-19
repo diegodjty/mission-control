@@ -1,6 +1,6 @@
 # "The chat" is the claude conversation: Run narrative lands in the Dispatcher session
 
-**Status:** accepted. Refines ADR-0011/ADR-0012; restores the intent of issue 35's block feed with Receipt sourcing (ADR-0013) and the unstallable pump (issue 60).
+**Status:** retired by ADR-0022 (2026-07-18); accepted at the time it was written. Refines ADR-0011/ADR-0012; restores the intent of issue 35's block feed with Receipt sourcing (ADR-0013) and the unstallable pump (issue 60). There is no Dispatcher conversation to land run narrative in anymore — the Run log (from Receipts) and OS notifications carry it instead.
 
 Three walkthroughs of channel-model iteration traced to one ambiguity: when the user said "notify me in the chat," "chat" always meant **the embedded claude conversation itself** — the Dispatcher session narrating work the way a terminal drain does — not Mission Control's activity strip rendered above it. The ADR-0012 recalibration (a correct reaction to a *proposal/approval* firehose) overcorrected by muting run *narrative* out of the conversation too, leaving the Dispatcher session unaware of finished work (patched on-ask by issue 61) and the user reading a side strip they never wanted as the primary surface.
 

@@ -39,7 +39,7 @@
  */
 import type { MergeRunsResult, RunLogRecord } from '../shared/ipc-contract';
 import type { RepoSerializer } from '../shared/repo-serializer';
-import type { DispatcherAction } from '../shared/dispatcher-authority';
+import type { DispatcherAction } from '../shared/action-authority';
 import {
   decideAutoMergeLane,
   laneBranchesFrom,
@@ -49,7 +49,7 @@ import {
   type LaneSkip,
   type MainIdle,
 } from '../shared/auto-merge-lane';
-import { decideDispatcherMerge, type DispatcherMergeDecision } from '../shared/dispatcher-merge';
+import { decideDispatcherMerge, type DispatcherMergeDecision } from '../shared/merge-classification';
 
 export { laneBranchesFrom };
 export type { AutoMergeLaneScan } from '../shared/auto-merge-lane';

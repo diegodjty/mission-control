@@ -1,6 +1,6 @@
 /**
- * Dispatcher chat submit-pump (issue 60) — the unstallable delivery queue for
- * everything typed into the Dispatcher chat PTY.
+ * Submit-pump (issue 60) — the unstallable delivery queue for everything typed
+ * into a chat-tier PTY (Planning, Just-talk, and historically the Dispatcher).
  *
  * The live failure this module exists to kill: issue 05's `needs-verification`
  * Receipt was ingested and the pure hitl-waiting derivation was unit-green, yet
@@ -35,7 +35,7 @@
  * Timers and the clock are injected (`scheduler` / `now`), so the pump is fully
  * unit-testable with manual time — no React, no Electron, no real timers.
  */
-import { buildSubmitSequence, buildTypeOnlySequence } from './dispatcher-feed';
+import { buildSubmitSequence, buildTypeOnlySequence } from './submit-sequence';
 
 // --- Defer-while-typing gate (ADR-0012) --------------------------------------
 // Shared by every chat-tier PTY this pump feeds (Planning, Just-talk, and
@@ -227,7 +227,7 @@ export const PUMP_WATCHDOG_MS = 2000;
 export const PUMP_STALL_MS = 1500;
 
 /** The pump's injected effects — all I/O and time behind this seam. */
-export interface DispatcherPumpEffects {
+export interface SubmitPumpEffects {
   /** Write bytes to a PTY session. May throw; the pump recovers (rule 1). */
   write(sessionId: string, data: string): void;
   /** The defer-while-typing gate (issue 48): may a programmatic write flush now? */
@@ -240,7 +240,7 @@ export interface DispatcherPumpEffects {
   scheduler?: PumpScheduler;
 }
 
-export interface DispatcherPump {
+export interface SubmitPump {
   /**
    * Queue one chat message. Returns false (and does nothing) when an item with
    * the same key is already pending — an in-queue dedupe so gate churn can't
@@ -263,7 +263,7 @@ export interface DispatcherPump {
   pending(): number;
 }
 
-export function createDispatcherPump(effects: DispatcherPumpEffects): DispatcherPump {
+export function createSubmitPump(effects: SubmitPumpEffects): SubmitPump {
   const scheduler = effects.scheduler ?? defaultScheduler;
   const now = effects.now ?? ((): number => Date.now());
   const onDelivery = effects.onDelivery ?? ((): void => undefined);

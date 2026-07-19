@@ -7,9 +7,9 @@ import {
   buildSubmitSequence,
   buildSubmitBatch,
   buildTypeOnlySequence,
-} from './dispatcher-feed';
+} from './submit-sequence';
 
-describe('dispatcher feed submit-sequence builder', () => {
+describe('submit-sequence builder', () => {
   it('types the text and submits with a SEPARATE Enter write (the issue-41 fix)', () => {
     const seq = buildSubmitSequence('hello dispatcher');
     expect(seq).toHaveLength(2);

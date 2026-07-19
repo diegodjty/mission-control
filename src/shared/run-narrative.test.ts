@@ -12,9 +12,9 @@ import {
   narrativeKeyFor,
   sessionSeenRecordId,
   type NarrativeEventKind,
-} from './dispatcher-narrative';
-import { classifyAuthority } from './dispatcher-authority';
-import type { LifecycleEventKind } from './dispatcher-lifecycle';
+} from './run-narrative';
+import { classifyAuthority } from './action-authority';
+import type { LifecycleEventKind } from './run-lifecycle';
 
 describe('narrativeChannelFor — the ADR-0014 channel model', () => {
   it('routes run narrative into the conversation: completion blocks, HITL parks, blocked parks, drain facts, adopted strays, missing receipts', () => {

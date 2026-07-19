@@ -1,5 +1,5 @@
 /**
- * Dispatcher lifecycle-event reactions (PURE) — issue 37.
+ * Run lifecycle-event reactions (PURE) — issue 37.
  *
  * The Dispatcher's input contract (ADR-0007, PRD "Input contract") is a seed
  * plus a stream of STRUCTURED events — never a Run's raw Pane transcript. Issue
@@ -46,9 +46,9 @@
  * PURE: no I/O, no Electron, no LLM. Unit-testable in isolation and safe to
  * share across main/renderer. The caller (App.tsx) turns a reaction's proposal
  * into a `dispatcher-proposal` activity and feeds its notification through the
- * `dispatcher-feed` submit queue.
+ * `submit-pump` queue.
  */
-import type { DispatcherAction } from './dispatcher-authority';
+import type { DispatcherAction } from './action-authority';
 import type { RunOutcome } from './completion-parser';
 
 /** The terminal lifecycle a Run passes through, as the Dispatcher observes it. */
