@@ -29,7 +29,7 @@ import {
   actionForLifecycle,
   reactToLifecycleEvent,
 } from './dispatcher-lifecycle';
-import { channelForAction } from './dispatcher-channel';
+import { classifyAuthority } from './dispatcher-authority';
 import { isRealCapture } from './dispatcher-noise-floor';
 import { toReceiptRunLogRecord } from './receipt-ingest';
 import { reconcileStatusModel } from './dispatcher-status-model';
@@ -163,8 +163,8 @@ describe('auditMissingReceipts — the finished-without-receipt signal', () => {
     // No gated action, not proactive — a routine passive fact.
     expect(reaction.proposal).toBeNull();
     expect(reaction.proactive).toBe(false);
-    // Routed to the ambient log (ADR-0012), NOT typed into the chat.
-    expect(channelForAction(actionForLifecycle(event.kind))).toBe('log');
+    // Non-blocking (ADR-0012): a routine fact, not a gate.
+    expect(classifyAuthority(actionForLifecycle(event.kind))).toBe('silent');
   });
 });
 

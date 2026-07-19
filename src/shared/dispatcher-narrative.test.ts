@@ -14,7 +14,6 @@ import {
   type NarrativeEventKind,
 } from './dispatcher-narrative';
 import { classifyAuthority } from './dispatcher-authority';
-import { channelForAction } from './dispatcher-channel';
 import type { LifecycleEventKind } from './dispatcher-lifecycle';
 
 describe('narrativeChannelFor — the ADR-0014 channel model', () => {
@@ -51,17 +50,13 @@ describe('narrativeChannelFor — the ADR-0014 channel model', () => {
   });
 
   it('narrative is not a gate: the ADR-0011 blocking list is unchanged by ADR-0014', () => {
-    // The three-item blocking-approval list, exactly as before.
+    // The three-item blocking-approval list, exactly as before. (The authority
+    // → chat/log channel line lived in `dispatcher-channel`, retired with the
+    // Dispatcher chat surface, issue 161 — narrative rode its OWN routing, not
+    // that gate, so this invariant is unaffected.)
     expect(classifyAuthority('merge-conflict')).toBe('blocking');
     expect(classifyAuthority('abort-drain')).toBe('blocking');
     expect(classifyAuthority('hitl-signoff')).toBe('blocking');
-    // And the authority → channel line (issue 48) is untouched: blocking → chat,
-    // everything else → log. Narrative rides its OWN routing, not a widened gate.
-    expect(channelForAction('merge-conflict')).toBe('chat');
-    expect(channelForAction('hitl-signoff')).toBe('chat');
-    expect(channelForAction('synthesize')).toBe('log');
-    expect(channelForAction('relay')).toBe('log');
-    expect(channelForAction('receipt-adopt')).toBe('log');
   });
 });
 

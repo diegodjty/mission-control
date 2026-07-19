@@ -34,7 +34,33 @@
  * PURE: no I/O, no Electron, no LLM. Unit-testable in isolation and safe to
  * share across main/renderer.
  */
-import { recordActivity, type DispatcherActivity } from './dispatcher-proposal';
+import { classifyAuthority, type Authority, type DispatcherAction } from './dispatcher-authority';
+
+/**
+ * Where an activity is in its lifecycle. Kept as a local minimal copy of the
+ * `dispatcher-proposal` shape (retired with the chat surface, issue 161) —
+ * `proposeDocDriftAmendment` below is this module's only remaining caller.
+ */
+export type ActivityStatus = 'taken' | 'pending' | 'approved' | 'rejected';
+
+/** One thing the Dispatcher did or proposes to do, per the ADR-0011 gate. */
+export interface DispatcherActivity {
+  id: string;
+  action: DispatcherAction;
+  authority: Authority;
+  label: string;
+  status: ActivityStatus;
+}
+
+/**
+ * Build the activity for a proposed/taken action: a `blocking` action starts
+ * `pending` (awaiting one click); a non-blocking (`passive`/`silent`) action is
+ * already `taken`.
+ */
+function recordActivity(id: string, action: DispatcherAction, label: string): DispatcherActivity {
+  const authority = classifyAuthority(action);
+  return { id, action, authority, label, status: authority === 'blocking' ? 'pending' : 'taken' };
+}
 
 /**
  * The structural subset of a captured Run record this module reads. Every field
@@ -312,7 +338,11 @@ export function describeDocDrift(entry: DocDriftEntry): string {
  * activity id is keyed to the Run so the same finding can't queue two proposals.
  */
 export function proposeDocDriftAmendment(entry: DocDriftEntry): DispatcherActivity {
-  return recordActivity(`amend-plan:${entry.runId}`, 'amend-plan');
+  return recordActivity(
+    `amend-plan:${entry.runId}`,
+    'amend-plan',
+    'Amend the plan to reconcile a doc-drift finding',
+  );
 }
 
 /**

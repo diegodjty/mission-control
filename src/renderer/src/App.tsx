@@ -4,7 +4,6 @@ import { RunFeed } from './RunFeed';
 import { Map } from './Map';
 import { ProjectSwitcher } from './ProjectSwitcher';
 import { CommandPalette } from './CommandPalette';
-import { DispatcherPanel } from './DispatcherPanel';
 import { Attention } from './Attention';
 import { Launcher, type QuickFixIssueRef } from './Launcher';
 import { PlanningView } from './PlanningView';
@@ -29,7 +28,6 @@ import { resolveWorkerEffort, resolveWorkerModel } from '../../shared/worker-mod
 import type {
   AttentionSnapshot,
   NavigateAttentionMessage,
-  DispatcherTarget,
   LauncherProject,
   ProjectCardView,
   ProjectView,
@@ -43,22 +41,12 @@ import {
 } from '../../shared/dispatcher-input-contract';
 import {
   createDispatcherPump,
-  type DeliveryPhase,
-  type DispatcherPump,
-} from '../../shared/dispatcher-pump';
-import {
-  recordActivity,
-  resolveActivity,
-  type DispatcherActivity,
-} from '../../shared/dispatcher-proposal';
-import {
-  channelForAction,
   canFlushChat,
   reduceTyping,
-  isStatusInjectionTrigger,
   INITIAL_TYPING_STATE,
+  type DispatcherPump,
   type TypingState,
-} from '../../shared/dispatcher-channel';
+} from '../../shared/dispatcher-pump';
 import {
   actionForLifecycle,
   lifecycleKindForOutcome,
@@ -76,19 +64,10 @@ import {
 } from '../../shared/dispatcher-synthesis';
 import { isRealCapture, isStrongOverlap } from '../../shared/dispatcher-noise-floor';
 import {
-  narrativeChannelFor,
-  narrativeKindForLifecycle,
-  narrativeKeyFor,
-  sessionSeenRecordId,
-  type NarrativeEventKind,
-} from '../../shared/dispatcher-narrative';
-import {
   reconcileStatusModel,
   renderStatusModel,
   debounceStatusModel,
   initialStatusDebounceState,
-  buildStatusSnapshotMessage,
-  buildRunDigest,
   type DispatcherStatusModel,
   type StatusDebounceState,
 } from '../../shared/dispatcher-status-model';
@@ -170,15 +149,6 @@ import {
   mergeThrewDisplay,
   type MergeDisplay,
 } from '../../shared/merge-display';
-import {
-  clampDispatcherWidth,
-  dispatcherWidthFromPointer,
-  DEFAULT_DISPATCHER_WIDTH,
-} from '../../shared/dispatcher-width';
-
-/** localStorage key for the app-wide persisted Dispatcher rail width (issue 44). */
-const DISPATCHER_WIDTH_KEY = 'mc.dispatcherWidth';
-
 /** localStorage key for the persisted UI theme (Atlas design language). */
 const THEME_KEY = 'mc.theme';
 /** localStorage key for the persisted rail-collapsed preference (issue 124). */
@@ -227,15 +197,6 @@ function protectedLandWarning(branch: string): string {
   );
 }
 
-/** Read the persisted rail width, clamped; falls back to the default when unset. */
-function loadDispatcherWidth(): number {
-  try {
-    const raw = window.localStorage.getItem(DISPATCHER_WIDTH_KEY);
-    return raw === null ? DEFAULT_DISPATCHER_WIDTH : clampDispatcherWidth(Number.parseFloat(raw));
-  } catch {
-    return DEFAULT_DISPATCHER_WIDTH;
-  }
-}
 
 /** The `NN-slug` for a Run, from its issue file name (`NN-slug.md`). */
 function slugOf(fileName: string): string {
@@ -783,39 +744,18 @@ export function App(): JSX.Element {
   // authority; this just reflects its verdict for the current drain).
   const [debriefAvailable, setDebriefAvailable] = useState(false);
 
-  // --- Dispatcher state (issue 35, ADR-0010) -------------------------------
-  // The conversational orchestrator for a drain: spun up WHEN A DRAIN STARTS
-  // (a single manual Run stays a bare Pane), one per Project, dismissable. Null
-  // when no drain has started this Project session. `sessionId` is set once its
-  // chat Pane spawns, so we can feed it each Run's Completion block (structured
-  // summary — never raw Pane scroll). `dispatcherFed` tracks which Runs' blocks
-  // we've already fed, so a re-capture/re-render doesn't double-feed.
-  const [dispatcher, setDispatcher] = useState<{
-    target: DispatcherTarget;
-    sessionId: string | null;
-  } | null>(null);
-  const dispatcherFed = useRef<Set<string>>(new Set<string>());
-  // The ONE "this session has seen it" set (issues 61 + 66, ADR-0014): which
-  // Runs' blocks the CURRENT Dispatcher session has been given — live (a
-  // narrative/park message the pump submitted or has queued) or via the on-ask
-  // digest. Shared by both paths so a digest ask never re-lists a Run the
-  // session was just narrated, and vice versa. Baselined at Dispatcher creation
-  // to the records already in the Run log (they predate the session's seed); a
-  // REPLACEMENT session (a brand-new claude conversation) resets it to that
-  // baseline so the digest catches the new session up. Distinct from
-  // `dispatcherFed`, which guards enqueueing once per Run per Dispatcher.
-  // Cleared wherever `dispatcherFed` is.
-  const dispatcherSessionSeen = useRef<Set<string>>(new Set<string>());
-  // The record ids that predate this Dispatcher's creation (issue 66) — what a
-  // replacement session's seen-set resets TO, so old drains' persisted blocks
-  // are never replayed while this drain's narrative is caught up via the digest.
-  const dispatcherDigestBaseline = useRef<Set<string>>(new Set<string>());
-  // Whether the current Dispatcher has already had a chat session attached —
-  // how `handleDispatcherSession` tells a REPLACEMENT (reset the seen-set) from
-  // the first spawn (the baseline from Dispatcher creation already applies).
-  const dispatcherHadSession = useRef<boolean>(false);
-  // Monotonic per-drain sequence, so each drain's stopped/halted narrative fact
-  // gets a stable, deduped delivery key (issue 66).
+  // --- Ambient activity log (issue 36/38/43, ADR-0011/0012) ----------------
+  // Retired the Dispatcher conversation itself (ADR-0022): no orchestrator
+  // session, no chat PTY, no approve/reject gate. What remains is the ambient
+  // NOTE-taking this apparatus already did alongside the chat — a Run
+  // completing, a stray Receipt adopted, ground truth moving — because the
+  // drain journal (issue 73, ADR-0015) reads its notable entries (adoptions,
+  // finished-without-receipt) into each drain's memory summary. `activityFed`
+  // tracks which Run-log records have already produced a note, so a
+  // re-render/re-scan doesn't double-note one.
+  const activityFed = useRef<Set<string>>(new Set<string>());
+  // Monotonic per-drain sequence, so each drain's stopped/halted note gets a
+  // stable, deduped id (issue 66).
   const drainSeq = useRef<number>(0);
   // --- Drain journal state (issue 73, ADR-0015) ----------------------------
   // What was ALREADY in the Run log / activity strip when the current drain
@@ -826,102 +766,30 @@ export function App(): JSX.Element {
   // The last drain sequence whose journal write was scheduled — "written once
   // per drain": the user-stop and Coordinator-stop paths can't both fire it.
   const drainJournalSeq = useRef<number>(0);
-  // The Dispatcher rail's width (issue 44): user-adjustable by dragging the
-  // divider between the Map and the panel, within a sensible min/max, persisted
-  // app-wide so it survives closing/reopening the panel and the app. Changing it
-  // resizes the chat Pane, whose ResizeObserver (issue 12) reflows the terminal.
-  const [dispatcherWidth, setDispatcherWidth] = useState<number>(loadDispatcherWidth);
-  // Serialized, UNSTALLABLE submit pump for the Dispatcher chat (issues 41/48/60).
-  // It owns the per-Project queue of chat-tier messages: each is TYPED then
-  // SUBMITTED with a separate Enter write, one message fully before the next
-  // (issue 41), held while the user is mid-compose (issue 48). Issue 60 moved it
-  // out of this component into the tested `dispatcher-pump` module because the
-  // inline version could stall forever: a session replaced mid-pump kept the
-  // writes going to the dead PTY (closure), a write failure stranded the queue
-  // behind a stuck pumping flag, and nothing ever re-kicked it — which is how a
-  // HITL-waiting notification silently never reached the chat. The pump keys
-  // items by event key, keeps an item queued until its submit lands in a
-  // still-current session, redelivers across session replacement/death, retries
-  // via a watchdog, and reports queued/typed/submitted per item (see
-  // `noteDelivery` below). Created lazily below, after the state it observes.
-  const dispatcherPumpRef = useRef<DispatcherPump | null>(null);
-  // Monotonic id for on-ask status-snapshot injections (issue 52), so each ask
-  // gets its own delivery key in the pump.
-  const statusInjectionSeq = useRef<number>(0);
-  // The user's compose state on the Dispatcher chat's input line (issue 48,
-  // ADR-0012). Folded from the chat Pane's keystrokes, it is the defer-while-
-  // typing gate the pump consults before flushing: a programmatic write is held
-  // while the user is mid-compose and only lands once the input line is idle, so
-  // the app never interleaves with the user's typing ("prompt over prompt").
-  const dispatcherTyping = useRef<TypingState>(INITIAL_TYPING_STATE);
-  // The Dispatcher's authority activity log (issue 36, ADR-0011): non-blocking
-  // actions it took on its own (silent/passive — shown as quiet notes) and the
-  // three-item blocking list it must propose (merge-conflict, abort-drain, HITL
-  // sign-off — shown with one-click approve/reject that don't execute until
-  // approved).
-  const [dispatcherActivities, setDispatcherActivities] = useState<DispatcherActivity[]>([]);
-  // Live mirror of `dispatcherActivities` for the drain-journal write (issue
-  // 73): its grace-window timer must read the CURRENT strip (a notable event —
-  // an adoption, a finished-without-receipt note — may land after the drain's
+  // The ambient note log (issue 36, ADR-0011 as narrowed by ADR-0022): plain
+  // `{ id, label }` facts — a Run completed, a stray Receipt was adopted, a
+  // doc-drift finding, a status refresh — kept only because the drain journal
+  // folds its notable entries into each drain's memory summary. There is no
+  // more approve/reject gate: the chat surface that owned it is retired.
+  const [activityNotes, setActivityNotes] = useState<{ id: string; label: string }[]>([]);
+  // Live mirror of `activityNotes` for the drain-journal write (issue 73): its
+  // grace-window timer must read the CURRENT list (a notable event — an
+  // adoption, a finished-without-receipt note — may land after the drain's
   // stop was observed), not the render it was scheduled in.
-  const dispatcherActivitiesRef = useRef<DispatcherActivity[]>([]);
+  const activityNotesRef = useRef<{ id: string; label: string }[]>([]);
   useEffect(() => {
-    dispatcherActivitiesRef.current = dispatcherActivities;
-  }, [dispatcherActivities]);
-  // Delivery observability (issue 60, rule 3): each chat item's queued → typed →
-  // submitted (or requeued / write-failed) state renders as ONE quiet ambient-log
-  // line per item, updated in place — so the next walkthrough can SEE where a
-  // notification died instead of inferring it. `relay` is silent → log channel.
-  const noteDelivery = useCallback(
-    (key: string, phase: DeliveryPhase, detail?: string): void => {
-      // ADR-0014 (issue 66): a submit always lands in the CURRENT session
-      // (issue 60's guarantee), so a delivered narrative / park message marks
-      // its Run as seen by this session — re-marking after a replacement
-      // session's reset, so the on-ask digest never re-lists a Run the pump
-      // just re-delivered.
-      if (phase === 'submitted') {
-        const seenId = sessionSeenRecordId(key);
-        if (seenId !== null) dispatcherSessionSeen.current.add(seenId);
-      }
-      const label = oneLineNote(`Chat delivery ${phase}${detail ? ` (${detail})` : ''} — ${key}`);
-      setDispatcherActivities((prev) => {
-        const id = `delivery:${key}`;
-        const note = recordActivity(id, 'relay', label);
-        const idx = prev.findIndex((a) => a.id === id);
-        if (idx === -1) return [...prev, note];
-        const next = [...prev];
-        next[idx] = note;
-        return next;
-      });
-    },
-    [],
-  );
-  // Create the pump once (ref-guarded; inert until something enqueues). Its
-  // effects read live refs, so it always consults the CURRENT compose state and
-  // writes through the preload PTY surface; timers are the real defaults.
-  if (dispatcherPumpRef.current === null) {
-    dispatcherPumpRef.current = createDispatcherPump({
-      write: (sessionId, data) => window.mc.writePty({ sessionId, data }),
-      canFlush: (now) => canFlushChat(dispatcherTyping.current, now),
-      onDelivery: noteDelivery,
-    });
-  }
-  const dispatcherPump = dispatcherPumpRef.current;
+    activityNotesRef.current = activityNotes;
+  }, [activityNotes]);
   // Lifecycle-event reactions (issue 37): which lifecycle events (keyed
-  // `<kind>:<runId>`) the Dispatcher has already reacted to, so a re-render /
-  // re-scan doesn't re-notify or re-propose. `discardTargets` maps a
-  // discard-and-continue proposal's id to the worktree it would discard, so
-  // approving it executes the real issue-22 discard (when there is a worktree).
+  // `<kind>:<runId>`) have already produced a note, so a re-render / re-scan
+  // doesn't re-note one.
   const lifecycleReacted = useRef<Set<string>>(new Set<string>());
-  // Keyed by proposal id (`Map` the component name shadows the global, so a plain
-  // record avoids the collision).
-  const discardTargets = useRef<Record<string, { issueId: number; slug: string }>>({});
-  // Cross-Run synthesis (issue 38): which shared seams the Dispatcher has already
-  // surfaced as a cross-Run pattern, so a re-scan doesn't re-narrate the same
+  // Cross-Run synthesis (issue 38): which shared seams have already been
+  // surfaced as a cross-Run pattern, so a re-scan doesn't re-note the same
   // "these Runs all hit X" line each poll.
   const overlapSurfaced = useRef<Set<string>>(new Set<string>());
-  // Ground-truth status re-grounding (issue 43): the last status-model text fed
-  // to the Dispatcher, so it is re-fed only when the reconciled done/wip/open/
+  // Ground-truth status re-grounding (issue 43): the last status-model text
+  // noted, so it is re-noted only when the reconciled done/wip/open/
   // finished-unmerged picture actually changes — not on every render/poll.
   const statusRefreshSig = useRef<string | null>(null);
   // Debounce backward status moves (issue 49, ADR-0012): the state carried
@@ -940,22 +808,22 @@ export function App(): JSX.Element {
   // adapter's `output` here is what gives "see details below" an actual below.
   const [merging, setMerging] = useState(false);
   const [mergeDisplay, setMergeDisplay] = useState<MergeDisplay | null>(null);
-  // The mergeable-set signature the Dispatcher has already AUTO-attempted this
-  // drain (issue 46). A clean auto-merge drops the branches and a conflict sets
-  // `midMerge` — both self-guard against a re-fire — but a preflight failure
-  // leaves the branch set unchanged, so this stops the auto-merge effect from
-  // looping on it. Reset on Project switch / dispatcher dismissal.
+  // The mergeable-set signature already AUTO-attempted this drain (issue 46). A
+  // clean auto-merge drops the branches and a conflict sets `midMerge` — both
+  // self-guard against a re-fire — but a preflight failure leaves the branch
+  // set unchanged, so this stops the auto-merge effect from looping on it.
+  // Reset on Project switch.
   const autoMergeSig = useRef<string | null>(null);
 
   // --- Protected-branch guard (issue 113) ----------------------------------
   // Before a Run's work LANDS on a protected branch (`main`/`master`), the drain
-  // STOPS for an explicit one-click confirmation (a `protected-branch-land`
-  // blocking proposal, ADR-0011 as amended). `protectedGatedSoloIds` holds solo
-  // Run ids whose `main`-commit is withheld pending that click, so the commit
-  // effect stops re-firing (and looping) until the human approves.
-  // `protectedLandTargets` maps a proposal id to what approving re-executes (the
-  // merge, or a specific solo commit) with confirmation. Reset on Project switch
-  // / dispatcher dismissal, like the other proposal bookkeeping.
+  // STOPS: `protectedGatedSoloIds` holds solo Run ids whose `main`-commit is
+  // withheld, so the commit effect stops re-firing (and looping) on them.
+  // `protectedLandTargets` records what confirming the land would re-execute
+  // (the merge, or a specific solo commit) — currently write-only (see this
+  // issue's Doc drift note: the chat panel that owned the confirm click is
+  // retired and nothing has replaced it yet). Reset on Project switch, like the
+  // other bookkeeping.
   const protectedGatedSoloIds = useRef<Set<number>>(new Set<number>());
   const protectedLandTargets = useRef<
     Record<
@@ -1090,19 +958,11 @@ export function App(): JSX.Element {
     setDrainMessage('');
     setDebriefAvailable(false);
     talkPumpRef.current?.reset();
-    // The Dispatcher is per-Project (ADR-0010): drop it on a switch so the new
-    // Project never inherits the previous one's orchestrator. Unmounting its
-    // panel kills the session.
-    setDispatcher(null);
-    dispatcherFed.current.clear();
-    dispatcherSessionSeen.current.clear();
-    dispatcherDigestBaseline.current.clear();
-    dispatcherHadSession.current = false;
-    dispatcherPumpRef.current?.reset();
-    dispatcherTyping.current = INITIAL_TYPING_STATE;
-    setDispatcherActivities([]);
+    // The ambient activity log is per-Project: drop it on a switch so the new
+    // Project never inherits the previous one's notes.
+    activityFed.current.clear();
+    setActivityNotes([]);
     lifecycleReacted.current.clear();
-    discardTargets.current = {};
     overlapSurfaced.current.clear();
     statusRefreshSig.current = null;
     statusDebounce.current = initialStatusDebounceState();
@@ -2423,152 +2283,44 @@ export function App(): JSX.Element {
     [upsertRunLog],
   );
 
-  // --- Feed Completion blocks to the Dispatcher (issue 35, issue 41) --------
-  // As each Run finishes and its Completion block is captured into the Run log,
-  // hand that STRUCTURED block to the Dispatcher session — this is the input
-  // contract's stream (ADR-0009). It is built from the parsed record via the
-  // pure assembler, so it can NEVER carry raw Pane scroll. Fed once per Run
-  // (guarded by `dispatcherFed`), and only once the block parsed to something
-  // real (outcome !== 'unknown'), so a still-streaming capture isn't fed as
-  // noise.
-  //
-  // Submission (issue 41): a block must be SUBMITTED, not just typed — typing
-  // the text and its `\r` in one PTY write lets the claude TUI's bracketed-paste
-  // handling swallow the `\r` as literal text, so the block sat unsent. The
-  // type-settle-submit-settle sequencing, the defer-while-typing hold (issue 48),
-  // and the issue-60 resilience (redelivery across session churn, write-failure
-  // recovery, watchdog re-kick) all live in the tested `dispatcher-pump` module;
-  // `dispatcherPump` above is this Project's instance.
-
-  // Report the user's keystrokes on the Dispatcher chat so the defer gate
-  // knows when the input line is idle (issue 48). Fires only for real user input
-  // into the chat terminal — the Dispatcher's own queued writes go out via
-  // `writePty` and never reach this, so they can't be mistaken for typing.
-  //
-  // On-demand ground-truth injection (issue 52): the same input stream is where
-  // we detect the user SENDING a message, and enqueue the CURRENT reconciled +
-  // debounced status snapshot as quiet context. After issue 48/ADR-0012 routed
-  // the `status-refresh` to the ambient log, the chat session heard nothing after
-  // its seed, so "what's left?" answered from the drain-start seed (the issue-51
-  // bug). Injecting the snapshot at query time re-grounds the session in reality
-  // WITHOUT reintroducing per-fact chat streaming (ADR-0012) — the chat stays
-  // quiet the rest of the time. The pure `isStatusInjectionTrigger` reads the
-  // PRE-fold compose state (so a bare Enter on an empty prompt does not fire), and
-  // `buildStatusSnapshotMessage` renders the snapshot (or null when the backlog
-  // has not loaded). The snapshot rides the SAME serialized submit queue as the
-  // feed, so it honours the defer-while-typing gate and never interleaves with the
-  // user's own line.
-  const handleDispatcherInput = useCallback(
-    (data: string): void => {
-      const prev = dispatcherTyping.current;
-      if (isStatusInjectionTrigger(prev, data)) {
-        // The Completion-block digest (issue 61) rides the SAME injection: the
-        // status snapshot re-grounds "what's done/left", the digest catches the
-        // session up on WHAT EACH RUN SAID (issue + outcome + a What-changed /
-        // park-reason line) — the qualitative substance ADR-0012's log routing
-        // took out of the session's reach. Ids are marked as given only once
-        // the injection is actually enqueued; when there is no status model yet
-        // nothing injects and the blocks stay pending for the next ask.
-        const digest = buildRunDigest(runLogRef.current, dispatcherSessionSeen.current);
-        const snapshot = buildStatusSnapshotMessage(debouncedStatusModelRef.current, digest.text);
-        if (snapshot !== null) {
-          for (const id of digest.digestedIds) dispatcherSessionSeen.current.add(id);
-          statusInjectionSeq.current += 1;
-          dispatcherPump.enqueue({
-            key: `status-snapshot:${statusInjectionSeq.current}`,
-            text: snapshot,
-          });
-        }
-      }
-      dispatcherTyping.current = reduceTyping(prev, data, Date.now());
-    },
-    [dispatcherPump],
-  );
-
-  // Record a routine passive FACT as a quiet ambient-log note (issue 48,
-  // ADR-0012): it appears in the activity log beside the chat rather than being
-  // typed into the chat session. Deduped by id so a re-render / re-scan can't
-  // double-log it. `label` carries the fact's own plain-language text.
+  // Record a routine fact as a quiet ambient note (issue 48, ADR-0012, narrowed
+  // by ADR-0022): kept only because the drain journal folds notable entries
+  // (adoptions, finished-without-receipt) into each drain's memory summary —
+  // there is no more chat to route into or approval gate to raise. Deduped by
+  // id so a re-render / re-scan can't double-note it.
   const logNote = useCallback(
-    (id: string, action: DispatcherAction, label: string): void => {
-      setDispatcherActivities((prev) =>
-        prev.some((a) => a.id === id)
-          ? prev
-          : [...prev, recordActivity(id, action, oneLineNote(label))],
+    (id: string, _action: DispatcherAction, label: string): void => {
+      setActivityNotes((prev) =>
+        prev.some((a) => a.id === id) ? prev : [...prev, { id, label: oneLineNote(label) }],
       );
     },
     [],
   );
 
-  // Route one Dispatcher event to its channel (issue 48, ADR-0012). The pure,
-  // tested `channelForAction` is the single decision: a `blocking`-tier action is
-  // a conversational prompt typed into the chat PTY via the serialized pump —
-  // keyed by the event id, so the pump's in-queue dedupe and per-item delivery
-  // log line up with the event (issue 60); every routine passive/silent fact
-  // becomes an ambient-log note instead — so the chat carries ONLY blocking
-  // approvals + the user's own conversation. Returns true when it enqueued a
-  // chat write (the pump kicks itself; nothing further for the caller to do).
-  const surfaceEvent = useCallback(
-    (id: string, action: DispatcherAction, text: string): boolean => {
-      if (channelForAction(action) === 'chat') {
-        dispatcherPump.enqueue({ key: id, text });
-        return true;
-      }
-      logNote(id, action, text);
-      return false;
-    },
-    [logNote, dispatcherPump],
-  );
-
-  // Surface RUN NARRATIVE per ADR-0014 (issue 66): the pure, tested
-  // `narrativeChannelFor` decides whether this kind is a live message in the
-  // Dispatcher CONVERSATION (a finished Run's Completion block, an HITL park,
-  // a drain stopped/halted fact, adopted strays, finished-without-receipt) or
-  // a history-strip line only (blocked/stranded alerts, doc-drift, overlaps —
-  // the ADR-0012 noise floor stands). Either way the activity strip keeps its
-  // history line — it demotes to a scannable log, it doesn't go blind. A
-  // chat-bound Run message is immediately counted into the session-seen set
-  // (shared with the issue-61 digest) so an ask mid-delivery can't double-list
-  // it; `action` only labels the history note (narrative is never a gate — the
-  // ADR-0011 blocking list is untouched).
-  const surfaceNarrative = useCallback(
-    (kind: NarrativeEventKind, id: string, action: DispatcherAction, text: string): void => {
-      if (narrativeChannelFor(kind) === 'chat') {
-        dispatcherPump.enqueue({ key: id, text });
-        const seenId = sessionSeenRecordId(id);
-        if (seenId !== null) dispatcherSessionSeen.current.add(seenId);
-      }
-      logNote(id, action, text);
-    },
-    [logNote, dispatcherPump],
-  );
-
-  // Drain the SOLO-path stray-Receipt adoptions (issue 62) into narrative. The
+  // Drain the SOLO-path stray-Receipt adoptions (issue 62) into a note. The
   // adoptions are queued where the commit resolves (`commitSoloRun`, defined
-  // before the surfacing helpers exist) and surfaced here — one per adoption
-  // batch, deduped by its file list. An adoption is a drain fact worth telling
-  // (ADR-0014, issue 66): a message in the Dispatcher conversation, plus the
-  // history line.
+  // before `logNote` exists) and noted here — one per adoption batch, deduped
+  // by its file list — because the drain journal reads it (issue 73).
   useEffect(() => {
     if (soloAdoptions.length === 0) return;
     for (const files of soloAdoptions) {
-      surfaceNarrative(
-        'strays-adopted',
+      logNote(
         `receipt-adopt:solo:${files.join(',')}`,
         'receipt-adopt',
         `Adopted stray Receipt(s) on main: ${files.join(', ')}`,
       );
     }
     setSoloAdoptions([]);
-  }, [soloAdoptions, surfaceNarrative]);
+  }, [soloAdoptions, logNote]);
 
-  // Drain the SOLO-path protected-branch withholds (issue 113) into a blocking
-  // gate. Queued in `commitSoloRun` (which runs before the surfacing helpers
-  // exist); here — once they do — each becomes a `protected-branch-land` pending
-  // proposal (the DispatcherPanel's approve/reject) AND a chat warning via the
-  // pump, deduped per issue. Approving re-commits with confirmation; rejecting
-  // leaves the finished work uncommitted on the protected branch. The target
-  // records what approval re-executes.
+  // Drain the SOLO-path protected-branch withholds (issue 113) into a note.
+  // Queued in `commitSoloRun` (which runs before `logNote` exists); here — once
+  // it does — each becomes a `protected-branch-land` history note, deduped per
+  // issue. `protectedLandTargets` still records what confirming the land would
+  // re-execute; there is no more UI to click through it since the Dispatcher
+  // panel that owned approve/reject is retired (see the Doc drift note in this
+  // issue's completion — landing on a protected branch has no renderer
+  // affordance left to confirm it).
   useEffect(() => {
     if (soloProtectedGates.length === 0) return;
     for (const gate of soloProtectedGates) {
@@ -2578,18 +2330,12 @@ export function App(): JSX.Element {
         issueId: gate.issueId,
         nextPhase: gate.nextPhase,
       };
-      setDispatcherActivities((prev) =>
-        prev.some((a) => a.id === pid)
-          ? prev
-          : [...prev, recordActivity(pid, 'protected-branch-land', protectedLandWarning(gate.branch))],
-      );
-      surfaceEvent(pid, 'protected-branch-land', protectedLandWarning(gate.branch));
+      logNote(pid, 'protected-branch-land', protectedLandWarning(gate.branch));
     }
     setSoloProtectedGates([]);
-  }, [soloProtectedGates, surfaceEvent]);
+  }, [soloProtectedGates, logNote]);
 
   useEffect(() => {
-    if ((dispatcher?.sessionId ?? null) === null) return;
     for (const rec of runLog) {
       // An `unknown` capture has no reliable qualitative content to synthesize,
       // so it does NOT enter the block feed here. Under the ADR-0012 noise floor
@@ -2602,31 +2348,20 @@ export function App(): JSX.Element {
       // point it feeds here normally (the guard below is keyed by id and unknowns
       // are never marked fed).
       if (rec.outcome === 'unknown') continue;
-      if (dispatcherFed.current.has(rec.id)) continue;
-      dispatcherFed.current.add(rec.id);
+      if (activityFed.current.has(rec.id)) continue;
+      activityFed.current.add(rec.id);
       const text = renderCompletionEvent(toCompletionEvent({ id: rec.id, record: rec }));
       if (rec.outcome === 'completed') {
-        // ADR-0014 (issue 66): a finished Run's Completion block is RUN
-        // NARRATIVE — typed + submitted into the Dispatcher conversation live
-        // via the pump, one message per Run, replacing issue 48's ambient-only
-        // `synthesize` routing for narrative. The strip keeps its history line.
-        surfaceNarrative('run-completed', narrativeKeyFor(rec.id), 'synthesize', text);
+        logNote(`run-completed:${rec.id}`, 'synthesize', text);
       } else {
-        // A blocked/parked block's substance rides its lifecycle surface
-        // instead — the blocking HITL park notice, or the BLOCKED park's
-        // Run-narrative chat message (issue 137) — so the full block text stays a
-        // history line here, never a second chat message for the same Run.
-        surfaceNarrative('run-blocked-alert', `synthesize:${rec.id}`, 'synthesize', text);
+        logNote(`synthesize:${rec.id}`, 'synthesize', text);
       }
-      // Cross-Run synthesis (issue 38, acceptance a): a block that reports doc-drift
-      // (a PRD/reality contradiction) surfaces as a plain-language note. A
-      // SPECULATIVE signal, so it stays below the conversation bar (ADR-0014
-      // keeps the ADR-0012 noise floor): a history-strip note, never the chat.
-      // Doc-drift free / "none" blocks add nothing.
+      // Cross-Run synthesis (issue 38, acceptance a): a block that reports
+      // doc-drift (a PRD/reality contradiction) surfaces as a plain-language
+      // note. Doc-drift free / "none" blocks add nothing.
       const [drift] = extractDocDrift([rec]);
       if (drift) {
-        surfaceNarrative(
-          'doc-drift',
+        logNote(
           `doc-drift:${rec.id}`,
           'amend-plan',
           `${describeDocDrift(drift)} — the plan may need amending to reconcile it.`,
@@ -2635,12 +2370,12 @@ export function App(): JSX.Element {
     }
     // Cross-Run patterns (issue 38, acceptance b/c): once ≥2 Runs touch the same
     // seam (a file, a named "… seam", a shared identifier), consolidate them into
-    // ONE surfaced line instead of leaving the user to spot it across cards. The
+    // ONE noted line instead of leaving the user to spot it across cards. The
     // detection is the pure `detectCrossRunOverlap` over the captured records.
     // Noise floor (issue 47, ADR-0012): consolidation is demoted to a RARE note —
     // `isStrongOverlap` gates it to a strong concrete overlap (a real shared
     // file/seam, not the PRD/config/skill boilerplate or a junk token), and
-    // `overlapSurfaced` guards each seam so it is surfaced at most once, never the
+    // `overlapSurfaced` guards each seam so it is noted at most once, never the
     // per-tick "consolidate?" firehose. A weak/false overlap surfaces nothing.
     for (const group of detectCrossRunOverlap(runLog).filter(isStrongOverlap)) {
       if (overlapSurfaced.current.has(group.seam)) continue;
@@ -2648,19 +2383,16 @@ export function App(): JSX.Element {
       const runs = group.runs
         .map((r) => (r.issueId !== null ? `issue ${String(r.issueId).padStart(2, '0')}` : r.runId))
         .join(', ');
-      // A cross-Run consolidation is a SPECULATIVE signal — history only
-      // (ADR-0014 keeps the ADR-0012 noise floor out of the conversation).
-      surfaceNarrative(
-        'cross-run-overlap',
+      logNote(
         `overlap:${group.seam}`,
         'synthesize',
         `${group.runs.length} Runs touched ${group.seam} (${runs}) — consider a consolidated pass rather than treating each separately.`,
       );
     }
-  }, [runLog, dispatcher, surfaceNarrative]);
+  }, [runLog, logNote]);
 
-  // --- Ground the Dispatcher's status picture in truth (issue 43) -----------
-  // The Dispatcher's AUTHORITATIVE model of which issues are open/wip/done/
+  // --- Ground the status picture in truth (issue 43) ------------------------
+  // The AUTHORITATIVE model of which issues are open/wip/done/
   // finished-unmerged is reconciled from the SAME live sources the Map uses — the
   // backlog (main-checkout truth), the on-disk `afk/` scan (incl. finished-
   // unmerged, which the backlog can't see because that `done` flip lives on the
@@ -2701,41 +2433,31 @@ export function App(): JSX.Element {
   // in place (rather than appending a new line each change) so the log shows the
   // current "what's left" without accreting a status entry per transition.
   useEffect(() => {
-    if ((dispatcher?.sessionId ?? null) === null) return;
     const text = renderStatusModel(debouncedStatusModel);
     if (text === statusRefreshSig.current) return;
     statusRefreshSig.current = text;
-    // `relay` is silent → the ambient log (channelForAction === 'log').
-    const note = recordActivity('status-refresh', 'relay', oneLineNote(text));
-    setDispatcherActivities((prev) => {
+    setActivityNotes((prev) => {
+      const label = oneLineNote(text);
       const idx = prev.findIndex((a) => a.id === 'status-refresh');
-      if (idx === -1) return [...prev, note];
+      if (idx === -1) return [...prev, { id: 'status-refresh', label }];
       const next = [...prev];
-      next[idx] = note;
+      next[idx] = { id: 'status-refresh', label };
       return next;
     });
-  }, [debouncedStatusModel, dispatcher]);
+  }, [debouncedStatusModel]);
 
   // --- React to lifecycle events mid-drain (issue 37, ADR-0007) -------------
-  // Beyond the Completion-block stream above, the Dispatcher reacts to lightweight
-  // terminal lifecycle events — blocked / stranded / needs-attention / hitl-
-  // waiting — so it can act (or proactively alert) MID-drain rather than the drain
-  // silently stalling. These are STRUCTURED signals derived from truth Mission
-  // Control already holds — the captured Completion records (blocked / needs-
-  // verification, with their `detail` body from issue 42) and the on-disk `afk/`
-  // scan's stranded classification (issue 22) — never raw Pane scroll. The pure
-  // `reactToLifecycleEvent` turns each into a plain-language notification (fed
-  // through the same submit queue) plus, for blocked/stranded, an approval-gated
-  // discard-and-continue proposal (issue 36's gate). CRUCIALLY, when the drain
-  // reaches a HITL issue parked awaiting the human (a `hitl: true` / `(HITL)` issue
-  // whose block is "Ready for manual verification"), it PROACTIVELY notifies the
-  // user, names the issue, and relays its manual-verification steps — so the user
-  // isn't left to notice the pause. Reacted-to once per event (guarded by
-  // `lifecycleReacted`).
+  // Beyond the Completion-block stream above, lightweight terminal lifecycle
+  // events — blocked / stranded / needs-attention / hitl-waiting — still get a
+  // history note, so a walkthrough can see mid-drain activity that has no
+  // Completion block of its own. These are STRUCTURED signals derived from
+  // truth Mission Control already holds — the captured Completion records
+  // (blocked / needs-verification, with their `detail` body from issue 42) and
+  // the on-disk `afk/` scan's stranded classification (issue 22) — never raw
+  // Pane scroll. Reacted-to once per event (guarded by `lifecycleReacted`).
+  // ADR-0022: none of these raises an approval gate anymore — the user unsticks
+  // a blocked Run and discards a stranded one from the Map's own controls.
   useEffect(() => {
-    const sessionId = dispatcher?.sessionId ?? null;
-    if (sessionId === null) return;
-
     const isHitlIssue = (issueId: number | null): boolean =>
       issueId !== null && (backlog?.issues.find((i) => i.id === issueId)?.hitl ?? false);
 
@@ -2779,34 +2501,9 @@ export function App(): JSX.Element {
       lifecycleReacted.current.add(key);
       const reaction = reactToLifecycleEvent(event);
       if (reaction.notification === null) continue;
-      // A HITL gate awaiting sign-off stays a BLOCKING-approval prompt → the
-      // chat PTY via the authority line (ADR-0011/0012, unchanged by ADR-0014);
-      // its delivered park notice also marks the Run as seen by this session,
-      // so the on-ask digest (issue 61) doesn't re-list it. Every other alert
-      // routes through the narrative table: a BLOCKED park (issue 137) is now a
-      // Run-narrative CHAT message (the drain no longer halts on it, so its park
-      // is the chat fact — never a silent skip), while stranded / needs-attention
-      // stay history-strip lines. Either way it is surfaced once, so a stuck or
-      // human-gated drain never stalls silently — and the pump keeps a chat-tier
-      // notification queued across Dispatcher session replacement/death until it
-      // is really submitted (issue 60), so "surfaced once" never becomes "lost in
-      // transit". ADR-0011: none of these widens the blocking gate — the user
-      // unsticks a blocked Run and discards a stranded one from the Map's own
-      // controls, so no proposal here.
-      if (event.kind === 'hitl-waiting') {
-        if (surfaceEvent(key, actionForLifecycle(event.kind), reaction.notification)) {
-          dispatcherSessionSeen.current.add(event.runId);
-        }
-      } else {
-        surfaceNarrative(
-          narrativeKindForLifecycle(event.kind),
-          key,
-          actionForLifecycle(event.kind),
-          reaction.notification,
-        );
-      }
+      logNote(key, actionForLifecycle(event.kind), reaction.notification);
     }
-  }, [runLog, worktreeRunStates, dispatcher, backlog, surfaceEvent, surfaceNarrative]);
+  }, [runLog, worktreeRunStates, backlog, logNote]);
 
   // --- The honest signals that replaced the scroll scrape (issue 57) --------
   // (a) finished-without-receipt: ground truth (the issue's `done` flip / a
@@ -2845,18 +2542,11 @@ export function App(): JSX.Element {
         }
         const reaction = reactToLifecycleEvent(event);
         if (reaction.notification !== null) {
-          // `finished-without-receipt` → a narrative message in the chat
-          // (ADR-0014) + the history line. `relay` labels the note only.
-          surfaceNarrative(
-            narrativeKindForLifecycle(event.kind),
-            `${event.kind}:${event.runId}`,
-            actionForLifecycle(event.kind),
-            reaction.notification,
-          );
+          logNote(`${event.kind}:${event.runId}`, actionForLifecycle(event.kind), reaction.notification);
         }
       }, RECEIPT_AUDIT_GRACE_MS);
     }
-  }, [runs, runLog, projectPath, runStatusOf, surfaceNarrative]);
+  }, [runs, runLog, projectPath, runStatusOf, logNote]);
 
   // (b) Receipt/state mismatch (ADR-0013 trust hierarchy): the latest Receipt's
   // declared narrative disagrees with git's ground truth (e.g. Receipt says
@@ -2883,12 +2573,10 @@ export function App(): JSX.Element {
           mismatchSurfaced.current.delete(key);
           return;
         }
-        // A Receipt/state disagreement is a routine fact → history only
-        // (ADR-0014 keeps it below the conversation bar).
-        surfaceNarrative('receipt-mismatch', key, 'relay', describeReceiptMismatch(still));
+        logNote(key, 'relay', describeReceiptMismatch(still));
       }, RECEIPT_AUDIT_GRACE_MS);
     }
-  }, [runLog, debouncedStatusModel, projectPath, surfaceNarrative]);
+  }, [runLog, debouncedStatusModel, projectPath, logNote]);
 
   // Write the drain's journal entry (issue 73, ADR-0015): when a drain ends —
   // any stop reason — ONE dated summary lands in the workbench project's
@@ -2912,7 +2600,7 @@ export function App(): JSX.Element {
         // Project; writing it against the new one would be a lie — skip.
         if (projectPathRef.current !== journalPath) return;
         const records = runLogRef.current.filter((rec) => !logBaseline.has(rec.id));
-        const notables = dispatcherActivitiesRef.current
+        const notables = activityNotesRef.current
           .filter((a) => !notableBaseline.has(a.id) && isNotableDrainActivity(a.id))
           .map((a) => a.label);
         void window.mc
@@ -2940,45 +2628,18 @@ export function App(): JSX.Element {
       setDrainMessage('');
       setDebriefAvailable(false);
       setDraining(true);
-      // Each drain gets its own sequence so its stopped/halted narrative fact
-      // (issue 66) carries a stable, deduped delivery key.
+      // Each drain gets its own sequence so its stopped/halted note (issue 66)
+      // carries a stable, deduped id.
       drainSeq.current += 1;
       // Journal baselines (issue 73): what predates this drain is not this
       // drain's story — the entry is built from the delta past these sets.
       drainLogBaseline.current = new Set(runLogRef.current.map((rec) => rec.id));
-      drainNotableBaseline.current = new Set(
-        dispatcherActivitiesRef.current.map((a) => a.id),
-      );
-      // Starting a drain spins up the Dispatcher for this Project (ADR-0010):
-      // the conversational orchestrator that drives the drain and that you talk
-      // to instead of watching every Pane. A single manual Run (startRun) does
-      // NOT do this — it stays a bare Pane. Idempotent: one Dispatcher per
-      // Project, so re-draining the same Project reuses the live one.
-      if (projectPath !== null) {
-        // Baseline the session-seen set (issues 61 + 66) when a FRESH Dispatcher
-        // is created: records already in the Run log predate this session's seed
-        // (a previous drain's persisted blocks), so they are "already given" —
-        // live narrative and the digest carry only what reports in from here on.
-        // The baseline is kept so a REPLACEMENT session can reset to it and
-        // catch up via the digest. A re-drain that reuses the live Dispatcher
-        // keeps its bookkeeping intact.
-        if (dispatcher === null || dispatcher.target.projectPath !== projectPath) {
-          dispatcherDigestBaseline.current = new Set(runLogRef.current.map((rec) => rec.id));
-          dispatcherSessionSeen.current = new Set(dispatcherDigestBaseline.current);
-          dispatcherHadSession.current = false;
-        }
-        setDispatcher((cur) =>
-          cur && cur.target.projectPath === projectPath
-            ? cur
-            : {
-                target: { projectPath, activePrd: backlog?.activePrd ?? null },
-                sessionId: null,
-              },
-        );
-      }
+      drainNotableBaseline.current = new Set(activityNotesRef.current.map((a) => a.id));
+      // The drain loop drives the Run Coordinator (`planDrain`) directly
+      // (ADR-0022) — no orchestrator session to spin up here.
       applyShellEvent({ kind: 'run-started' });
     },
-    [projectPath, backlog, dispatcher, applyShellEvent],
+    [applyShellEvent],
   );
 
   const startDrain = useCallback(
@@ -3021,120 +2682,10 @@ export function App(): JSX.Element {
     setDraining(false);
     const message = 'Drain stopped by you — in-flight Runs keep going.';
     setDrainMessage(message);
-    // A drain stop is a lifecycle fact worth telling (ADR-0014, issue 66): a
-    // message in the Dispatcher conversation, plus the history line.
-    surfaceNarrative('drain-stopped', `drain-stopped:${drainSeq.current}`, 'relay', message);
+    logNote(`drain-stopped:${drainSeq.current}`, 'relay', message);
     // A user stop is a drain end like any other (issue 73): journal it.
     writeDrainJournalFor(message);
-  }, [surfaceNarrative, writeDrainJournalFor]);
-
-  // Record the Dispatcher session's PTY id once its chat Pane spawns (issue 35),
-  // so the ingest effect below can feed each Run's Completion block into it.
-  // Also (issue 60) point the pump at the new session — anything still queued
-  // from before the previous session died is (re)delivered here — and reset the
-  // compose state: a fresh PTY starts with an EMPTY input line, so a mid-compose
-  // flag inherited from the old session can never hold the defer gate closed
-  // forever (the stuck-compose stall).
-  const handleDispatcherSession = useCallback(
-    (sessionId: string): void => {
-      // A REPLACEMENT session is a brand-new claude conversation that heard
-      // none of the narrative delivered to its predecessor (issue 66): reset
-      // the session-seen set to the Dispatcher-creation baseline so the on-ask
-      // digest (issue 61) catches the new session up on everything this drain
-      // produced. Items the pump still redelivers into the new session re-mark
-      // themselves as seen when their submit lands (`noteDelivery`), so the
-      // digest never repeats them.
-      if (dispatcherHadSession.current) {
-        dispatcherSessionSeen.current = new Set(dispatcherDigestBaseline.current);
-      }
-      dispatcherHadSession.current = true;
-      setDispatcher((cur) => (cur ? { ...cur, sessionId } : cur));
-      dispatcherTyping.current = INITIAL_TYPING_STATE;
-      dispatcherPump.attachSession(sessionId);
-    },
-    [dispatcherPump],
-  );
-
-  // The Dispatcher chat PTY died (issue 60, rule 2): detach the pump — its queue
-  // is per-Project state, so queued blocking notifications survive and deliver
-  // into whatever session attaches next — and drop the stale session id so the
-  // feed effects stop treating the dead session as live.
-  const handleDispatcherExit = useCallback((): void => {
-    setDispatcher((cur) => (cur ? { ...cur, sessionId: null } : cur));
-    dispatcherTyping.current = INITIAL_TYPING_STATE;
-    dispatcherPump.attachSession(null);
-  }, [dispatcherPump]);
-
-  // Dismiss the Dispatcher (ADR-0010): end the orchestrator session and close
-  // its chat panel. Unmounting the panel kills the PTY; clearing the fed-set lets
-  // a fresh Dispatcher for this Project start ingesting from scratch.
-  const dismissDispatcher = useCallback((): void => {
-    setDispatcher(null);
-    dispatcherFed.current.clear();
-    dispatcherSessionSeen.current.clear();
-    dispatcherDigestBaseline.current.clear();
-    dispatcherHadSession.current = false;
-    // Dropping the queue here is safe for blocking items: the fed/reacted sets
-    // clear too, so a fresh Dispatcher re-derives and re-enqueues anything (e.g.
-    // a still-parked HITL gate) that is still true from the Run log.
-    dispatcherPump.reset();
-    dispatcherTyping.current = INITIAL_TYPING_STATE;
-    setDispatcherActivities([]);
-    lifecycleReacted.current.clear();
-    discardTargets.current = {};
-    overlapSurfaced.current.clear();
-    statusRefreshSig.current = null;
-    statusDebounce.current = initialStatusDebounceState();
-    seenReconciled.current = null;
-    debouncedStatusModelRef.current = null;
-    autoMergeSig.current = null;
-    // Clearing the proposals (above) must also clear the protected-branch guard's
-    // bookkeeping (issue 113) — otherwise a solo commit could stay withheld with
-    // no visible gate; the fresh Dispatcher re-raises it from a re-fired commit.
-    protectedGatedSoloIds.current.clear();
-    protectedLandTargets.current = {};
-    setSoloProtectedGates([]);
-  }, [dispatcherPump]);
-
-  // Drag the divider between the Map and the Dispatcher rail to resize it (issue
-  // 44). We capture the width and pointer x at drag start, then follow the
-  // pointer via window listeners (so the drag keeps tracking even if the cursor
-  // leaves the thin handle). The pure `dispatcherWidthFromPointer` does the math
-  // and clamps to the min/max; the chosen width is persisted app-wide on release
-  // so it survives closing/reopening the panel and restarts. The chat Pane
-  // reflows automatically — its ResizeObserver (issue 12) refits the terminal as
-  // the rail's width changes.
-  const startDispatcherResize = useCallback(
-    (e: React.PointerEvent): void => {
-      e.preventDefault();
-      const startClientX = e.clientX;
-      const startWidth = dispatcherWidth;
-      const onMove = (ev: PointerEvent): void => {
-        setDispatcherWidth(
-          dispatcherWidthFromPointer({ startWidth, startClientX, clientX: ev.clientX }),
-        );
-      };
-      const onUp = (ev: PointerEvent): void => {
-        window.removeEventListener('pointermove', onMove);
-        window.removeEventListener('pointerup', onUp);
-        document.body.classList.remove('is-col-resizing');
-        const finalWidth = dispatcherWidthFromPointer({
-          startWidth,
-          startClientX,
-          clientX: ev.clientX,
-        });
-        try {
-          window.localStorage.setItem(DISPATCHER_WIDTH_KEY, String(finalWidth));
-        } catch {
-          // Persistence is best-effort; the live width still applies this session.
-        }
-      };
-      document.body.classList.add('is-col-resizing');
-      window.addEventListener('pointermove', onMove);
-      window.addEventListener('pointerup', onUp);
-    },
-    [dispatcherWidth],
-  );
+  }, [logNote, writeDrainJournalFor]);
 
   // Keep the App's backlog copy fresh from every Map load/live-change so the
   // Coordinator plans against current disk truth.
@@ -3232,10 +2783,7 @@ export function App(): JSX.Element {
     if (plan.drain.stop) {
       setDraining(false);
       setDrainMessage(plan.drain.message);
-      // A drain halt/finish is a lifecycle fact worth telling (ADR-0014, issue
-      // 66): a message in the Dispatcher conversation (why it ended — a blocked
-      // Run, nothing eligible, a mid-merge main), plus the history line.
-      surfaceNarrative('drain-halted', `drain-halted:${drainSeq.current}`, 'relay', plan.drain.message);
+      logNote(`drain-halted:${drainSeq.current}`, 'relay', plan.drain.message);
       // The drain ended (issue 73): one journal entry into the workbench
       // memory, whatever the stop reason.
       writeDrainJournalFor(plan.drain.message);
@@ -3396,13 +2944,7 @@ export function App(): JSX.Element {
             'running multiple agents on main. Resolve the worktree/git error, ' +
             'then start the drain again.';
           setDrainMessage(message);
-          // A halted drain is narrative (ADR-0014, issue 66) → the conversation.
-          surfaceNarrative(
-            'drain-halted',
-            `drain-halted:isolation:${drainSeq.current}`,
-            'relay',
-            message,
-          );
+          logNote(`drain-halted:isolation:${drainSeq.current}`, 'relay', message);
         }
       });
 
@@ -3411,7 +2953,7 @@ export function App(): JSX.Element {
     };
     // `runLog` is a dependency so a Receipt that lands a beat after its session
     // exits re-plans the drain with the park now visible (issue 64).
-  }, [draining, backlog, runs, cap, projectPath, midMerge, runStatusOf, isIsolated, needsIsolation, runLog, surfaceNarrative, writeDrainJournalFor, issueRepoResolutions, repoForIssueId, workbenchPathsForRun, activeProject, logNote, finishedUnmergedIds]);
+  }, [draining, backlog, runs, cap, projectPath, midMerge, runStatusOf, isIsolated, needsIsolation, runLog, writeDrainJournalFor, issueRepoResolutions, repoForIssueId, workbenchPathsForRun, activeProject, logNote, finishedUnmergedIds]);
 
   // --- Merge readiness (issue 08, ADR-0002; issue 16) ---------------------
   // Retained ONLY as a defensive fallback for the (currently unreachable)
@@ -3477,52 +3019,32 @@ export function App(): JSX.Element {
           const branch = result.protectedBranch;
           const pid = `protected-branch-land:merge:${sig}`;
           protectedLandTargets.current[pid] = { kind: 'merge', slugs, auto };
-          setDispatcherActivities((prev) =>
-            prev.some((a) => a.id === pid)
-              ? prev
-              : [
-                  ...prev,
-                  recordActivity(pid, 'protected-branch-land', protectedLandWarning(branch)),
-                ],
-          );
-          surfaceEvent(pid, 'protected-branch-land', protectedLandWarning(branch));
+          logNote(pid, 'protected-branch-land', protectedLandWarning(branch));
           return;
         }
         if (auto) {
           // A stray-Receipt adoption (issue 62) is a repair MC did on its own:
           // it auto-committed known artifacts (dirty files under
-          // `issues/completions/` on main) so the preflight could proceed.
-          // A drain fact worth telling (ADR-0014, issue 66) — a message in the
-          // Dispatcher conversation, plus the history line; unknown dirt still
-          // halts below.
+          // `issues/completions/` on main) so the preflight could proceed —
+          // worth a note since the drain journal reads it (issue 73).
           if (result.adopted !== undefined && result.adopted.length > 0) {
-            surfaceNarrative(
-              'strays-adopted',
+            logNote(
               `receipt-adopt:${sig}:${result.adopted.join(',')}`,
               'receipt-adopt',
               `Adopted stray Receipt(s) on main: ${result.adopted.join(', ')}`,
             );
           }
-          // Dispatcher path only (ADR-0011): classify the completed merge into an
-          // auto-proceed passive note vs a conflict/failure blocking gate.
+          // Classify the completed merge into an auto-proceed note vs a
+          // conflict/failure note (ADR-0011's classifier, unchanged by ADR-0022).
           const decision = decideDispatcherMerge(result);
           if (decision.kind === 'auto') {
-            // A CLEAN merge is a routine passive fact ("merged 05 clean") →
-            // ambient log, carrying its own summary text; never typed into the
-            // chat (ADR-0012, issue 48). `merge` is passive → channelForAction 'log'.
+            // A CLEAN merge is a routine fact ("merged 05 clean") → a note.
             logNote(`merge:${sig}`, 'merge', decision.note);
           } else if (decision.kind === 'gate') {
-            // A REAL CONFLICT blocks: record the pending proposal (the panel's
-            // approve/reject) and, because it is a blocking-approval prompt,
-            // ALSO surface the reason in the chat via the pump — which holds it
-            // queued until a Dispatcher session can really receive it (issue 60),
-            // so a gate raised during session churn is never silently lost.
-            setDispatcherActivities((prev) =>
-              prev.some((a) => a.id === `merge-conflict:${sig}`)
-                ? prev
-                : [...prev, recordActivity(`merge-conflict:${sig}`, 'merge-conflict')],
-            );
-            surfaceEvent(`merge-conflict:${sig}`, 'merge-conflict', decision.reason);
+            // A REAL CONFLICT: note it. Resolving it is the Merge
+            // affordance's job (the `midMerge` banner + Abort merge), not an
+            // approve/reject click — that gate was the retired chat panel's.
+            logNote(`merge-conflict:${sig}`, 'merge-conflict', decision.reason);
           } else if (decision.kind === 'halt') {
             // A PREFLIGHT/tool failure is NOT a conflict and NOT approvable
             // (issue 59): an approval could only retry into the same dirty tree
@@ -3567,7 +3089,7 @@ export function App(): JSX.Element {
         );
       })
       .finally(() => setMerging(false));
-  }, [projectPath, merging, mergePlan, activeScan, logNote, surfaceEvent, surfaceNarrative]);
+  }, [projectPath, merging, mergePlan, activeScan, logNote]);
 
   // --- Merge affordance (issue 148, ADR-0021) ------------------------------
   // Everyday merging belongs to the lane; the Map button changes job to the
@@ -3667,61 +3189,6 @@ export function App(): JSX.Element {
     autoMergeSig.current = sig;
     runMergeCore([decision.slug], true);
   }, [activeScan, runLog, midMerge, liveSoloRun, merging, runMergeCore]);
-
-  // Approve a pending proposal: mark it approved, then EXECUTE the action (the
-  // gate's whole point — nothing ran until this click). Execution is dispatched
-  // by the action; a Merge runs the existing merge path, an abort stops the
-  // drain. Non-executable proposals are simply recorded as approved.
-  const approveProposal = useCallback(
-    (id: string): void => {
-      let action: DispatcherActivity['action'] | null = null;
-      setDispatcherActivities((prev) =>
-        prev.map((a) => {
-          if (a.id !== id || a.status !== 'pending') return a;
-          action = a.action;
-          return resolveActivity(a, 'approved');
-        }),
-      );
-      if (action === 'merge') {
-        // Defensive fallback (this proposal kind is not currently raised —
-        // everyday merging is the always-on lane's job now, ADR-0021): merge
-        // whatever the whole-batch plan still reads as ready.
-        runMergeCore(mergePlan.mergeable.map((c) => c.slug), false);
-      } else if (action === 'abort-drain') stopDrain();
-      else if (action === 'discard-and-continue') {
-        // Execute issue 22's discard for the stranded/blocked Run's worktree, if
-        // it has one; a blocked solo Run has no worktree, so approving simply
-        // clears the gate and the drain continues.
-        const target = discardTargets.current[id];
-        if (target) discardRun(target.issueId, target.slug);
-      } else if (action === 'protected-branch-land') {
-        // The human clicked through the "big warning" (issue 113): re-execute the
-        // withheld landing WITH confirmation. A merge re-runs `runMergeCore` (same
-        // auto posture); a solo commit re-fires that Run's `main`-commit — after
-        // clearing its gated marker so the commit effect stops skipping it.
-        const target = protectedLandTargets.current[id];
-        if (target?.kind === 'merge') {
-          // Re-run the withheld merge WITH confirmation. The direct call handles
-          // it; the auto-merge effect stays guarded (a clean merge drops the
-          // branches; a conflict sets midMerge — both self-guard against a re-fire).
-          runMergeCore(target.slugs, target.auto, true);
-        } else if (target?.kind === 'solo') {
-          protectedGatedSoloIds.current.delete(target.issueId);
-          const run = runs.find((r) => r.target.issueId === target.issueId);
-          if (run) commitSoloRun(run, target.nextPhase, true);
-        }
-      }
-    },
-    [mergePlan, stopDrain, discardRun, runMergeCore, commitSoloRun, runs],
-  );
-
-  // Reject a pending proposal: drop it (mark rejected) and DO NOT execute — the
-  // Dispatcher continues without the scope change.
-  const rejectProposal = useCallback((id: string): void => {
-    setDispatcherActivities((prev) =>
-      prev.map((a) => (a.id === id && a.status === 'pending' ? resolveActivity(a, 'rejected') : a)),
-    );
-  }, []);
 
   // Abort an in-progress merge left on `main` by a partial conflict (issue 24):
   // `git merge --abort` back to a clean `main` (already-merged slugs stay merged),
@@ -4510,36 +3977,6 @@ export function App(): JSX.Element {
             onQuickFixRunNow={(p, issue) => void runQuickFixNow(p, issue)}
           />
           </div>
-          {/* The Dispatcher chat panel beside the Map (ADR-0010): present once a
-              drain has started this Project. Talk to the orchestrator here
-              instead of watching every worker Pane; ask "what's left?" and it
-              answers from the Completion blocks / Run log. Dismissable. */}
-          {dispatcher && (
-            <>
-              {/* Draggable divider between the Map and the Dispatcher rail
-                  (issue 44): drag to resize; the chat Pane reflows to fit. */}
-              <div
-                className="dispatcher-resizer"
-                role="separator"
-                aria-orientation="vertical"
-                aria-label="Resize the Dispatcher panel"
-                title="Drag to resize the Dispatcher panel"
-                onPointerDown={startDispatcherResize}
-              />
-              <DispatcherPanel
-                target={dispatcher.target}
-                onSession={handleDispatcherSession}
-                onInput={handleDispatcherInput}
-                onExit={handleDispatcherExit}
-                onDismiss={dismissDispatcher}
-                ingestedCount={runLog.filter((r) => r.outcome !== 'unknown').length}
-                activities={dispatcherActivities}
-                onApprove={approveProposal}
-                onReject={rejectProposal}
-                width={dispatcherWidth}
-              />
-            </>
-          )}
         </div>
 
         {/* Every tracked Run's Pane/Feed stays mounted so its session persists.
