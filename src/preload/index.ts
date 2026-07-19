@@ -29,6 +29,8 @@ import {
   type ProjectRemoveResult,
   type RepoRegisterRequest,
   type RepoRegisterResult,
+  type GitInitRequest,
+  type GitInitResult,
   type PlanningChangedMessage,
   type PlanningDocReadRequest,
   type PlanningDocReadResult,
@@ -204,6 +206,9 @@ const api: MissionControlApi = {
 
   registerRepo: (req: RepoRegisterRequest): Promise<RepoRegisterResult> =>
     ipcRenderer.invoke(IpcChannel.RepoRegister, req),
+
+  gitInit: (req: GitInitRequest): Promise<GitInitResult> =>
+    ipcRenderer.invoke(IpcChannel.GitInit, req),
 
   readIssueFile: (req: IssueFileReadRequest): Promise<IssueFileReadResult> =>
     ipcRenderer.invoke(IpcChannel.IssueFileRead, req),

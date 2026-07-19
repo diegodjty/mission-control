@@ -196,6 +196,18 @@ body {
     var(--bg0);
 }
 
+/* The "Initialize git" dialog's failure text (issue 158) — same red-glass
+   treatment the Map's inline issue-op error uses (map__issue-op-error). */
+.app__gitinit-error {
+  margin: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--red-border);
+  border-radius: 8px;
+  background: var(--red-bg);
+  color: var(--red-soft);
+  font-size: 12px;
+}
+
 /* The rotated-diamond mark + wordmark — the app's identity, lifted straight
    from the prototype and reused as the rail's brand. */
 .app__mark {

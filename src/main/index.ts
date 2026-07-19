@@ -26,12 +26,14 @@ import {
   commitFinishedWorktree,
   detectDefaultBranch,
   discardWorktree,
+  isGitRepoDir,
   isMidMerge,
   readIsolatedIssueStatus,
   readIssueStatusAt,
   scanAfkBranches,
   worktreePathFor,
 } from './git-worktree-adapter';
+import { initGitRepo } from './git-init';
 import { mergeRuns, abortMerge } from './run-merge';
 import {
   probeMergeTreeSupport,
@@ -47,6 +49,7 @@ import { ReceiptWatcher } from './receipt-watcher';
 import { PlanningWatcher } from './planning-watcher';
 import { commitWorkbenchPaths, commitWorkbenchProject } from './workbench-git';
 import { createWorkbenchProject } from './onboarding';
+import { repoKeyFor } from '../shared/onboarding-model';
 import { listWorkbenchProjectNames } from './workbench-projects';
 import { registerAppearedRepo } from './register-repo';
 import { deleteIssueFile, readIssueText, writeIssueText } from './issue-file-store';
@@ -114,6 +117,8 @@ import {
   type ProjectRemoveResult,
   type RepoRegisterRequest,
   type RepoRegisterResult,
+  type GitInitRequest,
+  type GitInitResult,
   type PlanningDocReadRequest,
   type PlanningDocReadResult,
   type PlanningWatchRequest,
@@ -255,6 +260,19 @@ function isIsolatableTarget(projectKey: string, repo: string): boolean {
   // project (no repos, default resolved to the workspace root) is unisolatable.
   if (identity.repoPaths.length > 0) return true;
   return repo !== identity.defaultRepoPath;
+}
+
+/**
+ * Is this Project's workspace root a directory that is not (yet) a git
+ * repository (issue 158, ADR-0017)? True only for a genuinely repo-less
+ * project whose default repo path actually lacks a `.git` — the Map badge and
+ * the Drain-time "Initialize git" offer both key off this. A project with any
+ * real member repo, or a repo-less one whose workspace root already got
+ * `git init`'d by hand, reports `false`.
+ */
+function notUnderGitFor(identity: ProjectIdentity | null): boolean {
+  if (identity === null || identity.repoPaths.length > 0) return false;
+  return !isGitRepoDir(identity.defaultRepoPath);
 }
 
 /**
@@ -449,6 +467,7 @@ function projectViewsFor(windowId: string): ProjectView[] {
       stage: p.stage,
       ownership:
         p.ownerWindowId === null ? 'free' : p.ownerWindowId === windowId ? 'you' : 'other',
+      notUnderGit: notUnderGitFor(identity),
     };
   });
 }
@@ -1607,6 +1626,7 @@ function registerIpc(): void {
           completionsRoot: identity.completionsRoot,
           counts,
           lastActivity: await latestActivityIso([identity.issuesRoot, identity.completionsRoot]),
+          notUnderGit: notUnderGitFor(identity),
         };
       }),
     );
@@ -1857,6 +1877,55 @@ function registerIpc(): void {
         warning: outcome.warnings[0] ?? null,
         key: outcome.key,
       };
+    },
+  );
+
+  // "Initialize git" (issue 158, ADR-0017): the human's one-click fix for the
+  // "Runs can't isolate here" state issue 157's engine surfaces — a repo-less
+  // project's workspace root that was never `git init`'d. Runs `git init` +
+  // one initial commit, then registers it exactly like an appeared repo
+  // (issue 95's `RepoRegister` path): added to `repos:`, promoted to
+  // `default_repo`, one workbench commit. Refuses (never guesses) when the
+  // project already has a real member repo or its root is already git.
+  // Ownership-gated like the other worktree/git-mutating handlers — this is a
+  // real git mutation on the caller's Project, not a read.
+  ipcMain.handle(
+    IpcChannel.GitInit,
+    async (event, req: GitInitRequest): Promise<GitInitResult> => {
+      const key = req?.projectKey ?? '';
+      const ownership = ownershipError(event, key);
+      if (ownership !== null) return { ok: false, error: ownership, key: null };
+
+      const identity = identityFor(key);
+      if (identity === null) return { ok: false, error: 'Unknown project.', key: null };
+      if (identity.repoPaths.length > 0) {
+        return { ok: false, error: 'This project already has a registered repo.', key: null };
+      }
+      const path = identity.defaultRepoPath;
+      if (isGitRepoDir(path)) {
+        return { ok: false, error: 'This workspace root is already a git repository.', key: null };
+      }
+
+      const init = await initGitRepo(path);
+      if (!init.ok) return { ok: false, error: init.error, key: null };
+
+      const outcome = await registerAppearedRepo({
+        workbenchRoot: WORKBENCH_ROOT,
+        homeDir: homedir(),
+        project: basename(identity.key),
+        repoPath: path,
+        key: repoKeyFor(path),
+      });
+      if (!outcome.ok) {
+        return { ok: false, error: outcome.errors.join('; '), key: null };
+      }
+
+      // Refresh the cached identity so this Window sees the project as
+      // isolatable in THIS session — no reopen needed (issue 158's AC).
+      const fresh = await resolveProjectIdentity(identity.key);
+      projectIdentities.set(fresh.key, fresh);
+      broadcastRegistryChanged();
+      return { ok: true, error: null, key: outcome.key };
     },
   );
 

@@ -495,6 +495,14 @@ export function App(): JSX.Element {
     path: string;
     label: string;
   } | null>(null);
+  // Drain-time "Initialize git" offer (issue 158, ADR-0017): pressing Drain
+  // with cap > 1 on a project whose workspace root isn't a git repo yet opens
+  // this instead of silently proceeding — `cap` is the chosen concurrency to
+  // resume with once the human picks Initialize git or Drain serially. Null
+  // when nothing is pending.
+  const [gitInitPrompt, setGitInitPrompt] = useState<{ cap: number } | null>(null);
+  const [gitInitBusy, setGitInitBusy] = useState(false);
+  const [gitInitError, setGitInitError] = useState<string | null>(null);
   // Mirrors `activeProjectKey` for the callbacks/effects that need the CURRENT
   // active Project without re-subscribing (issue 26): they compare it against
   // an incoming key via `isProjectSwitch` to decide whether to reset
@@ -1214,6 +1222,10 @@ export function App(): JSX.Element {
     [activeProject, projectPath],
   );
 
+  // True when the active Project's workspace root isn't a git repo yet (issue
+  // 158, ADR-0017) — the Map badge and the Drain cap>1 gate both key off this.
+  const notUnderGit = activeProject?.notUnderGit ?? false;
+
   // Per-issue repo targeting (issue 72, ADR-0015): each backlog issue resolves
   // through the pure `repoForIssue` — its declared `repo:` key in the
   // project's repos map, else the default repo; an unknown key is an explicit
@@ -1297,6 +1309,7 @@ export function App(): JSX.Element {
       completionsRoot: activeProject.completionsRoot,
       counts,
       lastActivity: null,
+      notUnderGit: activeProject.notUnderGit,
     };
   }, [activeProject, backlog]);
 
@@ -2917,29 +2930,12 @@ export function App(): JSX.Element {
     [projectPath, activeProject],
   );
 
-  const startDrain = useCallback(
+  // The actual drain start (issue 158 split this out of `startDrain`, below):
+  // everything that happens once every refusal gate has passed. Called
+  // directly by the "Initialize git" / "Drain serially" dialog actions so
+  // neither has to re-run the notUnderGit gate it just resolved.
+  const proceedDrain = useCallback(
     (chosenCap: number): void => {
-      // Refuse to drain onto a mid-merge main (issue 24) — resolve/abort first.
-      if (midMerge) {
-        setDrainMessage(
-          'Cannot drain: main is mid-merge — resolve the conflict or Abort the merge first.',
-        );
-        return;
-      }
-      // Drain honesty (issue 90): the Map disables the control when nothing is
-      // startable/unblockable, but a click can land in the beat before the
-      // watch push re-disables it. Refuse here with the same truthful reason
-      // rather than spinning a Dispatcher session up over nothing. (If
-      // eligibility vanishes AFTER this guard passes, the plan effect below
-      // ends the drain immediately with the normal no-eligible stop fact.)
-      const gate = drainAvailability(
-        backlog?.issues ?? [],
-        runs.filter((r) => runStatusOf(r) === 'running').map((r) => r.target.issueId),
-      );
-      if (!gate.available) {
-        setDrainMessage(`Cannot drain: ${gate.reason}.`);
-        return;
-      }
       setCap(Math.max(1, Math.floor(chosenCap) || 1));
       setDrainMessage('');
       setDebriefAvailable(false);
@@ -2982,7 +2978,43 @@ export function App(): JSX.Element {
       }
       applyShellEvent({ kind: 'run-started' });
     },
-    [midMerge, projectPath, backlog, dispatcher, runs, runStatusOf],
+    [projectPath, backlog, dispatcher, applyShellEvent],
+  );
+
+  const startDrain = useCallback(
+    (chosenCap: number): void => {
+      // Refuse to drain onto a mid-merge main (issue 24) — resolve/abort first.
+      if (midMerge) {
+        setDrainMessage(
+          'Cannot drain: main is mid-merge — resolve the conflict or Abort the merge first.',
+        );
+        return;
+      }
+      // Drain honesty (issue 90): the Map disables the control when nothing is
+      // startable/unblockable, but a click can land in the beat before the
+      // watch push re-disables it. Refuse here with the same truthful reason
+      // rather than spinning a Dispatcher session up over nothing. (If
+      // eligibility vanishes AFTER this guard passes, the plan effect below
+      // ends the drain immediately with the normal no-eligible stop fact.)
+      const gate = drainAvailability(
+        backlog?.issues ?? [],
+        runs.filter((r) => runStatusOf(r) === 'running').map((r) => r.target.issueId),
+      );
+      if (!gate.available) {
+        setDrainMessage(`Cannot drain: ${gate.reason}.`);
+        return;
+      }
+      // Non-git workspace root + a concurrency ask above 1 (issue 158,
+      // ADR-0017): explain the limitation and offer Initialize git rather than
+      // silently letting issue 157's engine clamp/serialize behind the scenes.
+      if (notUnderGit && Math.max(1, Math.floor(chosenCap) || 1) > 1) {
+        setGitInitError(null);
+        setGitInitPrompt({ cap: chosenCap });
+        return;
+      }
+      proceedDrain(chosenCap);
+    },
+    [midMerge, backlog, runs, runStatusOf, notUnderGit, proceedDrain],
   );
 
   const stopDrain = useCallback((): void => {
@@ -4129,6 +4161,86 @@ export function App(): JSX.Element {
   // tracer replaced only the interrupt guard; the shell rebuild folds the last
   // hand-rolled overlay in), so every modal in the app is now one Radix Dialog
   // with the same overlay/focus-trap/Escape behavior.
+  // Drain cap>1 on a non-git workspace root (issue 158, ADR-0017): explains
+  // the limitation instead of silently proceeding, and offers a one-click fix.
+  // "Initialize git" runs the IPC then resumes the SAME drain immediately
+  // (proceedDrain bypasses the gate — it's what just got fixed); "Drain
+  // serially" resumes unchanged, relying on issue 157's engine-side clamp;
+  // closing (Escape/backdrop/Cancel) starts nothing.
+  const gitInitDialog = (
+    <Dialog
+      open={gitInitPrompt !== null}
+      onOpenChange={(open) => {
+        if (!open) {
+          setGitInitPrompt(null);
+          setGitInitError(null);
+        }
+      }}
+    >
+      {gitInitPrompt !== null && (
+        <DialogContent>
+          <DialogTitle>Not under git yet</DialogTitle>
+          <DialogDescription>
+            <strong>{activeProject?.label ?? 'This project'}</strong>'s workspace root isn't a git
+            repository, so Mission Control can't cut worktrees here — a concurrent drain would
+            collide on the same tree. Initialize git now to enable up to {gitInitPrompt.cap} at
+            once, or drain one at a time instead.
+          </DialogDescription>
+          {gitInitError && <p className="app__gitinit-error">{gitInitError}</p>}
+          <DialogActions>
+            <Button
+              variant="primary"
+              disabled={gitInitBusy}
+              onClick={() => {
+                if (!activeProject) return;
+                const chosenCap = gitInitPrompt.cap;
+                setGitInitBusy(true);
+                setGitInitError(null);
+                void window.mc
+                  .gitInit({ projectKey: activeProject.key })
+                  .then((res) => {
+                    setGitInitBusy(false);
+                    if (!res.ok) {
+                      setGitInitError(res.error ?? 'Could not initialize git.');
+                      return;
+                    }
+                    setGitInitPrompt(null);
+                    proceedDrain(chosenCap);
+                  })
+                  .catch((err) => {
+                    setGitInitBusy(false);
+                    setGitInitError(err instanceof Error ? err.message : String(err));
+                  });
+              }}
+            >
+              {gitInitBusy ? 'Initializing…' : 'Initialize git'}
+            </Button>
+            <Button
+              variant="secondary"
+              disabled={gitInitBusy}
+              onClick={() => {
+                const chosenCap = gitInitPrompt.cap;
+                setGitInitPrompt(null);
+                proceedDrain(chosenCap);
+              }}
+              title="Proceed without initializing git — Runs serialize on this workspace root"
+            >
+              Drain serially
+            </Button>
+            <Button
+              variant="ghost"
+              className="ui-btn--end"
+              disabled={gitInitBusy}
+              onClick={() => setGitInitPrompt(null)}
+            >
+              Cancel
+            </Button>
+          </DialogActions>
+        </DialogContent>
+      )}
+    </Dialog>
+  );
+
   const openChoiceDialog = (
     <Dialog
       open={pendingOpenChoice !== null}
@@ -4300,6 +4412,7 @@ export function App(): JSX.Element {
         <>
           {interruptDialog}
           {openChoiceDialog}
+          {gitInitDialog}
           <CommandPalette
             open={paletteOpen}
             onOpenChange={setPaletteOpen}
@@ -4375,6 +4488,7 @@ export function App(): JSX.Element {
             onDebrief={debriefDrain}
             cap={cap}
             onCapChange={setCap}
+            notUnderGit={notUnderGit}
             mergeAffordance={mergeAffordance}
             onResolveConflict={resolveConflict}
             onMergeStrays={mergeStrays}

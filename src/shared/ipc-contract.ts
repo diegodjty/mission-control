@@ -372,6 +372,16 @@ export const IpcChannel = {
    * Resolves to a RepoRegisterResult.
    */
   RepoRegister: 'repo:register',
+  /**
+   * renderer → main (invoke): one-click "Initialize git" (issue 158, ADR-0017)
+   * for a repo-less project whose workspace root is not yet a git repository —
+   * the human's fix for the "Runs can't isolate here" state issue 157's engine
+   * surfaces. Runs `git init` + an initial commit in the workspace root, then
+   * registers it via the same self-heal path `RepoRegister` uses (adds it as
+   * the project's `default_repo`, one workbench commit). Fires ONLY on this
+   * explicit call — never from a load/scan path. Resolves to a GitInitResult.
+   */
+  GitInit: 'git:init',
 } as const;
 
 export type IpcChannel = (typeof IpcChannel)[keyof typeof IpcChannel];
@@ -953,6 +963,12 @@ export interface ProjectView {
   plannedRepoKeys: string[];
   stage: PipelineStage;
   ownership: 'you' | 'other' | 'free';
+  /**
+   * True when this Project's default repo is a repo-less workspace root that
+   * is NOT (yet) an actual git repository (issue 158, ADR-0017) — the Map
+   * badge and the Drain-time "Initialize git" offer both key off this.
+   */
+  notUnderGit: boolean;
 }
 
 /** The calling Window's view of the Project registry. */
@@ -1192,6 +1208,12 @@ export interface LauncherProject {
   counts: { open: number; wip: number; done: number };
   /** ISO-8601 of the most recent issue/Receipt file change, or null. */
   lastActivity: string | null;
+  /**
+   * True when this Project's default repo is a repo-less workspace root that
+   * is NOT (yet) an actual git repository (issue 158, ADR-0017) — the card's
+   * "not under git" badge.
+   */
+  notUnderGit: boolean;
 }
 
 export interface LauncherListResult {
@@ -1303,6 +1325,20 @@ export interface RepoRegisterResult {
    */
   warning: string | null;
   /** The key actually registered, on success. */
+  key: string | null;
+}
+
+export interface GitInitRequest {
+  /** The Project's ownership key (workbench project dir, or legacy repo path). */
+  projectKey: string;
+}
+
+export interface GitInitResult {
+  /** True when `git init` + the initial commit + registration all landed. */
+  ok: boolean;
+  /** A human-readable refusal/failure reason when `ok` is false, else null. */
+  error: string | null;
+  /** The `repos:` key registered, on success. */
   key: string | null;
 }
 
@@ -1611,6 +1647,13 @@ export interface MissionControlApi {
    * the CONFIG `repos:` entry + a registry line, auto-committed.
    */
   registerRepo(req: RepoRegisterRequest): Promise<RepoRegisterResult>;
+  /**
+   * One-click "Initialize git" (issue 158, ADR-0017): `git init` + an initial
+   * commit in a repo-less project's non-git workspace root, then registers it
+   * as the project's `default_repo` via the same self-heal path `registerRepo`
+   * uses. Fires only on this explicit call.
+   */
+  gitInit(req: GitInitRequest): Promise<GitInitResult>;
   /**
    * Read one issue file's raw text for the Map's editor (issue 89) — fresh
    * off disk, restricted to the Project's issues root.

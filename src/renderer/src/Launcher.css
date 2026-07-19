@@ -253,6 +253,10 @@
   font-size: 10px;
 }
 
+.launcher__card-nogit {
+  font-size: 10px;
+}
+
 /* Liveness (issue 118): a live dot + "N running" when a Run is live — the
    mock's "● live". Absent when nothing is running (the footer then carries the
    last-activity time). */
@@ -383,6 +387,11 @@
   flex: 0 0 auto;
   min-width: 20px;
   justify-content: center;
+  font-size: 10px;
+}
+
+.launcher__row-nogit {
+  flex: 0 0 auto;
   font-size: 10px;
 }
 
