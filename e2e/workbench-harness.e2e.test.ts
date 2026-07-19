@@ -78,25 +78,8 @@ import {
 import { CORE_MEMORY_LABEL } from '../src/shared/workbench-memory';
 import { planDrain, type ActiveRun, type DrainPlan } from '../src/shared/run-coordinator';
 import { deriveRunStatus } from '../src/shared/run-state';
-import {
-  lifecycleKindForOutcome,
-  actionForLifecycle,
-  reactToLifecycleEvent,
-} from '../src/shared/dispatcher-lifecycle';
-import { channelForAction } from '../src/shared/dispatcher-channel';
-import {
-  narrativeChannelFor,
-  narrativeKindForLifecycle,
-  narrativeKeyFor,
-} from '../src/shared/dispatcher-narrative';
-import {
-  renderCompletionEvent,
-  toCompletionEvent,
-} from '../src/shared/dispatcher-input-contract';
-import { createDispatcherPump } from '../src/shared/dispatcher-pump';
 import { auditMissingReceipts, latestReceiptOutcomeFor } from '../src/shared/receipt-audit';
 import { isRealCapture } from '../src/shared/dispatcher-noise-floor';
-import { parseReceipt } from '../src/shared/receipt-parser';
 import type { RunLogRecord } from '../src/shared/ipc-contract';
 import type { IssueStatus } from '../src/shared/backlog-model';
 import {
@@ -106,7 +89,6 @@ import {
   git,
   waitFor,
   sleep,
-  FakePty,
   WORKBENCH_CORE_FACT,
   type WorkbenchSandbox,
 } from './sandbox';
@@ -399,104 +381,6 @@ describe('e2e workbench harness — real modules over the workbench fixture', ()
 
     // Zero ghosts, all declared (the noise floor holds on this fixture too).
     expect(records.every((r) => r.outcome !== 'unknown' && isRealCapture(r))).toBe(true);
-  });
-
-  // ---------------------------------------------------------------------------
-  // Scenario b — Receipts land in the WORKBENCH completions root (one root for
-  // the whole project) and drive exactly ONE narrative message each through
-  // the real pump; the HITL park notice arrives on the same chat channel.
-  // ---------------------------------------------------------------------------
-  it('Scenario b: Receipts land in the workbench completions root and drive one narrative message each', async () => {
-    ingestFrom(wb.projectRoot);
-    const identity = fixtureIdentity(wb.repoA);
-
-    const pty = new FakePty();
-    pty.create('dispatcher');
-    const pump = createDispatcherPump({ write: pty.write, canFlush: () => true });
-    pump.attachSession('dispatcher');
-
-    // Route each ingested record the way App.tsx does under ADR-0014:
-    // completed → the rendered block as chat narrative; HITL park → the
-    // blocking notice. Enqueue twice per key — dedupe keeps delivery at one.
-    const narrate = async (rec: RunLogRecord): Promise<void> => {
-      const backlog = await readBacklogAt(identity.issuesRoot);
-      const hitl = backlog.issues.find((i) => i.id === rec.issueId)?.hitl ?? false;
-      const kind = lifecycleKindForOutcome(rec.outcome, hitl);
-      if (kind === 'finished') {
-        expect(narrativeChannelFor(narrativeKindForLifecycle(kind))).toBe('chat');
-        const text = renderCompletionEvent(toCompletionEvent({ id: rec.id, record: rec }));
-        expect(pump.enqueue({ key: narrativeKeyFor(rec.id), text })).toBe(true);
-        expect(pump.enqueue({ key: narrativeKeyFor(rec.id), text })).toBe(false);
-      } else if (kind === 'hitl-waiting') {
-        const reaction = reactToLifecycleEvent({
-          kind,
-          runId: rec.id,
-          issueId: rec.issueId,
-          slug: rec.slug,
-          title: rec.title,
-          detail: rec.detail,
-        });
-        expect(channelForAction(actionForLifecycle(kind))).toBe('chat');
-        pump.enqueue({ key: `hitl-waiting:${rec.id}`, text: reaction.notification! });
-        pump.enqueue({ key: `hitl-waiting:${rec.id}`, text: reaction.notification! });
-      }
-      await waitFor(() => pump.pending() === 0, `narrative for issue ${rec.issueId} delivered`);
-    };
-
-    const result = await driveDrain(identity, {
-      exits: new Map<number, WorkerExit>([
-        [2, 'completed'],
-        [3, 'completed'],
-        [4, 'completed'],
-        [5, 'needs-verification'],
-        [8, 'completed'],
-      ]),
-      onReceiptIngested: narrate,
-    });
-    expect(result.stop?.reason).toBe('no-eligible');
-
-    // Every Receipt sits under the ONE workbench completions root — and no
-    // Receipt-shaped file exists in either code repo.
-    const receipts = (await readdir(wb.completionsRoot)).sort();
-    expect(receipts).toEqual([
-      '02-core-api.md',
-      '03-b-consumes-core.md',
-      '04-b-independent.md',
-      '05-manual-check.md',
-      '08-a-followup.md',
-    ]);
-    expect(existsSync(join(wb.repoA, 'issues', 'completions'))).toBe(false);
-    expect(existsSync(join(wb.repoB, 'issues', 'completions'))).toBe(false);
-
-    // Declared, not inferred — and identity is the ADR-0013 dedupe key.
-    for (const rec of records) {
-      const text = await readFile(join(wb.completionsRoot, `${rec.slug}.md`), 'utf8');
-      expect(parseReceipt(text).outcomeSource).toBe('declared');
-      expect(rec.id).toBe(`receipt:${rec.slug}:${parseReceipt(text).finished}`);
-    }
-
-    // Exactly ONE conversation message per finished Run + one park notice.
-    const messages = pty.submittedMessages('dispatcher');
-    expect(messages).toHaveLength(5);
-    for (const id of [2, 3, 4, 8]) {
-      const label = String(id).padStart(2, '0');
-      const mine = messages.filter((m) =>
-        m.includes(`Completion block for issue ${label} (completed)`),
-      );
-      expect(mine, `one message for issue ${label}`).toHaveLength(1);
-      expect(mine[0]).toContain('What changed');
-      expect(mine[0]).toContain(workbenchIssue(id).title);
-    }
-    const park = messages.find((m) => m.includes('HITL gate waiting'));
-    expect(park).toBeDefined();
-    expect(park!).toContain('05');
-    expect(park!).toContain('manual verification');
-
-    // The durable Run log agrees, with unique ids (no double-feeds).
-    await Promise.all(appends);
-    const persisted = await store.read(wb.projectRoot);
-    expect(persisted).toHaveLength(5);
-    expect(new Set(persisted.map((r) => r.id)).size).toBe(5);
   });
 
   // ---------------------------------------------------------------------------

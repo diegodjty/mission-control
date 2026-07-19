@@ -598,17 +598,14 @@ body {
   min-width: 0;
 }
 
-/* The Map column and the Dispatcher chat panel sit side by side in the Map
-   view slot (ADR-0010): the Map takes the room, the Dispatcher a fixed rail. */
+/* The Map column fills the Map view slot; the Dispatcher chat panel that used
+   to sit beside it is retired (ADR-0022). */
 .app__map-col {
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
   display: flex;
 }
-
-/* The Dispatcher panel's styles live in its own per-view stylesheet,
-   Dispatcher.css (issue 130) — imported by DispatcherPanel.tsx. */
 
 /* The Pane (cockpit) view's styles — the tiled Run grid, per-tile headers (the
    status dot, Run/issue labels, and maximize control), the run controls, and
