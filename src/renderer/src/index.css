@@ -1045,6 +1045,66 @@ body {
   font-size: 12px;
 }
 
+/* CORE proposal Accept/Dismiss (issue 169) — the modal's confirm footer. */
+.attention__modal-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+}
+
+.attention__proposal-actions,
+.attention__proposal-confirm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.attention__proposal-confirm-text {
+  margin-right: auto;
+  font-size: 12px;
+  color: var(--fg-mute);
+}
+
+.attention__proposal-action {
+  font: inherit;
+  font-size: 12px;
+  color: var(--fg-mute);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 5px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.attention__proposal-action:hover:not(:disabled) {
+  color: var(--teal);
+  border-color: var(--border-teal);
+}
+
+.attention__proposal-action:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.attention__proposal-action--accept {
+  color: var(--green-soft);
+  border-color: var(--green-border);
+  background: var(--green-bg);
+}
+
+.attention__proposal-action--accept:hover:not(:disabled) {
+  color: var(--green);
+}
+
+.attention__proposal-action--dismiss:hover:not(:disabled) {
+  color: var(--red-soft);
+  border-color: var(--red-border);
+}
+
 /* An Inbox click-through's file reference, above the Map (issue 80). */
 .app__inbox-focus {
   display: flex;

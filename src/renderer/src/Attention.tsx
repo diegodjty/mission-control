@@ -17,6 +17,11 @@ type DocViewerTarget =
   | { kind: 'curator-report'; name: string; label: string }
   | { kind: 'curator-proposal'; project: string };
 
+/** The proposal modal's confirm step (issue 169) — Accept requires an
+ *  explicit second click naming it as the CORE.md sign-off; Dismiss does not
+ *  (it discards a proposal, never CORE.md itself, so nothing to sign off). */
+type ProposalConfirm = 'accept' | null;
+
 interface AttentionProps {
   /** The live aggregated cross-project attention snapshot (issue 79). */
   snapshot: AttentionSnapshot;
@@ -78,7 +83,8 @@ export function Attention({
   const [elsewhereExpanded, setElsewhereExpanded] = useState(false);
   // The rendered-doc modal (issue 151): a curator report or a CORE proposal
   // diff. Opening one is a LOCAL view, never the project-switch click-through
-  // the other item kinds use — read-only v1 has no write path from here.
+  // the other item kinds use. A curator report stays read-only; a CORE
+  // proposal gets Accept/Dismiss (issue 169) from inside the same modal.
   const [docViewer, setDocViewer] = useState<DocViewerTarget | null>(null);
 
   const openReport = (item: AttentionItem): void => {
@@ -362,8 +368,9 @@ function AttentionGroupSection({
             </li>
           ) : item.kind === 'curator-proposal' ? (
             /* A CORE proposal opens the rendered proposed-vs-current view in
-               place (issue 151) — never a project switch. Read-only v1: no
-               write path exists here; accept/reject stays a human edit. */
+               place (issue 151) — never a project switch. That view carries
+               Accept/Dismiss (issue 169); a confirmed Accept click is the
+               human's CORE.md sign-off. */
             <li key={item.id} className="attention__item-cell">
               <button
                 className={`attention__item attention__item--${item.kind}`}
@@ -446,12 +453,13 @@ interface DocViewerModalProps {
 }
 
 /**
- * The rendered read-only doc view for curator reports and CORE proposals
- * (issue 151): a curator report renders as one pane; a proposal renders two
- * panes side by side (proposed vs current) so the diff is judgeable at a
- * glance. Reuses the Planning view's markdown parse/render — the exact same
- * legible rendering, not a second implementation. Read-only: no write path
- * exists from this surface (accept/reject stays a human edit outside MC).
+ * The rendered doc view for curator reports and CORE proposals (issue 151): a
+ * curator report renders as one pane; a proposal renders two panes side by
+ * side (proposed vs current) so the diff is judgeable at a glance. Reuses the
+ * Planning view's markdown parse/render — the exact same legible rendering,
+ * not a second implementation. A curator report stays read-only; a CORE
+ * proposal (issue 169) gets Accept/Dismiss — the confirmed Accept click IS
+ * the human's CORE.md sign-off (ADR-0015), the only path that writes it.
  */
 function DocViewerModal({ target, onClose }: DocViewerModalProps): JSX.Element {
   const [report, setReport] = useState<{ text: string | null; error: string | null }>({
@@ -462,6 +470,13 @@ function DocViewerModal({ target, onClose }: DocViewerModalProps): JSX.Element {
     proposed: { text: string | null; error: string | null };
     current: { text: string | null; error: string | null };
   }>({ proposed: { text: null, error: null }, current: { text: null, error: null } });
+  // Accept needs an explicit second click naming the sign-off; Dismiss acts
+  // straight away. `busy` disables both buttons mid-flight so a double click
+  // can never fire two writes. `actionError` surfaces a failed accept/dismiss
+  // in place — the modal stays open so the human can retry or close.
+  const [confirm, setConfirm] = useState<ProposalConfirm>(null);
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -495,6 +510,30 @@ function DocViewerModal({ target, onClose }: DocViewerModalProps): JSX.Element {
     };
   }, [target]);
 
+  const runAction = (
+    action: (req: { project: string }) => Promise<{ ok: boolean; error: string | null }>,
+  ): void => {
+    if (target.kind !== 'curator-proposal' || busy) return;
+    setBusy(true);
+    setActionError(null);
+    void action({ project: target.project })
+      .then((res) => {
+        if (res.ok) {
+          onClose();
+        } else {
+          setBusy(false);
+          setActionError(res.error ?? 'The action failed.');
+        }
+      })
+      .catch((err: unknown) => {
+        setBusy(false);
+        setActionError(err instanceof Error ? err.message : String(err));
+      });
+  };
+
+  const doAccept = (): void => runAction(window.mc.acceptCoreProposal);
+  const doDismiss = (): void => runAction(window.mc.dismissCoreProposal);
+
   return (
     <div className="attention__modal-overlay" onClick={onClose}>
       <div className="attention__modal" onClick={(e) => e.stopPropagation()}>
@@ -516,6 +555,55 @@ function DocViewerModal({ target, onClose }: DocViewerModalProps): JSX.Element {
             </>
           )}
         </div>
+        {target.kind === 'curator-proposal' && (
+          <footer className="attention__modal-foot">
+            {actionError !== null && <p className="attention__error">{actionError}</p>}
+            {confirm === 'accept' ? (
+              <div className="attention__proposal-confirm">
+                <span className="attention__proposal-confirm-text">
+                  This applies the proposed CORE.md — your sign-off.
+                </span>
+                <button
+                  type="button"
+                  className="attention__proposal-action attention__proposal-action--accept"
+                  onClick={doAccept}
+                  disabled={busy || proposal.proposed.text === null}
+                >
+                  {busy ? 'Applying…' : 'Confirm accept'}
+                </button>
+                <button
+                  type="button"
+                  className="attention__proposal-action"
+                  onClick={() => setConfirm(null)}
+                  disabled={busy}
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <div className="attention__proposal-actions">
+                <button
+                  type="button"
+                  className="attention__proposal-action attention__proposal-action--dismiss"
+                  onClick={doDismiss}
+                  disabled={busy || proposal.proposed.text === null}
+                  title="Delete the proposed CORE.md — the current CORE.md stays untouched"
+                >
+                  Dismiss
+                </button>
+                <button
+                  type="button"
+                  className="attention__proposal-action attention__proposal-action--accept"
+                  onClick={() => setConfirm('accept')}
+                  disabled={busy || proposal.proposed.text === null}
+                  title="Replace CORE.md with the proposed content"
+                >
+                  Accept
+                </button>
+              </div>
+            )}
+          </footer>
+        )}
       </div>
     </div>
   );

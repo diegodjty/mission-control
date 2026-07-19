@@ -337,6 +337,20 @@ export const IpcChannel = {
    */
   CoreProposalRead: 'core-proposal:read',
   /**
+   * renderer → main (invoke): accept a project's proposed CORE.md (issue 169)
+   * — the human's confirmed sign-off. Replaces `memory/CORE.md` with the
+   * proposed content, removes `memory/CORE.proposed.md`, and auto-commits.
+   * This is the ONLY code path that writes `memory/CORE.md`. Resolves to a
+   * CoreProposalActionResult.
+   */
+  CoreProposalAccept: 'core-proposal:accept',
+  /**
+   * renderer → main (invoke): dismiss a project's proposed CORE.md (issue
+   * 169) — removes `memory/CORE.proposed.md` only; `memory/CORE.md` is never
+   * touched. Resolves to a CoreProposalActionResult.
+   */
+  CoreProposalDismiss: 'core-proposal:dismiss',
+  /**
    * renderer → main (invoke): the Launcher's New project flow (issue 82,
    * ADR-0016; repo-less projects, issue 93 / ADR-0017) — validate a project
    * name + workspace root + ZERO or more repo drafts against the workbench and,
@@ -1541,6 +1555,19 @@ export interface CoreProposalReadResult {
   error: string | null;
 }
 
+/** Accept or dismiss a project's proposed CORE.md (issue 169). */
+export interface CoreProposalActionRequest {
+  /** The workbench project directory name (matches an attention item's `project`). */
+  project: string;
+}
+
+export interface CoreProposalActionResult {
+  /** True when the action landed on disk. */
+  ok: boolean;
+  /** Why the action was refused/failed, else null. */
+  error: string | null;
+}
+
 /** One repo row of the New project form: a short key + a path (issue 82). */
 export interface OnboardingRepoDraft {
   /** The CONFIG `repos:` map key (no spaces/colons). */
@@ -1774,6 +1801,13 @@ export interface MissionControlApi {
   ): Promise<CuratorReportMarkSeenResult>;
   /** Read a project's proposed CORE.md beside its current CORE.md (issue 151). */
   readCoreProposal(req: CoreProposalReadRequest): Promise<CoreProposalReadResult>;
+  /**
+   * Accept a project's proposed CORE.md (issue 169) — the human's confirmed
+   * sign-off; the only path that writes `memory/CORE.md`.
+   */
+  acceptCoreProposal(req: CoreProposalActionRequest): Promise<CoreProposalActionResult>;
+  /** Dismiss a project's proposed CORE.md (issue 169) — `CORE.md` untouched. */
+  dismissCoreProposal(req: CoreProposalActionRequest): Promise<CoreProposalActionResult>;
   spawnPty(req: PtySpawnRequest): Promise<PtySpawnResult>;
   writePty(msg: PtyWriteMessage): void;
   resizePty(msg: PtyResizeMessage): void;
