@@ -179,10 +179,18 @@ describe('startSomething (verb → target routing)', () => {
     expect(target.project).toBe(project);
   });
 
-  it('uses the exact ADR-0019 labels for both verbs', () => {
+  it('routes "Just talk" to a warm bare Pane (issue 168)', () => {
+    const target = startSomething('talk', project);
+    expect(target.route).toBe('talk');
+    expect(target.label).toBe('Just talk');
+    expect(target.project).toBe(project);
+  });
+
+  it('uses the exact ADR-0019 labels for all verbs', () => {
     expect(START_VERB_LABELS).toEqual({
       grill: 'Grill a feature',
       simple: 'Simple issue',
+      talk: 'Just talk',
     });
   });
 });

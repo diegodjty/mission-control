@@ -4508,6 +4508,7 @@ export function App(): JSX.Element {
             startProject={mapStartProject}
             onGrillFeature={(p) => void startPlanning(p)}
             onQuickFixRunNow={(p, issue) => void runQuickFixNow(p, issue)}
+            onJustTalk={(p) => talkToProject(p)}
           />
           </div>
           {/* The Dispatcher chat panel beside the Map (ADR-0010): present once a
