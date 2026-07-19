@@ -473,6 +473,15 @@ export function Launcher({
                           {c.stageLabel}
                         </Badge>
                       )}
+                      {c.notUnderGit && (
+                        <Badge
+                          tone="amber"
+                          className="launcher__row-nogit"
+                          title="This project's workspace root isn't a git repository yet — Runs can't isolate here until it is."
+                        >
+                          not under git
+                        </Badge>
+                      )}
                       <span className="launcher__row-counts">{c.countsLabel}</span>
                       {c.needsYou > 0 && (
                         <Badge
@@ -526,6 +535,15 @@ export function Launcher({
                         )}
                         {c.liveRuns > 0 && (
                           <span className="launcher__card-live">{c.livenessLabel}</span>
+                        )}
+                        {c.notUnderGit && (
+                          <Badge
+                            tone="amber"
+                            className="launcher__card-nogit"
+                            title="This project's workspace root isn't a git repository yet — Runs can't isolate here until it is."
+                          >
+                            not under git
+                          </Badge>
                         )}
                       </span>
                       <span className="launcher__card-counts">{c.countsLabel}</span>

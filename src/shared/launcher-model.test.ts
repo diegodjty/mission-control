@@ -532,6 +532,7 @@ describe('buildProjectGrid', () => {
     completionsRoot: '/Users/dev/Workbench/p/completions',
     counts: { open: 0, wip: 0, done: 0 },
     lastActivity: null,
+    notUnderGit: false,
     ...over,
   });
 

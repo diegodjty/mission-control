@@ -199,6 +199,13 @@ interface MapProps {
    * freshly created quick-fix issue — the same `runQuickFixNow` the Launcher used.
    */
   onQuickFixRunNow?: (project: LauncherProject, issue: QuickFixIssueRef) => void;
+  /**
+   * True when this Project's workspace root is repo-less and not (yet) a git
+   * repository (issue 158, ADR-0017) — shows the "not under git" badge next
+   * to the run controls; Drain's cap>1 gate (in the parent) reads the same
+   * signal to offer "Initialize git" instead of silently proceeding.
+   */
+  notUnderGit?: boolean;
 }
 
 /**
@@ -247,6 +254,7 @@ export function Map({
   startProject,
   onGrillFeature,
   onQuickFixRunNow,
+  notUnderGit,
 }: MapProps = {}): JSX.Element {
   const activeRunSet = new Set(activeRunIssueIds ?? []);
   // Merge-preview verdicts keyed by issue id (issues 104 & 105): the
@@ -660,6 +668,15 @@ export function Map({
               )}
 
             <div className="map__controls-run">
+              {notUnderGit && (
+                <Badge
+                  tone="amber"
+                  className="map__nogit-badge"
+                  title="This project's workspace root isn't a git repository yet — Runs can't isolate here until it is."
+                >
+                  not under git
+                </Badge>
+              )}
               {onDrain && (
                 <label className="map__cap">
                   max concurrent
