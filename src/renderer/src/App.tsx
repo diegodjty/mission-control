@@ -57,12 +57,7 @@ import type { DispatcherAction } from '../../shared/dispatcher-authority';
 import { decideDispatcherMerge } from '../../shared/dispatcher-merge';
 import { decideAutoMergeLane, laneBranchesFrom } from '../../shared/auto-merge-lane';
 import { decideMergeAffordance, type MergeAffordance } from '../../shared/merge-affordance';
-import {
-  describeDocDrift,
-  detectCrossRunOverlap,
-  extractDocDrift,
-} from '../../shared/dispatcher-synthesis';
-import { isRealCapture, isStrongOverlap } from '../../shared/dispatcher-noise-floor';
+import { isRealCapture, isRealDocDrift } from '../../shared/dispatcher-noise-floor';
 import {
   reconcileStatusModel,
   renderStatusModel,
@@ -784,10 +779,6 @@ export function App(): JSX.Element {
   // `<kind>:<runId>`) have already produced a note, so a re-render / re-scan
   // doesn't re-note one.
   const lifecycleReacted = useRef<Set<string>>(new Set<string>());
-  // Cross-Run synthesis (issue 38): which shared seams have already been
-  // surfaced as a cross-Run pattern, so a re-scan doesn't re-note the same
-  // "these Runs all hit X" line each poll.
-  const overlapSurfaced = useRef<Set<string>>(new Set<string>());
   // Ground-truth status re-grounding (issue 43): the last status-model text
   // noted, so it is re-noted only when the reconciled done/wip/open/
   // finished-unmerged picture actually changes — not on every render/poll.
@@ -963,7 +954,6 @@ export function App(): JSX.Element {
     activityFed.current.clear();
     setActivityNotes([]);
     lifecycleReacted.current.clear();
-    overlapSurfaced.current.clear();
     statusRefreshSig.current = null;
     statusDebounce.current = initialStatusDebounceState();
     seenReconciled.current = null;
@@ -2356,38 +2346,21 @@ export function App(): JSX.Element {
       } else {
         logNote(`synthesize:${rec.id}`, 'synthesize', text);
       }
-      // Cross-Run synthesis (issue 38, acceptance a): a block that reports
-      // doc-drift (a PRD/reality contradiction) surfaces as a plain-language
-      // note. Doc-drift free / "none" blocks add nothing.
-      const [drift] = extractDocDrift([rec]);
-      if (drift) {
+      // Per-Run doc-drift (issue 38; retired to per-Run scope by ADR-0022 / issue
+      // 162): a block that reports doc-drift (a PRD/reality contradiction)
+      // surfaces as a plain-language note. Doc-drift free / "none" blocks add
+      // nothing. The cross-Run consolidation this used to feed (pattern
+      // detection across Runs) is retired — a completion block's own Doc drift
+      // line is the whole story now.
+      if (isRealDocDrift(rec)) {
+        const label =
+          rec.issueId !== null ? `issue ${String(rec.issueId).padStart(2, '0')}` : rec.issue ?? `run ${rec.id}`;
         logNote(
           `doc-drift:${rec.id}`,
           'amend-plan',
-          `${describeDocDrift(drift)} — the plan may need amending to reconcile it.`,
+          `Doc-drift flagged by ${label}: ${rec.docDrift!.trim()} — the plan may need amending to reconcile it.`,
         );
       }
-    }
-    // Cross-Run patterns (issue 38, acceptance b/c): once ≥2 Runs touch the same
-    // seam (a file, a named "… seam", a shared identifier), consolidate them into
-    // ONE noted line instead of leaving the user to spot it across cards. The
-    // detection is the pure `detectCrossRunOverlap` over the captured records.
-    // Noise floor (issue 47, ADR-0012): consolidation is demoted to a RARE note —
-    // `isStrongOverlap` gates it to a strong concrete overlap (a real shared
-    // file/seam, not the PRD/config/skill boilerplate or a junk token), and
-    // `overlapSurfaced` guards each seam so it is noted at most once, never the
-    // per-tick "consolidate?" firehose. A weak/false overlap surfaces nothing.
-    for (const group of detectCrossRunOverlap(runLog).filter(isStrongOverlap)) {
-      if (overlapSurfaced.current.has(group.seam)) continue;
-      overlapSurfaced.current.add(group.seam);
-      const runs = group.runs
-        .map((r) => (r.issueId !== null ? `issue ${String(r.issueId).padStart(2, '0')}` : r.runId))
-        .join(', ');
-      logNote(
-        `overlap:${group.seam}`,
-        'synthesize',
-        `${group.runs.length} Runs touched ${group.seam} (${runs}) — consider a consolidated pass rather than treating each separately.`,
-      );
     }
   }, [runLog, logNote]);
 
