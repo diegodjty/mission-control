@@ -28,11 +28,11 @@ import {
 import {
   actionForLifecycle,
   reactToLifecycleEvent,
-} from './dispatcher-lifecycle';
+} from './run-lifecycle';
 import { classifyAuthority } from './action-authority';
-import { isRealCapture } from './dispatcher-noise-floor';
+import { isRealCapture } from './notification-noise-floor';
 import { toReceiptRunLogRecord } from './receipt-ingest';
-import { reconcileStatusModel } from './dispatcher-status-model';
+import { reconcileStatusModel } from './drain-status-model';
 import { buildBacklog, type RawFile } from './backlog-model';
 import type { RunLogRecord } from './ipc-contract';
 import type { RunOutcome } from './completion-parser';

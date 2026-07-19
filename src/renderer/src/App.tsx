@@ -39,34 +39,34 @@ import type {
 import {
   renderCompletionEvent,
   toCompletionEvent,
-} from '../../shared/dispatcher-input-contract';
+} from '../../shared/capture-contract';
 import {
-  createDispatcherPump,
+  createSubmitPump,
   canFlushChat,
   reduceTyping,
   INITIAL_TYPING_STATE,
-  type DispatcherPump,
+  type SubmitPump,
   type TypingState,
-} from '../../shared/dispatcher-pump';
+} from '../../shared/submit-pump';
 import {
   actionForLifecycle,
   lifecycleKindForOutcome,
   reactToLifecycleEvent,
   type LifecycleEvent,
-} from '../../shared/dispatcher-lifecycle';
+} from '../../shared/run-lifecycle';
 import { isProtectedBranch, type DispatcherAction } from '../../shared/action-authority';
 import { decideDispatcherMerge } from '../../shared/merge-classification';
 import { decideAutoMergeLane, laneBranchesFrom } from '../../shared/auto-merge-lane';
 import { decideMergeAffordance, type MergeAffordance } from '../../shared/merge-affordance';
-import { isRealCapture, isRealDocDrift } from '../../shared/dispatcher-noise-floor';
+import { isRealCapture, isRealDocDrift } from '../../shared/notification-noise-floor';
 import {
   reconcileStatusModel,
   renderStatusModel,
   debounceStatusModel,
   initialStatusDebounceState,
-  type DispatcherStatusModel,
+  type DrainStatusModel,
   type StatusDebounceState,
-} from '../../shared/dispatcher-status-model';
+} from '../../shared/drain-status-model';
 import {
   deriveRunStatus,
   observedIssueStatus,
@@ -651,9 +651,9 @@ export function App(): JSX.Element {
   // state, not the Dispatcher's.
   const [planning, setPlanning] = useState<PlanningTargetState | null>(null);
   const planningTyping = useRef<TypingState>(INITIAL_TYPING_STATE);
-  const planningPumpRef = useRef<DispatcherPump | null>(null);
+  const planningPumpRef = useRef<SubmitPump | null>(null);
   if (planningPumpRef.current === null) {
-    planningPumpRef.current = createDispatcherPump({
+    planningPumpRef.current = createSubmitPump({
       write: (sessionId, data) => window.mc.writePty({ sessionId, data }),
       canFlush: (now) => canFlushChat(planningTyping.current, now),
     });
@@ -668,9 +668,9 @@ export function App(): JSX.Element {
   // defer-while-typing gate is the talk session's own compose state, not the
   // Dispatcher's or Planning's.
   const talkTyping = useRef<TypingState>(INITIAL_TYPING_STATE);
-  const talkPumpRef = useRef<DispatcherPump | null>(null);
+  const talkPumpRef = useRef<SubmitPump | null>(null);
   if (talkPumpRef.current === null) {
-    talkPumpRef.current = createDispatcherPump({
+    talkPumpRef.current = createSubmitPump({
       write: (sessionId, data) => window.mc.writePty({ sessionId, data }),
       canFlush: (now) => canFlushChat(talkTyping.current, now),
     });
@@ -809,8 +809,8 @@ export function App(): JSX.Element {
   // makes the advance idempotent under StrictMode's double-invoke: the debounce
   // advances exactly once per DISTINCT reconciled model, never twice for one.
   const statusDebounce = useRef<StatusDebounceState>(initialStatusDebounceState());
-  const seenReconciled = useRef<DispatcherStatusModel | null>(null);
-  const debouncedStatusModelRef = useRef<DispatcherStatusModel | null>(null);
+  const seenReconciled = useRef<DrainStatusModel | null>(null);
+  const debouncedStatusModelRef = useRef<DrainStatusModel | null>(null);
 
   // --- Merge state (issue 08; issue 17) ------------------------------------
   // `mergeDisplay` is the pure selector's decision of what the Merge UI shows
@@ -2447,13 +2447,13 @@ export function App(): JSX.Element {
   // and drift the picture (the issue-35 bug: 03/04 reported "still to run" when
   // done). The blocks above remain the QUALITATIVE synthesis; status comes from
   // here. Recomputed as the backlog / scan / Run log change.
-  const dispatcherStatusModel = useMemo(
+  const drainStatusModel = useMemo(
     () => reconcileStatusModel({ backlog, worktreeStates: worktreeRunStates, runLog }),
     [backlog, worktreeRunStates, runLog],
   );
 
   // Debounce backward status moves before surfacing (issue 49, ADR-0012). Each
-  // recompute of `dispatcherStatusModel` above is one reconcile CHECKPOINT: a
+  // recompute of `drainStatusModel` above is one reconcile CHECKPOINT: a
   // BACKWARD move (finished/finished-unmerged → open, done → not-done) is held at
   // its prior status until it persists across a further checkpoint, killing the
   // transient mid-reconcile blip; FORWARD moves surface immediately. The advance
@@ -2461,15 +2461,15 @@ export function App(): JSX.Element {
   // StrictMode double-invokes the memo (advancing twice would falsely "confirm" a
   // one-snapshot regression).
   const debouncedStatusModel = useMemo(() => {
-    if (seenReconciled.current === dispatcherStatusModel && debouncedStatusModelRef.current) {
+    if (seenReconciled.current === drainStatusModel && debouncedStatusModelRef.current) {
       return debouncedStatusModelRef.current;
     }
-    const { model, state } = debounceStatusModel(dispatcherStatusModel, statusDebounce.current);
+    const { model, state } = debounceStatusModel(drainStatusModel, statusDebounce.current);
     statusDebounce.current = state;
-    seenReconciled.current = dispatcherStatusModel;
+    seenReconciled.current = drainStatusModel;
     debouncedStatusModelRef.current = model;
     return model;
-  }, [dispatcherStatusModel]);
+  }, [drainStatusModel]);
 
   // Re-ground the status picture whenever it changes (a Run flipping done, a
   // branch becoming finished-unmerged, an unknown capture landing), guarded by the

@@ -1,8 +1,9 @@
 /**
- * Dispatcher feed submit-sequence builder (PURE).
+ * Submit-sequence builder (PURE) — the type-then-submit PTY writes behind the
+ * `submit-pump` queue.
  *
- * A Completion block fed to the Dispatcher must be **submitted**, not merely
- * typed. The bug this module fixes (issue 41): the feed used to send the block
+ * A message fed into a chat-tier PTY must be **submitted**, not merely typed.
+ * The bug this module fixes (issue 41): the feed used to send the block
  * text and its trailing `\r` in ONE PTY write (`` `${text}\r` ``). Under the
  * claude TUI's bracketed-paste input handling, a chunk that arrives all at once
  * is treated as pasted text, so the trailing `\r` lands in the input box as a

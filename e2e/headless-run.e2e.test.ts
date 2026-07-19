@@ -36,7 +36,7 @@ import { deriveRunStatus } from '../src/shared/run-state';
 import { planDrain, type ActiveRun } from '../src/shared/run-coordinator';
 import { deriveAttention } from '../src/shared/attention-hub-model';
 import { auditMissingReceipts, hasReceiptFor } from '../src/shared/receipt-audit';
-import { reactToLifecycleEvent } from '../src/shared/dispatcher-lifecycle';
+import { reactToLifecycleEvent } from '../src/shared/run-lifecycle';
 import type {
   PtyExitMessage,
   RunLogRecord,

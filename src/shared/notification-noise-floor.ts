@@ -1,5 +1,5 @@
 /**
- * Dispatcher noise floor (PURE) — issue 47, ADR-0012.
+ * Notification noise floor (PURE) — issue 47, ADR-0012.
  *
  * The dogfood run flooded the user with non-blocking noise: ≈15 boot-screen
  * "unclassifiable" Runs and doc-drift flagged on "none". ADR-0012 raises the

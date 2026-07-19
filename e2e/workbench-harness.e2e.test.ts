@@ -79,7 +79,7 @@ import { CORE_MEMORY_LABEL } from '../src/shared/workbench-memory';
 import { planDrain, type ActiveRun, type DrainPlan } from '../src/shared/run-coordinator';
 import { deriveRunStatus } from '../src/shared/run-state';
 import { auditMissingReceipts, latestReceiptOutcomeFor } from '../src/shared/receipt-audit';
-import { isRealCapture } from '../src/shared/dispatcher-noise-floor';
+import { isRealCapture } from '../src/shared/notification-noise-floor';
 import type { RunLogRecord } from '../src/shared/ipc-contract';
 import type { IssueStatus } from '../src/shared/backlog-model';
 import {

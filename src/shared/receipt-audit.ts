@@ -25,8 +25,8 @@
 import type { RunLogRecord } from './ipc-contract';
 import type { RunOutcome } from './completion-parser';
 import type { RunStatus } from './run-state';
-import type { LifecycleEvent } from './dispatcher-lifecycle';
-import type { GroundedStatus, IssueGroundStatus } from './dispatcher-status-model';
+import type { LifecycleEvent } from './run-lifecycle';
+import type { GroundedStatus, IssueGroundStatus } from './drain-status-model';
 
 /**
  * Whether a Run-log record came from the Receipt capture edge (issue 56): its

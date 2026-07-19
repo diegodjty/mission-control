@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isRealCapture, isRealDocDrift } from './dispatcher-noise-floor';
+import { isRealCapture, isRealDocDrift } from './notification-noise-floor';
 import type { CompletionRecord, RunOutcome } from './completion-parser';
 
 /** A fully-null completion record; spread over to set only the fields a test needs. */

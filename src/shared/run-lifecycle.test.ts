@@ -4,7 +4,7 @@ import {
   reactToLifecycleEvent,
   type LifecycleEvent,
   type LifecycleEventKind,
-} from './dispatcher-lifecycle';
+} from './run-lifecycle';
 import { classifyAuthority } from './action-authority';
 import type { RunOutcome } from './completion-parser';
 

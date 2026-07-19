@@ -67,9 +67,9 @@ import {
 import {
   renderCompletionEvent,
   toCompletionEvent,
-} from '../src/shared/dispatcher-input-contract';
-import { createDispatcherPump } from '../src/shared/dispatcher-pump';
-import { narrativeKeyFor } from '../src/shared/dispatcher-narrative';
+} from '../src/shared/capture-contract';
+import { createSubmitPump } from '../src/shared/submit-pump';
+import { narrativeKeyFor } from '../src/shared/run-narrative';
 import { parseReceipt } from '../src/shared/receipt-parser';
 import type { PlanningDoc } from '../src/shared/planning-model';
 import type { AttentionSnapshot, RunLogRecord } from '../src/shared/ipc-contract';
@@ -479,7 +479,7 @@ describe('e2e guides harness — real modules over the guides-batch seams', () =
       // (identity-keyed dedupe holds).
       const pty = new FakePty();
       pty.create('dispatcher');
-      const pump = createDispatcherPump({ write: pty.write, canFlush: () => true });
+      const pump = createSubmitPump({ write: pty.write, canFlush: () => true });
       pump.attachSession('dispatcher');
       const card = renderCompletionEvent(toCompletionEvent({ id: rec.id, record: rec }));
       expect(pump.enqueue({ key: narrativeKeyFor(rec.id), text: card })).toBe(true);

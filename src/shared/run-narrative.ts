@@ -32,7 +32,7 @@
  * PURE: no I/O, no Electron, no LLM, no timers. Unit-testable in isolation and
  * safe to share across main/renderer (and the e2e harness).
  */
-import type { LifecycleEventKind } from './dispatcher-lifecycle';
+import type { LifecycleEventKind } from './run-lifecycle';
 
 /**
  * Everything the Dispatcher surfaces, classified for the ADR-0014 channel

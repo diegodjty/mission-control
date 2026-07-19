@@ -1,5 +1,5 @@
 /**
- * Dispatcher status model (PURE) — issue 43.
+ * Drain status model (PURE) — issue 43.
  *
  * The bug this module fixes: the Dispatcher used to infer "what's done / what's
  * left" ONLY from the Completion blocks it was fed (plus the seed backlog
@@ -69,7 +69,7 @@ export interface NeedsLookItem {
  * status (ascending by id), the id buckets for convenience, and the unknown
  * captures conveyed as "needs a look".
  */
-export interface DispatcherStatusModel {
+export interface DrainStatusModel {
   issues: IssueGroundStatus[];
   doneIds: number[];
   finishedUnmergedIds: number[];
@@ -115,7 +115,7 @@ function truncate(text: string, max: number): string {
  * saying "completed" is the very signal that drifted (missed/misparsed). Status
  * comes from the backlog + scan; the blocks remain for qualitative synthesis.
  */
-export function reconcileStatusModel(input: StatusModelInput): DispatcherStatusModel {
+export function reconcileStatusModel(input: StatusModelInput): DrainStatusModel {
   const byId = new Map<number, IssueGroundStatus>();
 
   // 1. Base every issue on the backlog's status.
@@ -234,16 +234,16 @@ export function initialStatusDebounceState(): StatusDebounceState {
 /** Result of one debounce checkpoint: the model to surface + the state to carry. */
 export interface DebouncedStatusModel {
   /** The model to surface — regressions held at their prior status until confirmed. */
-  model: DispatcherStatusModel;
+  model: DrainStatusModel;
   /** The debounce state to feed into the next checkpoint. */
   state: StatusDebounceState;
 }
 
 /** Recompute the id buckets from a (possibly held-back) set of surfaced statuses. */
 function rebuildBuckets(
-  reconciled: DispatcherStatusModel,
+  reconciled: DrainStatusModel,
   issues: IssueGroundStatus[],
-): DispatcherStatusModel {
+): DrainStatusModel {
   const idsWhere = (status: GroundedStatus): number[] =>
     issues.filter((i) => i.status === status).map((i) => i.issueId);
   return {
@@ -274,7 +274,7 @@ function rebuildBuckets(
  * mutates the inputs.
  */
 export function debounceStatusModel(
-  reconciled: DispatcherStatusModel,
+  reconciled: DrainStatusModel,
   prior: StatusDebounceState,
 ): DebouncedStatusModel {
   const effective = new Map<number, GroundedStatus>();
@@ -333,7 +333,7 @@ function needsLookLabel(item: NeedsLookItem): string {
  * message and as the change signature (the renderer re-feeds only when it
  * changes), so a steady state produces no repeat.
  */
-export function renderStatusModel(model: DispatcherStatusModel): string {
+export function renderStatusModel(model: DrainStatusModel): string {
   const lines: string[] = [
     'Ground-truth status (reconciled from the live backlog, the afk-scan, and the Run log — ' +
       'this is authoritative for what is done/left; use the completion blocks only for ' +
@@ -400,7 +400,7 @@ export function renderStatusModel(model: DispatcherStatusModel): string {
  * carrying blocks but no ground truth would invite seed-based status answers.
  */
 export function buildStatusSnapshotMessage(
-  model: DispatcherStatusModel | null,
+  model: DrainStatusModel | null,
   runDigest: string | null = null,
 ): string | null {
   if (model === null) return null;
