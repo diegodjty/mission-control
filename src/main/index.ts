@@ -24,15 +24,20 @@ import {
   applyIsolation,
   commitFinishedMain,
   commitFinishedWorktree,
+  createBranch as createGitBranchOp,
   detectDefaultBranch,
   discardWorktree,
+  getBranchStatus,
   isGitRepoDir,
   isMidMerge,
+  listLocalBranches,
   readIsolatedIssueStatus,
   readIssueStatusAt,
   scanAfkBranches,
+  switchBranch as switchGitBranchOp,
   worktreePathFor,
 } from './git-worktree-adapter';
+import { isProtectedBranch } from '../shared/dispatcher-authority';
 import { initGitRepo } from './git-init';
 import { mergeRuns, abortMerge } from './run-merge';
 import {
@@ -119,6 +124,12 @@ import {
   type RepoRegisterResult,
   type GitInitRequest,
   type GitInitResult,
+  type GitBranchStatusRequest,
+  type GitBranchStatusResult,
+  type GitListBranchesRequest,
+  type GitListBranchesResult,
+  type GitBranchOpRequest,
+  type GitBranchOpResult,
   type PlanningDocReadRequest,
   type PlanningDocReadResult,
   type PlanningWatchRequest,
@@ -1926,6 +1937,73 @@ function registerIpc(): void {
       projectIdentities.set(fresh.key, fresh);
       broadcastRegistryChanged();
       return { ok: true, error: null, key: outcome.key };
+    },
+  );
+
+  // The Map's branch-awareness read (issue 167): the default repo's CURRENT
+  // branch, read fresh off HEAD every call — never cached — so a Create/Switch
+  // action or an out-of-band checkout is reflected the next poll. Detached
+  // HEAD is reported explicitly (never folded into `main`, unlike the
+  // merge-time `detectDefaultBranch` fallback), so the Map can name it.
+  ipcMain.handle(
+    IpcChannel.GitBranchStatus,
+    async (event, req: GitBranchStatusRequest): Promise<GitBranchStatusResult> => {
+      if (ownershipError(event, req?.projectPath ?? '')) {
+        return { branch: null, detached: false, protectedBranch: false };
+      }
+      const identity = identityFor(req?.projectPath ?? '');
+      if (identity === null) return { branch: null, detached: false, protectedBranch: false };
+      const status = await getBranchStatus(identity.defaultRepoPath);
+      return {
+        branch: status.branch,
+        detached: status.detached,
+        protectedBranch: !status.detached && isProtectedBranch(status.branch),
+      };
+    },
+  );
+
+  // Every local branch name (issue 167), for the pre-start prompt's
+  // Switch-branch picker.
+  ipcMain.handle(
+    IpcChannel.GitListBranches,
+    async (event, req: GitListBranchesRequest): Promise<GitListBranchesResult> => {
+      if (ownershipError(event, req?.projectPath ?? '')) return { branches: [] };
+      const identity = identityFor(req?.projectPath ?? '');
+      if (identity === null) return { branches: [] };
+      return { branches: await listLocalBranches(identity.defaultRepoPath) };
+    },
+  );
+
+  // Create a new branch off HEAD and check it out (issue 167's pre-start
+  // "Create a new branch" action). Ownership-gated like the other
+  // git-mutating handlers — this is a real git mutation on the caller's
+  // Project, not a read.
+  ipcMain.handle(
+    IpcChannel.GitCreateBranch,
+    async (event, req: GitBranchOpRequest): Promise<GitBranchOpResult> => {
+      const ownership = ownershipError(event, req?.projectPath ?? '');
+      if (ownership !== null) return { ok: false, error: ownership, branch: null };
+      const identity = identityFor(req?.projectPath ?? '');
+      if (identity === null) return { ok: false, error: 'Unknown project.', branch: null };
+      const name = req?.name?.trim() ?? '';
+      if (name === '') return { ok: false, error: 'Branch name is required.', branch: null };
+      const outcome = await createGitBranchOp(identity.defaultRepoPath, name);
+      return { ok: outcome.ok, error: outcome.error, branch: outcome.ok ? name : null };
+    },
+  );
+
+  // Check out an existing branch (issue 167's pre-start "Switch branch" action).
+  ipcMain.handle(
+    IpcChannel.GitSwitchBranch,
+    async (event, req: GitBranchOpRequest): Promise<GitBranchOpResult> => {
+      const ownership = ownershipError(event, req?.projectPath ?? '');
+      if (ownership !== null) return { ok: false, error: ownership, branch: null };
+      const identity = identityFor(req?.projectPath ?? '');
+      if (identity === null) return { ok: false, error: 'Unknown project.', branch: null };
+      const name = req?.name?.trim() ?? '';
+      if (name === '') return { ok: false, error: 'Branch name is required.', branch: null };
+      const outcome = await switchGitBranchOp(identity.defaultRepoPath, name);
+      return { ok: outcome.ok, error: outcome.error, branch: outcome.ok ? name : null };
     },
   );
 
