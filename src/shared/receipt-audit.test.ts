@@ -29,7 +29,7 @@ import {
   actionForLifecycle,
   reactToLifecycleEvent,
 } from './dispatcher-lifecycle';
-import { classifyAuthority } from './dispatcher-authority';
+import { classifyAuthority } from './action-authority';
 import { isRealCapture } from './dispatcher-noise-floor';
 import { toReceiptRunLogRecord } from './receipt-ingest';
 import { reconcileStatusModel } from './dispatcher-status-model';

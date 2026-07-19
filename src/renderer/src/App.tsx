@@ -54,8 +54,8 @@ import {
   reactToLifecycleEvent,
   type LifecycleEvent,
 } from '../../shared/dispatcher-lifecycle';
-import { isProtectedBranch, type DispatcherAction } from '../../shared/dispatcher-authority';
-import { decideDispatcherMerge } from '../../shared/dispatcher-merge';
+import { isProtectedBranch, type DispatcherAction } from '../../shared/action-authority';
+import { decideDispatcherMerge } from '../../shared/merge-classification';
 import { decideAutoMergeLane, laneBranchesFrom } from '../../shared/auto-merge-lane';
 import { decideMergeAffordance, type MergeAffordance } from '../../shared/merge-affordance';
 import { isRealCapture, isRealDocDrift } from '../../shared/dispatcher-noise-floor';

@@ -48,7 +48,7 @@
  * into a `dispatcher-proposal` activity and feeds its notification through the
  * `dispatcher-feed` submit queue.
  */
-import type { DispatcherAction } from './dispatcher-authority';
+import type { DispatcherAction } from './action-authority';
 import type { RunOutcome } from './completion-parser';
 
 /** The terminal lifecycle a Run passes through, as the Dispatcher observes it. */

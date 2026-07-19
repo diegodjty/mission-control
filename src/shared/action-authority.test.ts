@@ -6,7 +6,7 @@ import {
   DEFAULT_PROTECTED_BRANCHES,
   type Authority,
   type DispatcherAction,
-} from './dispatcher-authority';
+} from './action-authority';
 
 // The full ADR-0011 line as a table — every action mapped to its interruption
 // tier. Kept exhaustive so a newly-added action forces a decision here (and a

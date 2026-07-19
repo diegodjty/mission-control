@@ -128,7 +128,7 @@ import {
   actionForLifecycle,
   reactToLifecycleEvent,
 } from '../src/shared/dispatcher-lifecycle';
-import { classifyAuthority, isProtectedBranch } from '../src/shared/dispatcher-authority';
+import { classifyAuthority, isProtectedBranch } from '../src/shared/action-authority';
 import { narrativeChannelFor, narrativeKindForLifecycle } from '../src/shared/dispatcher-narrative';
 import { createDispatcherPump, type DeliveryPhase } from '../src/shared/dispatcher-pump';
 import {

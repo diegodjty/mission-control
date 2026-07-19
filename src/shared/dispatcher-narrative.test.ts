@@ -13,7 +13,7 @@ import {
   sessionSeenRecordId,
   type NarrativeEventKind,
 } from './dispatcher-narrative';
-import { classifyAuthority } from './dispatcher-authority';
+import { classifyAuthority } from './action-authority';
 import type { LifecycleEventKind } from './dispatcher-lifecycle';
 
 describe('narrativeChannelFor — the ADR-0014 channel model', () => {

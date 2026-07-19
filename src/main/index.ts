@@ -37,7 +37,7 @@ import {
   switchBranch as switchGitBranchOp,
   worktreePathFor,
 } from './git-worktree-adapter';
-import { isProtectedBranch } from '../shared/dispatcher-authority';
+import { isProtectedBranch } from '../shared/action-authority';
 import { initGitRepo } from './git-init';
 import { mergeRuns, abortMerge } from './run-merge';
 import {

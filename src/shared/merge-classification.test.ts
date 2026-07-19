@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { decideDispatcherMerge } from './dispatcher-merge';
-import { classifyAuthority } from './dispatcher-authority';
+import { decideDispatcherMerge } from './merge-classification';
+import { classifyAuthority } from './action-authority';
 import type { MergeRunsResult } from './ipc-contract';
 
 /** A completed clean merge result; override per-case. */

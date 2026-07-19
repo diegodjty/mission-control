@@ -25,7 +25,7 @@ import {
 } from '../shared/isolation-policy';
 import { buildBacklog, type IssueStatus } from '../shared/backlog-model';
 import { resolveDefaultBranch } from '../shared/default-branch';
-import { isProtectedBranch } from '../shared/dispatcher-authority';
+import { isProtectedBranch } from '../shared/action-authority';
 import { shouldCommitWorktree, shouldCommitMain } from '../shared/run-state';
 import {
   issueIdFromSlug,

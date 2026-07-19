@@ -14,7 +14,7 @@
  *     adopted strays, finished-without-receipt).
  *   - **The blocking-approval list is unchanged** (ADR-0011's three items) —
  *     narrative is a message, never a gate. This module does not touch
- *     `dispatcher-authority`; it is a SEPARATE routing axis.
+ *     `action-authority`; it is a SEPARATE routing axis.
  *   - **The activity strip is history** — it keeps recording everything, but it
  *     is no longer the notification surface.
  *   - **The noise floor stands (ADR-0012)** — unknown/unclassifiable records,
