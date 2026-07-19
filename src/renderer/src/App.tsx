@@ -4255,6 +4255,7 @@ export function App(): JSX.Element {
             startProject={mapStartProject}
             onGrillFeature={(p) => void startPlanning(p)}
             onQuickFixRunNow={(p, issue) => void runQuickFixNow(p, issue)}
+            onJustTalk={(p) => talkToProject(p)}
           />
           </div>
         </div>

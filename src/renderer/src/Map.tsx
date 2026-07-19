@@ -200,6 +200,13 @@ interface MapProps {
    */
   onQuickFixRunNow?: (project: LauncherProject, issue: QuickFixIssueRef) => void;
   /**
+   * Just talk (issue 168, ADR-0019): open the same warm bare Pane the
+   * Launcher home's Just talk offers, scoped to this Project (CORE.md
+   * injected) — reachable without navigating back to the home page. No issue
+   * claimed, no Run tracked.
+   */
+  onJustTalk?: (project: LauncherProject) => void;
+  /**
    * True when this Project's workspace root is repo-less and not (yet) a git
    * repository (issue 158, ADR-0017) — shows the "not under git" badge next
    * to the run controls; Drain's cap>1 gate (in the parent) reads the same
@@ -263,6 +270,7 @@ export function Map({
   startProject,
   onGrillFeature,
   onQuickFixRunNow,
+  onJustTalk,
   notUnderGit,
   branchStatus,
 }: MapProps = {}): JSX.Element {
@@ -666,7 +674,7 @@ export function Map({
             {startProject &&
               backlog &&
               backlog.issues.length > 0 &&
-              (onGrillFeature || onQuickFixRunNow) && (
+              (onGrillFeature || onQuickFixRunNow || onJustTalk) && (
                 <button
                   className={`map__start-toggle${startOpen ? ' map__start-toggle--open' : ''}`}
                   onClick={() => setStartOpen((v) => !v)}
@@ -787,12 +795,13 @@ export function Map({
         resolvedPath !== null &&
         backlog &&
         backlog.issues.length > 0 &&
-        (onGrillFeature || onQuickFixRunNow) && (
+        (onGrillFeature || onQuickFixRunNow || onJustTalk) && (
           <div className="map__startpanel">
             <StartSomething
               project={startProject}
               onGrill={(p) => onGrillFeature?.(p)}
               onRunNow={(p, issue) => onQuickFixRunNow?.(p, issue)}
+              onTalk={(p) => onJustTalk?.(p)}
             />
           </div>
         )}
@@ -966,13 +975,14 @@ export function Map({
         resolvedPath !== null &&
         backlog &&
         backlog.issues.length === 0 &&
-        (onGrillFeature || onQuickFixRunNow) && (
+        (onGrillFeature || onQuickFixRunNow || onJustTalk) && (
           <div className="map__start-empty">
             <p className="map__start-empty-text">This backlog is empty — start something:</p>
             <StartSomething
               project={startProject}
               onGrill={(p) => onGrillFeature?.(p)}
               onRunNow={(p, issue) => onQuickFixRunNow?.(p, issue)}
+              onTalk={(p) => onJustTalk?.(p)}
             />
           </div>
         )}
@@ -1179,23 +1189,27 @@ export function Map({
 }
 
 /**
- * ＋ Start something (issue 116, ADR-0019): the two per-Project entry verbs,
- * relocated from the Launcher's front door onto the Map. "Grill a feature"
- * opens the Planning view; "Simple issue" opens the one-sentence quick-fix
- * form (Run-now / leave-queued). Routing is the pure `startSomething` resolver
- * — this component only dispatches on its verdict and reuses existing
- * machinery, building no new planning or run flow.
+ * ＋ Start something (issue 116, ADR-0019; "Just talk" added by issue 168):
+ * the per-Project entry verbs, relocated from the Launcher's front door onto
+ * the Map. "Grill a feature" opens the Planning view; "Simple issue" opens
+ * the one-sentence quick-fix form (Run-now / leave-queued); "Just talk" opens
+ * the same warm bare Pane the Launcher home's Just talk offers, scoped to
+ * this project. Routing is the pure `startSomething` resolver — this
+ * component only dispatches on its verdict and reuses existing machinery,
+ * building no new planning, run, or talk flow.
  */
 function StartSomething({
   project,
   onGrill,
   onRunNow,
+  onTalk,
 }: {
   project: LauncherProject;
   onGrill: (project: LauncherProject) => void;
   onRunNow: (project: LauncherProject, issue: QuickFixIssueRef) => void;
+  onTalk: (project: LauncherProject) => void;
 }): JSX.Element {
-  // Whether the "Simple issue" quick-fix form is open (vs. the two-verb picker).
+  // Whether the "Simple issue" quick-fix form is open (vs. the verb picker).
   const [simple, setSimple] = useState(false);
   // A quiet "leave it queued" confirmation after the form dismisses.
   const [queuedNote, setQueuedNote] = useState<string | null>(null);
@@ -1204,6 +1218,8 @@ function StartSomething({
     const target = startSomething(verb, project);
     if (target.route === 'planning') {
       onGrill(target.project);
+    } else if (target.route === 'talk') {
+      onTalk(target.project);
     } else {
       setQueuedNote(null);
       setSimple(true);
@@ -1250,6 +1266,13 @@ function StartSomething({
         title="One sentence becomes a standalone issue in this project's backlog"
       >
         {START_VERB_LABELS.simple}
+      </button>
+      <button
+        className="map__start-verb"
+        onClick={() => choose('talk')}
+        title="Open a warm chat scoped to this project — no issue claimed, no Run tracked"
+      >
+        {START_VERB_LABELS.talk}
       </button>
     </div>
   );

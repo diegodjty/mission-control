@@ -170,10 +170,12 @@ export function quickFixRunTarget(
 // ---------------------------------------------------------------------------
 
 /**
- * The two verbs ＋ Start something offers on the Map (issue 116, ADR-0019):
- * `grill` (plan a feature) and `simple` (a one-sentence standalone issue).
+ * The three verbs ＋ Start something offers on the Map (issue 116, ADR-0019;
+ * `talk` added by issue 168): `grill` (plan a feature), `simple` (a
+ * one-sentence standalone issue), and `talk` (a warm bare Pane scoped to this
+ * project, no issue claimed).
  */
-export type StartVerb = 'grill' | 'simple';
+export type StartVerb = 'grill' | 'simple' | 'talk';
 
 /**
  * The button labels, EXACTLY as ADR-0019 names them — the single source of
@@ -183,20 +185,23 @@ export type StartVerb = 'grill' | 'simple';
 export const START_VERB_LABELS: Record<StartVerb, string> = {
   grill: 'Grill a feature',
   simple: 'Simple issue',
+  talk: 'Just talk',
 };
 
 /**
  * Where a ＋ Start something verb routes for a Project (issue 116): the pure
  * verb→target that `startSomething` resolves. `route` picks the existing
  * machinery — `planning` opens the Planning view (grill → PRD → issues),
- * `quick-fix` opens the one-sentence quick-fix form (Run-now / leave-queued) —
- * and the `project` is carried through so the renderer dispatches on the
- * verdict instead of re-deriving anything from window-active state (the same
- * end-to-end-identity discipline as `quickFixRunTarget`).
+ * `quick-fix` opens the one-sentence quick-fix form (Run-now / leave-queued),
+ * `talk` opens the same warm bare Pane the Launcher home's Just talk offers
+ * (issue 168) — and the `project` is carried through so the renderer
+ * dispatches on the verdict instead of re-deriving anything from
+ * window-active state (the same end-to-end-identity discipline as
+ * `quickFixRunTarget`).
  */
 export interface StartTarget<P> {
-  /** `planning` → the Planning view; `quick-fix` → the quick-fix form. */
-  route: 'planning' | 'quick-fix';
+  /** `planning` → the Planning view; `quick-fix` → the quick-fix form; `talk` → a warm bare Pane. */
+  route: 'planning' | 'quick-fix' | 'talk';
   /** The verb's label (from `START_VERB_LABELS`), echoed for the affordance. */
   label: string;
   /** The Project the verb acts on, unchanged. */
@@ -205,15 +210,16 @@ export interface StartTarget<P> {
 
 /**
  * Resolve a ＋ Start something verb to its route for `project` (issue 116,
- * folded in alongside `quickFixRunTarget`). PURE and total: `grill` routes to
- * the Planning view, every other verb (`simple`) to the quick-fix form; the
- * project is passed straight through. This slice only relocates and re-labels —
- * neither route is a new flow, so the resolver names a destination and nothing
- * more.
+ * folded in alongside `quickFixRunTarget`; `talk` added by issue 168). PURE
+ * and total: `grill` routes to the Planning view, `talk` to a warm bare Pane,
+ * every other verb (`simple`) to the quick-fix form; the project is passed
+ * straight through. This slice only relocates and re-labels — neither route
+ * is a new flow, so the resolver names a destination and nothing more.
  */
 export function startSomething<P>(verb: StartVerb, project: P): StartTarget<P> {
+  const route = verb === 'grill' ? 'planning' : verb === 'talk' ? 'talk' : 'quick-fix';
   return {
-    route: verb === 'grill' ? 'planning' : 'quick-fix',
+    route,
     label: START_VERB_LABELS[verb] ?? '',
     project,
   };
