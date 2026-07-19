@@ -1,5 +1,7 @@
 # The Dispatcher has hybrid authority: autonomous on reversible mechanics, human-approved on scope
 
+**Status:** retired by ADR-0022 (2026-07-18). The Dispatcher surface and its hybrid-authority split are gone; the blocking-approval set and merge lifecycle now live in ADR-0021's auto-merge lane.
+
 Mission Control's **Dispatcher** — the conversational orchestrator that spawns worker Panes, ingests each Run's Completion block, and synthesizes across Runs — acts **autonomously only on safe, reversible, mechanical actions** (commit a clean checkpoint between issues, synthesize/relay progress, start the next queued Run within the cap) and **proposes for one-click human approval every scope-changing judgment call** (logging a new issue, a Merge, aborting a drain, changing course).
 
 ## Considered Options
