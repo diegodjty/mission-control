@@ -208,6 +208,16 @@ body {
   font-size: 12px;
 }
 
+/* Live sanitize preview under the create-branch input (issue 174): a typed
+   name that needed correcting shows what will actually be created, without
+   blocking submission the way `.app__gitinit-error` does. */
+.app__gitinit-hint {
+  margin: 0;
+  padding: 0 2px;
+  color: var(--text-dim, #9aa4b2);
+  font-size: 12px;
+}
+
 /* The rotated-diamond mark + wordmark — the app's identity, lifted straight
    from the prototype and reused as the rail's brand. */
 .app__mark {
