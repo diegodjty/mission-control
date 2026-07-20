@@ -20,6 +20,7 @@
     "test:e2e": "vitest run --config vitest.e2e.config.ts"
   },
   "dependencies": {
+    "mermaid": "^11.16.0",
     "node-pty": "^1.0.0"
   },
   "devDependencies": {
@@ -29,6 +30,9 @@
     "@radix-ui/react-tabs": "^1.1.17",
     "@radix-ui/react-toast": "^1.2.19",
     "@radix-ui/react-tooltip": "^1.2.12",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@types/node": "^22.10.0",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
@@ -37,6 +41,7 @@
     "@xterm/xterm": "^5.5.0",
     "electron": "^33.2.1",
     "electron-vite": "^2.3.0",
+    "jsdom": "^29.1.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "typescript": "^5.7.2",

@@ -6,9 +6,10 @@
  * Shared by main, preload, and renderer, so it must stay free of node/electron
  * runtime imports (types only).
  */
-import type { AttentionItem } from './attention-hub-model';
+import type { AttentionItem, JournalFile } from './attention-hub-model';
 import type { Backlog, IssueStatus } from './backlog-model';
 import type { PlanningDoc } from './planning-model';
+import type { DocEntry } from './docs-model';
 import type { CompletionRecord, RunOutcome } from './completion-parser';
 import type { IsolationRun } from './isolation-policy';
 import type { PipelineStage } from './project-registry';
@@ -197,6 +198,15 @@ export const IpcChannel = {
    */
   DrainJournal: 'drain:journal',
   /**
+   * renderer → main (invoke): read a workbench Project's raw `memory/journal/`
+   * entries (issue 181, ADR-0023) — the Cost tab's only source for drain
+   * grouping (a drain's boundary and member Runs exist ONLY in this journal
+   * text; per-Run telemetry itself still comes from the Run log). Inert (an
+   * empty file list) for a legacy Project — no `memory/` dir exists there.
+   * Resolves to a JournalLoadResult.
+   */
+  JournalLoad: 'journal:load',
+  /**
    * renderer → main (invoke): the current aggregated cross-project attention
    * snapshot (issue 79, ADR-0016) — what the background workbench watch has
    * derived so far — so a freshly opened Window doesn't wait for the next
@@ -314,6 +324,25 @@ export const IpcChannel = {
    * roots — never an arbitrary-file read. Resolves to a PlanningDocReadResult.
    */
   PlanningDocRead: 'planning:read-doc',
+  /**
+   * renderer → main (send): watch the active project's default repo for the
+   * Docs tab's live preview (issue 182, ADR-0023) — `docs/ARCHITECTURE.md`,
+   * `CONTEXT.md`, and `docs/adr/`. An empty `repoPath` stops the calling
+   * Window's watch.
+   */
+  DocsWatch: 'docs:watch',
+  /**
+   * main → renderer (send): the watched Docs set changed (a doc was
+   * written/added/removed) — the picker's entries. Also pushed once,
+   * immediately, when the watch starts.
+   */
+  DocsChanged: 'docs:changed',
+  /**
+   * renderer → main (invoke): read ONE watched Docs-tab document (issue 182).
+   * Restricted to the calling Window's watched Docs roots — never an
+   * arbitrary-file read. Resolves to a DocReadResult.
+   */
+  DocsRead: 'docs:read-doc',
   /**
    * renderer → main (invoke): read one curator-report file for the attention
    * surface's rendered view (issue 151) — `~/Workbench/tools/curator-reports/
@@ -1191,6 +1220,18 @@ export interface RunLogLoadResult {
   records: RunLogRecord[];
 }
 
+export interface JournalLoadRequest {
+  /** The Project repo path whose workbench `memory/journal/` to read. */
+  projectPath: string;
+}
+
+export interface JournalLoadResult {
+  /** The Project's raw journal entries, sorted by file name (oldest first).
+   *  `[]` for a legacy Project (no workbench `memory/` dir) or one with no
+   *  drains yet. */
+  files: JournalFile[];
+}
+
 export interface ReceiptWatchRequest {
   /** The Project repo path whose `issues/completions/` to watch. */
   projectPath: string;
@@ -1577,6 +1618,37 @@ export interface PlanningDocReadResult {
   error: string | null;
 }
 
+/**
+ * Watch (or, with an empty `repoPath`, stop watching) the active project's
+ * default repo for the Docs tab's live preview (issue 182, ADR-0023).
+ */
+export interface DocsWatchRequest {
+  /** The project's default code repo (`docs/`, `CONTEXT.md` live here); '' = unwatch. */
+  repoPath: string;
+}
+
+/** Pushed whenever the watched Docs set changes (and once on watch). */
+export interface DocsChangedMessage {
+  /** The repo root the watch was started for (matches pushes to views). */
+  repoPath: string;
+  /** The picker's entries: ARCHITECTURE.md, then CONTEXT.md, then ADRs. */
+  docs: DocEntry[];
+}
+
+export interface DocReadRequest {
+  /** Absolute path of the doc to read — must be within the watched roots. */
+  path: string;
+}
+
+export interface DocReadResult {
+  /** The requested path, echoed so a stale response can be discarded. */
+  path: string;
+  /** The document text, or null when it could not be read. */
+  content: string | null;
+  /** Why reading failed (unwatched path / fs error), else null. */
+  error: string | null;
+}
+
 export interface CuratorReportReadRequest {
   /** Bare file name within `~/Workbench/tools/curator-reports/` (no separators). */
   name: string;
@@ -1740,6 +1812,8 @@ export interface MissionControlApi {
   onProjectRegistryChanged(listener: () => void): () => void;
   /** Load a Project's persisted Run log for the Execution view feed (issue 34). */
   loadRunLog(req: RunLogLoadRequest): Promise<RunLogLoadResult>;
+  /** Read a workbench Project's raw `memory/journal/` entries (issue 181's Cost tab). */
+  loadJournals(req: JournalLoadRequest): Promise<JournalLoadResult>;
   /**
    * Start (or re-point) the Receipt watch for a Project (issue 56): the
    * checkout's `issues/completions/` plus each named worktree's copy.
@@ -1868,6 +1942,15 @@ export interface MissionControlApi {
   onPlanningChanged(listener: (msg: PlanningChangedMessage) => void): () => void;
   /** Read one watched planning document for the read-only preview (issue 83). */
   readPlanningDoc(req: PlanningDocReadRequest): Promise<PlanningDocReadResult>;
+  /**
+   * Start (or, with an empty `repoPath`, stop) the Docs tab's live watch over
+   * the active project's default repo (issue 182).
+   */
+  watchDocs(req: DocsWatchRequest): void;
+  /** Subscribe to Docs-tab doc-set changes; returns an unsubscribe function. */
+  onDocsChanged(listener: (msg: DocsChangedMessage) => void): () => void;
+  /** Read one watched Docs-tab document for the rich viewer (issue 182). */
+  readDoc(req: DocReadRequest): Promise<DocReadResult>;
   /** Read one curator-report file for the attention surface's rendered view (issue 151). */
   readCuratorReport(req: CuratorReportReadRequest): Promise<CuratorReportReadResult>;
   /** Mark a curator report seen (issue 151) — it never resurfaces after. */

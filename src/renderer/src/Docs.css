@@ -1,0 +1,107 @@
+/* =====================================================================
+   Docs view — per-view stylesheet (issue 182, ADR-0023)
+
+   The tab that browses the active repo's documentation: a compact picker of
+   ARCHITECTURE.md / CONTEXT.md / ADRs on the left, the selected doc rendered
+   through the shared rich viewer (issue 179, components/RichViewer.css) on
+   the right — same two-panel-card shape as Receipts.css / Planning.css,
+   reused here rather than a fifth bespoke layout.
+   ===================================================================== */
+
+.docs {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  gap: 14px;
+  padding: 14px;
+  overflow: hidden;
+}
+
+.docs__list,
+.docs__detail {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+
+.docs__list {
+  flex: 1 1 32%;
+  overflow-y: auto;
+  padding: 10px 14px;
+}
+
+.docs__detail {
+  flex: 1 1 68%;
+  overflow-y: auto;
+  padding: 16px 18px;
+}
+
+.docs__list-head {
+  margin-bottom: 8px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-mute);
+}
+
+.docs__items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.docs__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 6px 9px;
+  color: var(--fg);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 140ms var(--ease-out), border-color 140ms var(--ease-out);
+}
+
+.docs__item:hover {
+  background: var(--surface-2);
+}
+
+.docs__item--active {
+  background: var(--surface-2);
+  border-color: var(--border-teal);
+}
+
+.docs__item-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.docs__empty {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-mute);
+  text-align: center;
+}
+
+.docs__error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--red);
+}

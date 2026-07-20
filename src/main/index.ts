@@ -59,6 +59,7 @@ import { RunLogStore } from './run-log-store';
 import { ChecklistStateStore } from './checklist-state-store';
 import { ReceiptWatcher } from './receipt-watcher';
 import { PlanningWatcher } from './planning-watcher';
+import { DocsWatcher } from './docs-watcher';
 import { commitWorkbenchPaths, commitWorkbenchProject } from './workbench-git';
 import { createWorkbenchProject } from './onboarding';
 import { repoKeyFor } from '../shared/onboarding-model';
@@ -69,6 +70,7 @@ import { verifyWorktree } from './worktree-verify';
 import { recordTimeoutSalvage, resolveTimeoutSalvage } from './timeout-salvage-store';
 import { slugFromFileName } from './git-worktree-adapter';
 import { acceptCoreProposal, dismissCoreProposal, readCoreMemory, writeDrainJournal } from './memory-files';
+import { readMarkdownFiles } from './attention-reader';
 import { extractRunUsage, timeOnlyUsage, type RunUsage } from '../shared/run-telemetry';
 import { applyRunUsage, PendingRunUsageStash, stickyIngestUsage } from './run-usage-pending';
 import type { TerminalResult } from '../shared/headless-feed';
@@ -89,6 +91,7 @@ import { classifyDrainStop } from '../shared/attention-notifications';
 import { NotificationController } from './notification-controller';
 import { showNotifications, type NotificationTarget } from './notification-adapter';
 import { isAllowedPlanningDoc } from '../shared/planning-model';
+import { isAllowedDoc } from '../shared/docs-model';
 import {
   claimEventsBetween,
   receiptRunEvent,
@@ -149,6 +152,9 @@ import {
   type PlanningDocReadRequest,
   type PlanningDocReadResult,
   type PlanningWatchRequest,
+  type DocsWatchRequest,
+  type DocReadRequest,
+  type DocReadResult,
   type CuratorReportReadRequest,
   type CuratorReportReadResult,
   type CuratorReportMarkSeenRequest,
@@ -177,6 +183,8 @@ import {
   type ReceiptWatchRequest,
   type RunLogLoadRequest,
   type RunLogLoadResult,
+  type JournalLoadRequest,
+  type JournalLoadResult,
   type PtyKillMessage,
   type PtyResizeMessage,
   type PtySpawnRequest,
@@ -785,6 +793,11 @@ const receiptWatcher = new ReceiptWatcher();
 // the project's planning roots (workbench PRDs + issues, repo CONTEXT/ADRs).
 // Read-only by contract — it stats and reads docs, never writes.
 const planningWatcher = new PlanningWatcher();
+
+// The Docs tab's live preview (issue 182, ADR-0023): per-renderer, over the
+// active project's default repo — `docs/ARCHITECTURE.md`, `CONTEXT.md`,
+// `docs/adr/`. Read-only, mirrors the Planning watcher above.
+const docsWatcher = new DocsWatcher();
 
 // Per-Project dedupe memory for the Receipt edge: record id (issue + finished)
 // → fingerprint of the ingested content, or null for ids seeded from the
@@ -1442,6 +1455,21 @@ function registerIpc(): void {
     async (event, req: RunLogLoadRequest): Promise<RunLogLoadResult> => {
       if (ownershipError(event, req.projectPath)) return { records: [] };
       return { records: await runLogStore.read(req.projectPath) };
+    },
+  );
+
+  // Read a workbench Project's raw drain-journal entries for the Cost tab
+  // (issue 181, ADR-0023): the only source of drain grouping (a drain's
+  // boundary and member Runs exist ONLY in this text — per-Run telemetry
+  // itself comes from the Run log). Inert for a legacy Project (no `memory/`
+  // dir exists there) or a non-owner, same shape as RunLogLoad above.
+  ipcMain.handle(
+    IpcChannel.JournalLoad,
+    async (event, req: JournalLoadRequest): Promise<JournalLoadResult> => {
+      if (ownershipError(event, req.projectPath)) return { files: [] };
+      const identity = identityFor(req.projectPath);
+      if (identity === null || identity.kind !== 'workbench') return { files: [] };
+      return { files: await readMarkdownFiles(join(identity.key, 'memory', 'journal')) };
     },
   );
 
@@ -2327,6 +2355,48 @@ function registerIpc(): void {
       }
     },
   );
+
+  // The Docs tab's live watch (issue 182, ADR-0023): keyed per renderer like
+  // the Planning watch; the active project's `docs/ARCHITECTURE.md`,
+  // `CONTEXT.md`, and `docs/adr/` are watched, and the picker's entries are
+  // pushed on real change (and once immediately). An empty repoPath stops the
+  // calling Window's watch (the Docs tab was left).
+  ipcMain.on(IpcChannel.DocsWatch, (event, req: DocsWatchRequest) => {
+    const sender = event.sender;
+    const key = String(sender.id);
+    const repoPath = req?.repoPath?.trim() ?? '';
+    if (repoPath === '') {
+      docsWatcher.unwatch(key);
+      return;
+    }
+    docsWatcher.watch(key, { repoPath }, (docs) => {
+      if (!sender.isDestroyed()) sender.send(IpcChannel.DocsChanged, { repoPath, docs });
+    });
+    sender.once('destroyed', () => docsWatcher.unwatch(key));
+  });
+
+  // Read ONE watched Docs-tab doc (issue 182). Allowlisted against the
+  // calling Window's live watch roots via the pure `isAllowedDoc` — the read
+  // channel is not an arbitrary-file read.
+  ipcMain.handle(
+    IpcChannel.DocsRead,
+    async (event, req: DocReadRequest): Promise<DocReadResult> => {
+      const path = req?.path ?? '';
+      const roots = docsWatcher.rootsFor(String(event.sender.id));
+      if (roots === null || !isAllowedDoc(roots, path)) {
+        return { path, content: null, error: 'Not a watched Docs-tab document.' };
+      }
+      try {
+        return { path, content: await readFile(path, 'utf8'), error: null };
+      } catch (err) {
+        return {
+          path,
+          content: null,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+  );
 }
 
 app.whenReady().then(async () => {
@@ -2390,6 +2460,7 @@ app.on('window-all-closed', () => {
   backlogWatcher.closeAll();
   receiptWatcher.closeAll();
   planningWatcher.closeAll();
+  docsWatcher.closeAll();
   if (process.platform !== 'darwin') app.quit();
 });
 
@@ -2399,6 +2470,7 @@ app.on('before-quit', () => {
   backlogWatcher.closeAll();
   receiptWatcher.closeAll();
   planningWatcher.closeAll();
+  docsWatcher.closeAll();
   // The attention watch closes on QUIT only — it deliberately survives
   // window-all-closed (macOS keeps the app alive; the Inbox keeps watching).
   attentionWatcher?.close();

@@ -9,8 +9,7 @@ import {
   scopeAttentionToWindow,
   workbenchProjectPath,
 } from '../../shared/attention-hub-model';
-import { parsePlanningDoc } from '../../shared/planning-model';
-import { PlanningBlockView } from './PlanningView';
+import { RichViewer } from './components';
 
 /** What the rendered-doc modal is currently showing (issue 151): a single
  *  curator report, or a project's proposed CORE.md beside its current one. */
@@ -529,35 +528,16 @@ function TimeoutSalvageItem({ item, workbenchRoot }: TimeoutSalvageItemProps): J
   );
 }
 
-/** One fetched doc's parsed render, or its load state — shared by both panes
+/** One fetched doc's rendered doc, or its load state — shared by both panes
  *  of the modal (a single report, or either half of the proposal diff). */
 function DocPane({ title, text, error }: { title: string; text: string | null; error: string | null }): JSX.Element {
-  const parsed = useMemo(() => (text !== null ? parsePlanningDoc(text) : null), [text]);
   return (
     <div className="attention__doc-pane">
       <div className="attention__doc-pane-title">{title}</div>
       <div className="attention__doc-pane-body">
         {text === null && error === null && <p className="attention__empty">Loading…</p>}
         {error !== null && <p className="attention__error">{error}</p>}
-        {parsed !== null && (
-          <>
-            {parsed.frontmatter.length > 0 && (
-              <div className="planning__frontmatter">
-                {parsed.frontmatter.map((f, i) => (
-                  <span key={i} className="planning__fm">
-                    {f.key !== '' && <span className="planning__fm-key">{f.key}</span>}
-                    <span className="planning__fm-value">{f.value}</span>
-                  </span>
-                ))}
-              </div>
-            )}
-            <div className="planning__render">
-              {parsed.blocks.map((block, i) => (
-                <PlanningBlockView key={i} block={block} />
-              ))}
-            </div>
-          </>
-        )}
+        {text !== null && <RichViewer text={text} />}
       </div>
     </div>
   );

@@ -4,8 +4,6 @@ import { Badge, type BadgeTone } from './components';
 import type { Backlog, BacklogIssue } from '../../shared/backlog-model';
 import { deleteRefusal } from '../../shared/issue-file-ops';
 import type { LauncherProject, RunLogRecord, RunTarget } from '../../shared/ipc-contract';
-import { formatElapsed } from '../../shared/headless-feed';
-import { formatCostUsd, formatTokens } from '../../shared/run-telemetry';
 import { QuickFixForm, type QuickFixIssueRef } from './QuickFixForm';
 import { START_VERB_LABELS, startSomething, type StartVerb } from '../../shared/launcher-model';
 import { type InFlightRuns } from '../../shared/run-eligibility';
@@ -160,8 +158,10 @@ interface MapProps {
   staleBuildNote?: string | null;
   /**
    * The active Project's captured Completion blocks, newest first (issue 34).
-   * Rendered as the Run-log feed — one card per Run — which survives closing the
-   * Run's Pane (it is App state loaded from disk, not tied to any live Pane).
+   * The Map itself only reads this to source a selected HITL issue's latest
+   * Receipt (`latestReceiptFor`, below) — the browsable feed of every finished
+   * Run moved to the dedicated Receipts tab (issue 180), which replaced the
+   * inline Run-log strip this prop used to feed.
    */
   runLog?: RunLogRecord[];
   /**
@@ -1008,17 +1008,6 @@ export function Map({
           </div>
         )}
 
-      {/* Run-log feed (issue 34; repositioned above the backlog by issue 159): a
-          scannable entry per finished Run, parsed from its Completion block,
-          loaded from the per-Project on-disk Run log — so it survives closing
-          the Run's Pane and persists across restarts. Rendered above the
-          backlog list (rather than below it) so it's reachable without
-          scrolling past a 100+ issue backlog; the backlog list below scrolls
-          in its own region so neither view forces the other. */}
-      {resolvedPath !== null && runLog && runLog.length > 0 && (
-        <RunLogFeed records={runLog} onSelect={(id) => id !== null && setSelectedId(id)} />
-      )}
-
       {/* Backlog (mock: single column, collapsible) — clear status/dependency/
           blocker hierarchy per row (story 34); the selected row expands in place
           to its full detail. Scrolls in its own region (issue 159) so a 100+
@@ -1296,136 +1285,6 @@ function StartSomething({
         {START_VERB_LABELS.talk}
       </button>
     </div>
-  );
-}
-
-/**
- * The Run-log feed (issue 34): the durable, per-Project history of finished
- * Runs, one card each, parsed from their Completion blocks. Collapsible so it
- * doesn't crowd the backlog; open by default when there are records to show.
- * Pinned above the backlog list (issue 159) with its own scroll region, so
- * it stays glanceable regardless of backlog size.
- */
-function RunLogFeed({
-  records,
-  onSelect,
-}: {
-  records: RunLogRecord[];
-  onSelect: (issueId: number | null) => void;
-}): JSX.Element {
-  return (
-    <details className="map__runlog" open>
-      <summary className="map__runlog-summary">
-        Run log — {records.length} Run{records.length === 1 ? '' : 's'} captured
-      </summary>
-      <ul className="map__runlog-list">
-        {records.map((r) => (
-          <RunLogCard key={r.id} record={r} onSelect={() => onSelect(r.issueId)} />
-        ))}
-      </ul>
-    </details>
-  );
-}
-
-/** A short, human label for a Run outcome (drives the badge text + colour). */
-function outcomeLabel(outcome: RunLogRecord['outcome']): string {
-  switch (outcome) {
-    case 'completed':
-      return 'completed';
-    case 'needs-verification':
-      return 'needs verification';
-    case 'blocked':
-      return 'blocked';
-    default:
-      return 'unparsed';
-  }
-}
-
-/** The shared-Badge tone for a Run outcome (issue 127: run-log on the Badge
- *  primitive) — completed reads green, needs-verification amber, blocked red. */
-function outcomeTone(outcome: RunLogRecord['outcome']): BadgeTone {
-  switch (outcome) {
-    case 'completed':
-      return 'green';
-    case 'needs-verification':
-      return 'amber';
-    case 'blocked':
-      return 'red';
-    default:
-      return 'neutral';
-  }
-}
-
-/**
- * The Run card's telemetry line (issue 143): tokens/cost/duration for a
- * headless Run, duration only for a Pane Run (every token/cost field null —
- * the asymmetry is by design, not a missing feature). Empty for a Run with no
- * telemetry at all (e.g. one captured before this field existed).
- */
-function usageLine(usage: RunLogRecord['usage']): string | null {
-  if (usage == null) return null;
-  const parts: string[] = [];
-  if (usage.inputTokens !== null || usage.outputTokens !== null) {
-    parts.push(`${formatTokens(usage.inputTokens ?? 0)} in / ${formatTokens(usage.outputTokens ?? 0)} out tok`);
-  }
-  if (usage.costUsd !== null) parts.push(formatCostUsd(usage.costUsd));
-  if (usage.durationMs !== null) parts.push(formatElapsed(usage.durationMs));
-  return parts.length > 0 ? parts.join(' · ') : null;
-}
-
-/** One captured Completion block as a card, showing only its present fields. */
-function RunLogCard({
-  record,
-  onSelect,
-}: {
-  record: RunLogRecord;
-  onSelect: () => void;
-}): JSX.Element {
-  const idLabel = record.issueId !== null ? String(record.issueId).padStart(2, '0') : '—';
-  const heading = record.title ? stripId(record.title) : (record.issue ?? record.slug ?? 'Run');
-  const fields: [string, string | null][] = [
-    ['What changed', record.whatChanged],
-    ['Try it yourself', record.tryIt],
-    ['Verified', record.verified],
-    ['Bookkeeping', record.bookkeeping],
-    ['Doc drift', record.docDrift],
-  ];
-  // The free-form report body (blocked reason / verification steps / unparsed
-  // text) only carries substance when there are no named sections — show it as
-  // a "Report" field then, so a blocked Run's card isn't left empty.
-  const sectionsPresent = fields.some(([, v]) => v !== null && v !== '');
-  if (!sectionsPresent && record.detail !== null && record.detail !== '') {
-    fields.push(['Report', record.detail]);
-  }
-  const shown = fields.filter(([, v]) => v !== null && v !== '');
-  const usage = usageLine(record.usage);
-  return (
-    <li className="runlog-card" onClick={onSelect} title="Show this issue in the backlog">
-      <div className="runlog-card__head">
-        <Badge tone={outcomeTone(record.outcome)}>{outcomeLabel(record.outcome)}</Badge>
-        <span className="runlog-card__id">{idLabel}</span>
-        <span className="runlog-card__title">{heading}</span>
-        <span className="runlog-card__time">
-          {new Date(record.capturedAt).toLocaleString()}
-        </span>
-      </div>
-      {usage !== null && <div className="runlog-card__usage">{usage}</div>}
-      {shown.length > 0 ? (
-        <dl className="runlog-card__fields">
-          {shown.map(([label, value]) => (
-            <div key={label} className="runlog-card__field">
-              <dt className="runlog-card__label">{label}</dt>
-              <dd className="runlog-card__value">{value}</dd>
-            </div>
-          ))}
-        </dl>
-      ) : (
-        <div className="runlog-card__empty">
-          No Completion block was captured for this Run (it may have ended without
-          emitting one).
-        </div>
-      )}
-    </li>
   );
 }
 

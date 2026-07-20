@@ -1,14 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import './Planning.css';
 import { Pane } from './Pane';
+import { RichViewer } from './components';
 import type { PlanningDoc, PlanningStage } from '../../shared/planning-model';
-import {
-  parseInline,
-  parsePlanningDoc,
-  PLANNING_STAGES,
-  stageInvocation,
-  type PlanningBlock,
-} from '../../shared/planning-model';
+import { PLANNING_STAGES, stageInvocation } from '../../shared/planning-model';
 import type { TalkTarget } from '../../shared/ipc-contract';
 
 interface PlanningViewProps {
@@ -26,71 +21,6 @@ interface PlanningViewProps {
   onInput: (data: string) => void;
   /** A stage button was clicked — the parent pumps the skill invocation. */
   onStage: (stage: PlanningStage) => void;
-}
-
-/** Render one block's text with inline code/bold runs made legible. Shared
- *  with the attention surface's curator-report / CORE-proposal renders. */
-export function InlineText({ text }: { text: string }): JSX.Element {
-  return (
-    <>
-      {parseInline(text).map((seg, i) =>
-        seg.kind === 'code' ? (
-          <code key={i}>{seg.text}</code>
-        ) : seg.kind === 'bold' ? (
-          <strong key={i}>{seg.text}</strong>
-        ) : (
-          <span key={i}>{seg.text}</span>
-        ),
-      )}
-    </>
-  );
-}
-
-/** One parsed markdown block of the read-only preview. Exported so other
- *  read-only doc renders (the attention surface's report/proposal views,
- *  issue 151) reuse the exact same legible markdown rendering. */
-export function PlanningBlockView({ block }: { block: PlanningBlock }): JSX.Element {
-  switch (block.kind) {
-    case 'heading': {
-      const level = Math.min(block.level, 4);
-      return (
-        <div className={`planning__h planning__h--${level}`}>
-          <InlineText text={block.text} />
-        </div>
-      );
-    }
-    case 'code':
-      return <pre className="planning__code">{block.text}</pre>;
-    case 'quote':
-      return (
-        <blockquote className="planning__quote">
-          <InlineText text={block.text} />
-        </blockquote>
-      );
-    case 'rule':
-      return <hr className="planning__rule" />;
-    case 'list': {
-      const items = block.items.map((item, i) => (
-        <li key={i} className={item.checked === null ? undefined : 'planning__task'}>
-          {item.checked !== null && (
-            <span className="planning__checkbox">{item.checked ? '☑' : '☐'}</span>
-          )}
-          <InlineText text={item.text} />
-        </li>
-      ));
-      return block.ordered ? (
-        <ol className="planning__list">{items}</ol>
-      ) : (
-        <ul className="planning__list">{items}</ul>
-      );
-    }
-    case 'para':
-      return (
-        <p className="planning__para">
-          <InlineText text={block.text} />
-        </p>
-      );
-  }
 }
 
 /**
@@ -167,11 +97,6 @@ export function PlanningView({
         });
       });
   }, [selectedPath, docs]);
-
-  const parsed = useMemo(
-    () => (content?.text != null ? parsePlanningDoc(content.text) : null),
-    [content],
-  );
 
   // The warm Pane target: the project's default repo, CORE.md injected (main
   // reads it at the spawn edge). Unlike Just-talk, this is a PLANNING session
@@ -270,25 +195,7 @@ export function PlanningView({
           {content !== null && content.error !== null && (
             <p className="planning__error">{content.error}</p>
           )}
-          {parsed !== null && (
-            <>
-              {parsed.frontmatter.length > 0 && (
-                <div className="planning__frontmatter">
-                  {parsed.frontmatter.map((f, i) => (
-                    <span key={i} className="planning__fm">
-                      {f.key !== '' && <span className="planning__fm-key">{f.key}</span>}
-                      <span className="planning__fm-value">{f.value}</span>
-                    </span>
-                  ))}
-                </div>
-              )}
-              <div className="planning__render">
-                {parsed.blocks.map((block, i) => (
-                  <PlanningBlockView key={i} block={block} />
-                ))}
-              </div>
-            </>
-          )}
+          {content?.text != null && <RichViewer text={content.text} />}
         </div>
       </div>
     </div>
