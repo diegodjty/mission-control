@@ -73,12 +73,12 @@ export function tokenBreakdownBars(records: readonly RunLogRecord[], topN = 8): 
   const withTokens = records
     .map((r) => {
       const u = r.usage;
-      if (u === null) return null;
+      if (u == null) return null;
       const input = u.inputTokens ?? 0;
       const output = u.outputTokens ?? 0;
       const cacheRead = u.cacheReadTokens ?? 0;
       const cacheCreation = u.cacheCreationTokens ?? 0;
-      if (u.inputTokens === null && u.outputTokens === null && u.cacheReadTokens === null && u.cacheCreationTokens === null) {
+      if (u.inputTokens == null && u.outputTokens == null && u.cacheReadTokens == null && u.cacheCreationTokens == null) {
         return null;
       }
       return { label: recordLabel(r), total: input + output + cacheRead + cacheCreation, input, output, cacheRead, cacheCreation };
