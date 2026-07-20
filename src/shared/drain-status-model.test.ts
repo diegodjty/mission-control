@@ -41,6 +41,7 @@ function issue(id: number, status: IssueStatus): BacklogIssue {
     repoKey: null,
     model: null,
     effort: null,
+    runTimeoutMinutes: null,
     inBatch: true,
     standalone: false,
     body: '',

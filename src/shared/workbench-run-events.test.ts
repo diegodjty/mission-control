@@ -21,6 +21,7 @@ function mk(id: number, status: IssueStatus): BacklogIssue {
     repoKey: null,
     model: null,
     effort: null,
+    runTimeoutMinutes: null,
     inBatch: false,
     standalone: true,
     body: '',

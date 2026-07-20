@@ -31,6 +31,7 @@ function mk(
     repoKey: null,
     model: null,
     effort: null,
+    runTimeoutMinutes: null,
     inBatch: true,
     standalone: false,
     body: '',

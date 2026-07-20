@@ -246,6 +246,25 @@ describe('buildBacklog — per-issue effort level (issue 155)', () => {
   });
 });
 
+describe('buildBacklog — per-issue run_timeout override (issue 170)', () => {
+  it('parses a valid run_timeout: override from frontmatter, in minutes', () => {
+    const files = [
+      issue('05-w.md', '---\nstatus: open\ndepends_on: []\nrun_timeout: 90\n---\n\n# 05 — W\n'),
+    ];
+    expect(buildBacklog(files, CONFIG).issues[0].runTimeoutMinutes).toBe(90);
+  });
+
+  it('degrades a malformed or absent run_timeout: to null (= the CONFIG default, effort-scaled)', () => {
+    const files = [
+      issue('06-x.md', '---\nstatus: open\nrun_timeout: soon\n---\n\n# 06 — X\n'),
+      issue('07-y.md', '---\nstatus: open\n---\n\n# 07 — Y\n'),
+    ];
+    const { issues } = buildBacklog(files, CONFIG);
+    expect(issues[0].runTimeoutMinutes).toBeNull();
+    expect(issues[1].runTimeoutMinutes).toBeNull();
+  });
+});
+
 describe('buildBacklog — drain-worker tiering from CONFIG (issues 154/155)', () => {
   it('reads worker_model / escalation_ceiling / worker_effort from the CONFIG frontmatter', () => {
     const config = `---\nrepos:\n  a: /x\ndefault_repo: a\nworker_model: haiku\nescalation_ceiling: fable\nworker_effort: high\n---\n\n# proj CONFIG\n`;

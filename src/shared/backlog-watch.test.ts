@@ -17,6 +17,7 @@ function mk(id: number, status: IssueStatus, over: Partial<BacklogIssue> = {}): 
     repoKey: null,
     model: null,
     effort: null,
+    runTimeoutMinutes: null,
     inBatch: true,
     standalone: false,
     body: 'body',

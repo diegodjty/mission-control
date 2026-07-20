@@ -17,6 +17,7 @@ function mk(id: number, status: IssueStatus, dependsOn: number[] = []): BacklogI
     repoKey: null,
     model: null,
     effort: null,
+    runTimeoutMinutes: null,
     inBatch: true,
     standalone: false,
     body: '',
