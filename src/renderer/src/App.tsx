@@ -4,7 +4,7 @@ import { Map } from './Map';
 import { ProjectSwitcher } from './ProjectSwitcher';
 import { CommandPalette } from './CommandPalette';
 import { Attention } from './Attention';
-import { Launcher, type QuickFixIssueRef } from './Launcher';
+import { Launcher } from './Launcher';
 import { PlanningView } from './PlanningView';
 import { ReceiptsView } from './ReceiptsView';
 import { CostView } from './CostView';
@@ -16,8 +16,6 @@ import {
   OpenChoiceDialog,
   InterruptDialog,
 } from './AppDialogs';
-import { stageInvocation, type PlanningStage } from '../../shared/planning-model';
-import { quickFixRunTarget } from '../../shared/launcher-model';
 import {
   workbenchProjectPath,
   needsYouCount,
@@ -25,31 +23,19 @@ import {
   type JournalFile,
 } from '../../shared/attention-hub-model';
 import type { Backlog, IssueStatus } from '../../shared/backlog-model';
-import { resolveWorkerEffort, resolveWorkerModel } from '../../shared/worker-model';
-import { resolveRunTimeoutMinutesFrom } from '../../shared/run-timeout';
 import type {
   AttentionSnapshot,
   NavigateAttentionMessage,
   LauncherProject,
-  ProjectCardView,
   ProjectView,
   RunLogRecord,
   RunTarget,
-  TalkTarget,
   GitBranchStatusResult,
 } from '../../shared/ipc-contract';
 import {
   renderCompletionEvent,
   toCompletionEvent,
 } from '../../shared/capture-contract';
-import {
-  createSubmitPump,
-  canFlushChat,
-  reduceTyping,
-  INITIAL_TYPING_STATE,
-  type SubmitPump,
-  type TypingState,
-} from '../../shared/submit-pump';
 import {
   actionForLifecycle,
   lifecycleKindForOutcome,
@@ -82,21 +68,13 @@ import {
   latestReceiptOutcomeFor,
   mismatchKey,
 } from '../../shared/receipt-audit';
-import {
-  planDrain,
-  drainAvailability,
-  branchGuardDecision,
-  type ActiveRun,
-} from '../../shared/run-coordinator';
-import { overlapSerializationNote } from '../../shared/file-overlap';
+import { branchGuardDecision } from '../../shared/run-coordinator';
 import { takeoverKindFor, takeoverTarget } from '../../shared/run-takeover';
-import { isNotableDrainActivity } from '../../shared/workbench-memory';
 import { hasInFlightRun } from '../../shared/run-eligibility';
 import {
   repoForIssue,
   unknownRepoKeyNote,
   plannedRepoHoldNote,
-  nonGitRootNote,
   type IssueRepoResolution,
 } from '../../shared/run-targeting';
 import {
@@ -117,7 +95,6 @@ import {
   scanForProject,
   type ScopedScan,
 } from '../../shared/project-switch';
-import { shouldConfirmInterrupt } from '../../shared/interrupt-guard';
 import {
   DEFAULT_VIEW,
   isSlotMounted,
@@ -128,7 +105,6 @@ import {
   type ViewId,
 } from '../../shared/shell-model';
 import { mergeProviders, type Command } from '../../shared/command-registry';
-import { decideCardOpen } from '../../shared/open-card-decision';
 import {
   orphanedClaims,
   reopenWipToOpen,
@@ -148,8 +124,10 @@ import {
   RAIL_COLLAPSED_KEY,
   type Theme,
 } from './app/appHelpers';
-import { newRun, type InboxFocus, type PlanningTargetState, type TrackedRun } from './app/appTypes';
+import { newRun, type InboxFocus, type TrackedRun } from './app/appTypes';
 import { useMergeLane, type ProtectedMergeLandTarget } from './app/useMergeLane';
+import { useDrain } from './app/useDrain';
+import { useLauncher } from './app/useLauncher';
 import { RunTile } from './RunTile';
 
 /**
@@ -246,30 +224,8 @@ export function App(): JSX.Element {
   const [projects, setProjects] = useState<ProjectView[]>([]);
   const [activeProjectKey, setActiveProjectKey] = useState<string | null>(null);
   const [projectError, setProjectError] = useState<string | null>(null);
-  // A Project change this Window paused because a runner is live (issue 114):
-  // switching/opening a different Project here would tear the running Run down,
-  // so `attemptProjectChange` stashes the intended change and shows a
-  // confirmation offering "open in a new Window" instead. `path` is what
-  // `openWindow` gets (the key/dir is a valid open handle, issue 71); `proceed`
-  // performs the in-place change if the human chooses to interrupt anyway. Null
-  // when nothing is pending.
-  const [pendingProjectChange, setPendingProjectChange] = useState<{
-    path: string;
-    label: string;
-    proceed: () => void;
-  } | null>(null);
-  // A home-card open paused to ask "here or a new Window?" (issue 121). Set when
-  // this Window already has a Project open and the user picks a DIFFERENT one
-  // from the Launcher grid with no runner live — the choice the project bar's
-  // Open here / Open in new Window buttons give, brought to the home grid so two
-  // Projects can run side by side without touching the top bar. `path` is the
-  // clicked project's workbench dir (a valid `openProject`/`openWindow` handle).
-  // Null when nothing is pending. Distinct from `pendingProjectChange`, which is
-  // the stronger live-runner interrupt (issue 114).
-  const [pendingOpenChoice, setPendingOpenChoice] = useState<{
-    path: string;
-    label: string;
-  } | null>(null);
+  // `pendingProjectChange` (issue 114) / `pendingOpenChoice` (issue 121) move
+  // to `./app/useLauncher` alongside the open/switch flows that set them.
   // Drain-time "Initialize git" offer (issue 158, ADR-0017): pressing Drain
   // with cap > 1 on a project whose workspace root isn't a git repo yet opens
   // this instead of silently proceeding — `cap` is the chosen concurrency to
@@ -391,110 +347,11 @@ export function App(): JSX.Element {
   const [inboxFocus, setInboxFocus] = useState<InboxFocus | null>(null);
   const [inboxFocusSeq, setInboxFocusSeq] = useState(0);
 
-  // --- Launcher state (issue 81, ADR-0016) ----------------------------------
-  // The Launcher's project list: every active workbench-registry project with
-  // truthful backlog counts, re-read from disk each time the Launcher is
-  // shown — coming home always sees current state lines, never a stale cache.
-  const [launcherProjects, setLauncherProjects] = useState<LauncherProject[]>([]);
-  useEffect(() => {
-    if (view !== 'launcher') return;
-    let disposed = false;
-    void window.mc
-      .listLauncherProjects()
-      .then((res) => {
-        if (!disposed) setLauncherProjects(res.projects);
-      })
-      .catch(() => {
-        // A transient read error keeps the previous list; re-entering retries.
-      });
-    return () => {
-      disposed = true;
-    };
-  }, [view]);
-
-  // --- Project-first home grid (issue 115, ADR-0019) -------------------------
-  // The home page is a chooser: every workbench project as a card (name +
-  // open·wip·done + last-activity), clicking one switches this Window in place
-  // to that project's Map. Fetched from the portfolio aggregator when Home is
-  // shown, and kept live off the EXISTING registry + backlog subscriptions (no
-  // new watcher, per the issue) — so a newly registered repo or a status flip
-  // re-shapes the grid with no manual refresh.
-  const [projectCards, setProjectCards] = useState<ProjectCardView[]>([]);
-  const refreshProjectCards = useCallback((): void => {
-    void window.mc
-      .listProjectCards()
-      .then((res) => setProjectCards(res.cards))
-      .catch(() => {
-        // A transient read error keeps the previous grid; the next event retries.
-      });
-  }, []);
-  useEffect(() => {
-    if (view === 'launcher') refreshProjectCards();
-  }, [view, refreshProjectCards]);
-  useEffect(() => {
-    // Only re-shape the grid live while Home is actually showing — off Home,
-    // arriving there re-fetches anyway, so this avoids a disk read per backlog
-    // tick during a drain the user isn't watching. Issue 118 adds the attention
-    // subscription so the needs-you badge (parked HITL) also updates live; the
-    // Run-state changes that drive "N running" / the float ride the registry-
-    // changed push the backend fires on Run spawn/exit.
-    const onChange = (): void => {
-      if (viewRef.current === 'launcher') refreshProjectCards();
-    };
-    const offRegistry = window.mc.onProjectRegistryChanged(onChange);
-    const offBacklog = window.mc.onBacklogChanged(onChange);
-    const offAttention = window.mc.onAttentionChanged(onChange);
-    return () => {
-      offRegistry();
-      offBacklog();
-      offAttention();
-    };
-  }, [refreshProjectCards]);
-  // The "Just talk" Pane (issue 81): one warm bare session — no issue, no
-  // tracking. Deliberately NOT per-Project state: it is anchored to the cwd it
-  // was started on, so a Project switch does not clear it.
-  const [talk, setTalk] = useState<TalkTarget | null>(null);
-  // The New-project landing nudge (issue 82): after onboarding creates a
-  // project, the Window lands on its (empty) Map with a dismissible pointer
-  // toward Big feature (planning) or Quick fix. Cleared on dismissal and on
-  // any Project switch — it is about the project just created, nothing else.
-  const [onboardNudge, setOnboardNudge] = useState<string | null>(null);
-
-  // --- Planning view state (issue 83, ADR-0016) ------------------------------
-  // Big feature opens the thin Planning view on the chosen project: a warm
-  // Pane beside the live doc preview. Per-Project — cleared on a switch. The
-  // stage buttons (Grill / PRD / Issues) type their skill invocation into the
-  // Pane through a DEDICATED submit-pump instance (issue 60's tested module),
-  // honoring its own defer-while-typing gate — the planning session's compose
-  // state, not the Dispatcher's.
-  const [planning, setPlanning] = useState<PlanningTargetState | null>(null);
-  const planningTyping = useRef<TypingState>(INITIAL_TYPING_STATE);
-  const planningPumpRef = useRef<SubmitPump | null>(null);
-  if (planningPumpRef.current === null) {
-    planningPumpRef.current = createSubmitPump({
-      write: (sessionId, data) => window.mc.writePty({ sessionId, data }),
-      canFlush: (now) => canFlushChat(planningTyping.current, now),
-    });
-  }
-  const planningPump = planningPumpRef.current;
-  // Monotonic per-click id so re-clicking a stage button re-sends (the pump
-  // dedupes by key; each click is deliberately its own delivery).
-  const planningStageSeq = useRef(0);
-
-  // The Just-talk Pane's own submit-pump (issue 152's Debrief affordance
-  // reuses the issue-91 type-only pattern): a dedicated instance so its
-  // defer-while-typing gate is the talk session's own compose state, not the
-  // Dispatcher's or Planning's.
-  const talkTyping = useRef<TypingState>(INITIAL_TYPING_STATE);
-  const talkPumpRef = useRef<SubmitPump | null>(null);
-  if (talkPumpRef.current === null) {
-    talkPumpRef.current = createSubmitPump({
-      write: (sessionId, data) => window.mc.writePty({ sessionId, data }),
-      canFlush: (now) => canFlushChat(talkTyping.current, now),
-    });
-  }
-  const talkPump = talkPumpRef.current;
-  const [talkFocusSignal, setTalkFocusSignal] = useState(0);
+  // Launcher project list / home-grid cards / Just-talk Pane / New-project
+  // nudge / Planning-view state, and the open/switch flows that drive them,
+  // are extracted to `./app/useLauncher` (issue 187) — invoked further down
+  // once its inputs (`liveRunIssueIds`, `startRun`) are ready, mirroring the
+  // merge/drain seams' own ordering.
 
   // --- Run state -----------------------------------------------------------
   const [runs, setRuns] = useState<TrackedRun[]>([]);
@@ -528,20 +385,9 @@ export function App(): JSX.Element {
   // can never disagree.
   const attentionNeedsYou = useMemo(() => needsYouCount(attention.items), [attention]);
 
-  // The shell context (shell-model, issue 123): the Plan tab and Planning
-  // host follow the planning session; the Pane tab's count and the grid's
-  // keep-mounted hosting follow the tracked Runs and the talk session; the
-  // Attention entry's badge follows the needs-you count (issue 124).
-  const shellCtx = useMemo<ShellContext>(
-    () => ({
-      hasPlanning: planning !== null,
-      runCount: runs.length,
-      hasTalk: talk !== null,
-      attentionNeedsYou,
-    }),
-    [planning, runs, talk, attentionNeedsYou],
-  );
-  shellCtxRef.current = shellCtx;
+  // The shell context itself (shell-model, issue 123) is computed further down
+  // — it needs `launcher.planning`/`launcher.talk`, which aren't ready until
+  // `useLauncher` is invoked (see the note there on why that's late).
 
   // --- Run log (issue 34, ADR-0013) ----------------------------------------
   // The Completion-block records for the active Project, newest first — read
@@ -572,15 +418,6 @@ export function App(): JSX.Element {
   const receiptAudited = useRef<Set<number>>(new Set<number>());
   const mismatchSurfaced = useRef<Set<string>>(new Set<string>());
 
-  // --- Drain state ---------------------------------------------------------
-  const [draining, setDraining] = useState(false);
-  const [cap, setCap] = useState(2);
-  const [drainMessage, setDrainMessage] = useState('');
-  // The "Debrief this drain" affordance (issue 152): offered at most once per
-  // drain-end journal entry (main's DebriefSeenStore is the seen-state
-  // authority; this just reflects its verdict for the current drain).
-  const [debriefAvailable, setDebriefAvailable] = useState(false);
-
   // --- Ambient activity log (issue 36/38/43, ADR-0011/0012) ----------------
   // Retired the Dispatcher conversation itself (ADR-0022): no orchestrator
   // session, no chat PTY, no approve/reject gate. What remains is the ambient
@@ -591,18 +428,6 @@ export function App(): JSX.Element {
   // tracks which Run-log records have already produced a note, so a
   // re-render/re-scan doesn't double-note one.
   const activityFed = useRef<Set<string>>(new Set<string>());
-  // Monotonic per-drain sequence, so each drain's stopped/halted note gets a
-  // stable, deduped id (issue 66).
-  const drainSeq = useRef<number>(0);
-  // --- Drain journal state (issue 73, ADR-0015) ----------------------------
-  // What was ALREADY in the Run log / activity strip when the current drain
-  // started, so the journal entry carries exactly THIS drain's story — the
-  // delta — not the Project's whole history. Snapshotted in `startDrain`.
-  const drainLogBaseline = useRef<Set<string>>(new Set<string>());
-  const drainNotableBaseline = useRef<Set<string>>(new Set<string>());
-  // The last drain sequence whose journal write was scheduled — "written once
-  // per drain": the user-stop and Coordinator-stop paths can't both fire it.
-  const drainJournalSeq = useRef<number>(0);
   // The ambient note log (issue 36, ADR-0011 as narrowed by ADR-0022): plain
   // `{ id, label }` facts — a Run completed, a stray Receipt was adopted, a
   // doc-drift finding, a status refresh — kept only because the drain journal
@@ -639,8 +464,27 @@ export function App(): JSX.Element {
   // (issue 185); `mergeLaneResetRef` lets `resetForProjectSwitch` (defined below,
   // before the hook is invoked further down where its inputs are ready) clear the
   // lane's state without reaching into it directly — the same ref-to-latest-
-  // callback pattern `talkPumpRef` already uses for the same ordering reason.
+  // callback pattern the drain/launcher refs below use for the same reason.
   const mergeLaneResetRef = useRef<(() => void) | null>(null);
+
+  // Same ref-to-latest-callback pattern for the drain-coordinator seam
+  // (`./app/useDrain`, issue 186) — `resetForProjectSwitch` clears its
+  // draining/message/debrief state without reaching into the hook directly.
+  const drainResetRef = useRef<(() => void) | null>(null);
+  // `useLauncher`'s `debriefDrain` (issue 187) dismisses the "Debrief this
+  // drain" affordance through this same ref-to-latest-callback indirection —
+  // it is invoked before the drain hook's own inputs (`logNote`) are ready.
+  const drainDismissDebriefRef = useRef<(() => void) | null>(null);
+
+  // The launcher/planning/project-switch seam (`./app/useLauncher`, issue
+  // 187) is invoked further down, once ITS inputs (`liveRunIssueIds`,
+  // `startRun`) are ready — the reverse of the mergeLane/drain ordering: here
+  // it's `resetForProjectSwitch` (below) that needs the hook's `reset`, and
+  // the hook's own open/switch flows that need `resetForProjectSwitch`, so
+  // each side reaches the other through a live ref rather than one widening
+  // the other's dependency order.
+  const launcherResetRef = useRef<(() => void) | null>(null);
+  const resetForProjectSwitchRef = useRef<(() => void) | null>(null);
 
   // --- Protected-branch guard (issue 113) ----------------------------------
   // Before a Run's work LANDS on a protected branch (`main`/`master`), the drain
@@ -771,10 +615,9 @@ export function App(): JSX.Element {
     setRuns([]);
     setFocusedId(null);
     setMaximizedId(null);
-    setDraining(false);
-    setDrainMessage('');
-    setDebriefAvailable(false);
-    talkPumpRef.current?.reset();
+    // The drain-coordinator seam owns this reset; called via a ref for the
+    // same ordering reason as `mergeLaneResetRef` below.
+    drainResetRef.current?.();
     // The ambient activity log is per-Project: drop it on a switch so the new
     // Project never inherits the previous one's notes.
     activityFed.current.clear();
@@ -807,55 +650,20 @@ export function App(): JSX.Element {
     // different Project must not surface (or select) the old one's reference.
     // (The attention snapshot itself is app-wide and deliberately stays.)
     setInboxFocus(null);
-    // Same for the New-project landing nudge (issue 82).
-    setOnboardNudge(null);
-    // The Planning view is about ONE project (issue 83): drop it — and its
-    // pump/typing state — so the next project never inherits a planning Pane
-    // or a queued stage invocation. If this Window was ON the Planning view,
-    // land on the Map (the view would otherwise render nothing).
-    setPlanning(null);
-    planningPumpRef.current?.reset();
-    planningTyping.current = INITIAL_TYPING_STATE;
-    applyShellEvent({ kind: 'planning-closed' });
+    // The launcher/planning/project-switch seam owns the rest (onboardNudge,
+    // the Planning view + its pump/typing, the talk pump's queued sends):
+    // called via a ref for the same reason as `mergeLaneResetRef`/
+    // `drainResetRef` above — `./app/useLauncher` is invoked further down.
+    launcherResetRef.current?.();
     setBacklog(null);
     setProjectPath(null);
   }, [releaseOrphanedClaims]);
+  resetForProjectSwitchRef.current = resetForProjectSwitch;
 
-  const openProjectHere = useCallback(async (path: string): Promise<void> => {
-    // Only open on an explicit path; an empty path is a no-op, never a claim on
-    // the backend cwd (issue 14). The path may be a repo OR a workbench project
-    // dir — main resolves either alias to the same Project identity (issue 71).
-    if (!path.trim()) return;
-    const res = await window.mc.openProject({ path });
-    setProjects(res.projects);
-    setProjectError(res.error);
-    if (res.ok) {
-      // Opening a different Project than the one active resets its state (issue 26).
-      if (isProjectSwitch(activeProjectKeyRef.current, res.activeProjectKey)) {
-        resetForProjectSwitch();
-      }
-      setActiveProjectKey(res.activeProjectKey);
-      // An explicit open lands on the Map — in particular off the Launcher
-      // (issue 81); a no-op elsewhere (opens already happen from the Map).
-      applyShellEvent({ kind: 'project-opened' });
-    }
-  }, [resetForProjectSwitch]);
-
-  const switchProject = useCallback(async (key: string): Promise<void> => {
-    const res = await window.mc.switchProject({ key });
-    setProjects(res.projects);
-    setProjectError(res.error);
-    if (res.ok) {
-      // Clear the previous Project's Runs/scan/merge state before the Map loads
-      // the new one, so nothing bleeds across the switch (issue 26).
-      if (isProjectSwitch(activeProjectKeyRef.current, res.activeProjectKey)) {
-        resetForProjectSwitch();
-      }
-      setActiveProjectKey(res.activeProjectKey);
-    }
-  }, [resetForProjectSwitch]);
-
-  // NOTE: `openAttentionItem` / `openAttentionProject` (the surface's
+  // NOTE: `openProjectHere` / `switchProject` / `attemptProjectChange` /
+  // `openCard` — the open/switch flows every Project surface routes through —
+  // live in `./app/useLauncher` (issue 187) alongside the rest of the
+  // launcher/planning state; `openAttentionItem` / `openAttentionProject` (the
   // click-through) live below `attemptProjectChange` — they route through it so
   // acting on attention honors the live-runner interrupt guard (issue 125).
 
@@ -1348,29 +1156,74 @@ export function App(): JSX.Element {
     [runs, runStatusOf],
   );
 
-  // Attempt to change this Window's Project (issue 114). When a runner is live
-  // in the current Project, changing here would kill it (resetForProjectSwitch
-  // tears the Runs down), so the pure `shouldConfirmInterrupt` gates whether to
-  // pause: if it would interrupt a live runner, stash the change and show the
-  // "open in a new Window instead?" confirmation; otherwise perform it straight
-  // away. The two user-facing switch surfaces — the Project bar switcher and the
-  // Launcher's Continue list — both route through here so they behave the same.
-  const attemptProjectChange = useCallback(
-    (change: { path: string; label: string; proceed: () => void }): void => {
-      if (
-        shouldConfirmInterrupt({
-          hasLiveRunner: liveRunIssueIds.length > 0,
-          currentKey: activeProjectKeyRef.current,
-          targetKey: change.path,
-        })
-      ) {
-        setPendingProjectChange(change);
-      } else {
-        change.proceed();
-      }
-    },
-    [liveRunIssueIds],
+  // The launcher/planning/project-switch seam (`./app/useLauncher`, issue
+  // 187): invoked here — right after `liveRunIssueIds`, which its
+  // `attemptProjectChange`/`openCard` need — rather than after `startRun`
+  // (defined further down), so `startRun` is threaded through a live ref
+  // instead (`startRunRef`), the same ordering trick `resetForProjectSwitch`
+  // uses in reverse via `resetForProjectSwitchRef` above.
+  const startRunRef = useRef<((target: RunTarget) => void) | null>(null);
+  const {
+    launcherProjects,
+    projectCards,
+    talk,
+    talkFocusSignal,
+    onboardNudge,
+    dismissOnboardNudge,
+    planning,
+    pendingProjectChange,
+    setPendingProjectChange,
+    pendingOpenChoice,
+    setPendingOpenChoice,
+    openProjectHere,
+    switchProject,
+    attemptProjectChange,
+    openCard,
+    startPlanning,
+    handlePlanningSession,
+    handlePlanningSessionEnd,
+    handlePlanningInput,
+    submitPlanningStage,
+    landOnNewProject,
+    talkToProject,
+    talkToFolder,
+    endTalk,
+    handleTalkSession,
+    debriefDrain,
+    runQuickFixNow,
+    reset: launcherReset,
+  } = useLauncher({
+    view,
+    viewRef,
+    activeProjectKeyRef,
+    liveRunIssueIds,
+    activeProject,
+    applyShellEvent,
+    setProjects,
+    setProjectError,
+    setActiveProjectKey,
+    startRunRef,
+    setRuns,
+    setFocusedId,
+    resetForProjectSwitchRef,
+    drainDismissDebriefRef,
+  });
+  launcherResetRef.current = launcherReset;
+
+  // The shell context (shell-model, issue 123): the Plan tab and Planning
+  // host follow the planning session; the Pane tab's count and the grid's
+  // keep-mounted hosting follow the tracked Runs and the talk session; the
+  // Attention entry's badge follows the needs-you count (issue 124).
+  const shellCtx = useMemo<ShellContext>(
+    () => ({
+      hasPlanning: planning !== null,
+      runCount: runs.length,
+      hasTalk: talk !== null,
+      attentionNeedsYou,
+    }),
+    [planning, runs, talk, attentionNeedsYou],
   );
+  shellCtxRef.current = shellCtx;
 
   // The actual open a click-through performs once the guard clears (issue
   // 80/125): open/switch to the project through the NORMAL open/claim flow —
@@ -1461,36 +1314,8 @@ export function App(): JSX.Element {
     return off;
   }, [attemptProjectChange, openAttentionTarget]);
 
-  // A Launcher home-grid card was clicked (issue 121). The pure `decideCardOpen`
-  // picks one of three outcomes so this stays a thin dispatcher: open in place
-  // (empty Window, or the card is the Project already open here), defer to the
-  // live-runner interrupt overlay (issue 114), or — the new case — ask whether
-  // to open the picked Project here or in a new Window. That choice used to live
-  // only on the top project bar; bringing it to the home grid lets the user run
-  // two Projects side by side without reaching for the bar.
-  const openCard = useCallback(
-    (card: ProjectCardView): void => {
-      const decision = decideCardOpen({
-        currentKey: activeProjectKeyRef.current,
-        cardKey: card.workbenchDir,
-        hasLiveRunner: liveRunIssueIds.length > 0,
-      });
-      if (decision.kind === 'confirm-interrupt') {
-        setPendingProjectChange({
-          path: card.workbenchDir,
-          label: card.label,
-          proceed: () => void openProjectHere(card.workbenchDir),
-        });
-      } else if (decision.kind === 'choose-window') {
-        setPendingOpenChoice({ path: card.workbenchDir, label: card.label });
-      } else {
-        // open-here: switch this Window in place (a no-op re-open when the card
-        // is already the active Project — openProjectHere lands back on the Map).
-        void openProjectHere(card.workbenchDir);
-      }
-    },
-    [openProjectHere, liveRunIssueIds],
-  );
+  // `openCard` (issue 121's home-grid card click) lives in `./app/useLauncher`
+  // alongside `openProjectHere`/`pendingOpenChoice`.
 
   // Pure derivations from the on-disk scan + the live-Run set: which issues show
   // `running` / `stranded` / `commit failed` / `finished (unmerged)` on the Map,
@@ -1762,174 +1587,11 @@ export function App(): JSX.Element {
     [runs, branchStatus, startRun],
   );
 
-  // --- Launcher actions (issue 81, ADR-0016) --------------------------------
-
-  // Big feature (issue 83): open the chosen project through the NORMAL
-  // open/claim flow (ownership rules and all — a refusal shows in the project
-  // bar and the Window stays on the Launcher), then land on the Planning view:
-  // a warm Pane beside the live doc preview.
-  const startPlanning = useCallback(
-    async (p: LauncherProject): Promise<void> => {
-      const res = await window.mc.openProject({ path: p.workbenchDir });
-      setProjects(res.projects);
-      setProjectError(res.error);
-      if (!res.ok) return;
-      if (isProjectSwitch(activeProjectKeyRef.current, res.activeProjectKey)) {
-        resetForProjectSwitch();
-      }
-      setActiveProjectKey(res.activeProjectKey);
-      const projectView = res.projects.find((v) => v.key === res.activeProjectKey) ?? null;
-      setPlanning({
-        workbenchDir: p.workbenchDir,
-        repoPath: projectView?.defaultRepoPath ?? p.defaultRepoPath,
-        label: p.label,
-      });
-      applyShellEvent({ kind: 'planning-started' });
-    },
-    [resetForProjectSwitch],
-  );
-
-  // The planning Pane's session lifecycle: attach the pump to the live PTY so
-  // stage invocations reach THIS session (and are requeued for a replacement
-  // if it dies mid-delivery — the pump's issue-60 guarantees).
-  const handlePlanningSession = useCallback(
-    (sessionId: string): void => planningPump.attachSession(sessionId),
-    [planningPump],
-  );
-  const handlePlanningSessionEnd = useCallback(
-    (): void => planningPump.attachSession(null),
-    [planningPump],
-  );
-  // Fold the user's keystrokes into the planning compose state (issue 48's
-  // gate): a stage invocation never interleaves with the user's own typing.
-  const handlePlanningInput = useCallback((data: string): void => {
-    planningTyping.current = reduceTyping(planningTyping.current, data, Date.now());
-  }, []);
-  // A stage button click: deliver the skill invocation through the pump —
-  // typed then submitted for PRD/Issues; typed as an UNsubmitted prefix for
-  // Grill, whose topic the user finishes themselves (issue 91). The pump's
-  // defer-while-typing gate applies to both kinds.
-  const submitPlanningStage = useCallback(
-    (stage: PlanningStage): void => {
-      planningStageSeq.current += 1;
-      const invocation = stageInvocation(stage);
-      planningPump.enqueue({
-        key: `planning-stage:${stage}:${planningStageSeq.current}`,
-        text: invocation.text,
-        submit: invocation.submit,
-      });
-    },
-    [planningPump],
-  );
-
-  // New project (issue 82): the guided flow just created and committed the
-  // workbench project — land this Window on it through the NORMAL open flow
-  // (so ownership/identity work exactly as any open), then show the nudge
-  // toward Big feature or Quick fix on the empty Map. The nudge is set AFTER
-  // the open, because a project switch deliberately clears it.
-  const landOnNewProject = useCallback(
-    async (created: { workbenchDir: string; label: string }): Promise<void> => {
-      await openProjectHere(created.workbenchDir);
-      setOnboardNudge(created.label);
-    },
-    [openProjectHere],
-  );
-
-  // Just talk (issue 81): one warm bare Pane — CORE.md injected for workbench
-  // projects (main reads it at the spawn edge), nothing claimed or tracked.
-  const startTalk = useCallback(
-    (target: TalkTarget): void => {
-      setTalk(target);
-      applyShellEvent({ kind: 'run-started' });
-    },
-    [applyShellEvent],
-  );
-
-  const talkToProject = useCallback(
-    (p: LauncherProject): void =>
-      startTalk({ cwd: p.defaultRepoPath, workbenchProjectRoot: p.workbenchDir, label: p.label }),
-    [startTalk],
-  );
-
-  const talkToFolder = useCallback(async (): Promise<void> => {
-    const { path } = await window.mc.pickProjectFolder();
-    if (!path) return;
-    startTalk({
-      cwd: path,
-      workbenchProjectRoot: null,
-      label: path.split('/').filter(Boolean).pop() ?? path,
-    });
-  }, [startTalk]);
-
-  const endTalk = useCallback((): void => {
-    setTalk(null);
-    talkPump.reset();
-  }, [talkPump]);
-
-  const handleTalkSession = useCallback(
-    (sessionId: string): void => talkPump.attachSession(sessionId),
-    [talkPump],
-  );
-
-  // "Debrief this drain" (issue 152): open/focus the Just-talk Pane for the
-  // active Project with `/debrief` typed but unsubmitted — the issue-91
-  // pattern (the human finishes the sentence and presses enter themselves).
-  // No project focus ⇒ nothing louder than a no-op (the affordance simply
-  // does nothing, per the issue's out-of-scope note).
-  const debriefDrain = useCallback((): void => {
-    if (activeProject === null) return;
-    setDebriefAvailable(false);
-    startTalk({
-      cwd: activeProject.defaultRepoPath,
-      workbenchProjectRoot: activeProject.key,
-      label: activeProject.label,
-    });
-    talkPump.enqueue({ key: `debrief:${activeProject.key}`, text: '/debrief', submit: false });
-    setTalkFocusSignal((n) => n + 1);
-  }, [activeProject, startTalk, talkPump]);
-
-  // Quick fix's Run now (issue 81): open the chosen project through the
-  // NORMAL open/claim flow, then launch exactly ONE bare Run on the freshly
-  // written issue (no Dispatcher — ADR-0010: a single manual Run stays a bare
-  // Pane). The target is built ENTIRELY from the created issue's project
-  // (issue 88, walkthrough-86 finding): re-deriving paths from the open
-  // result's window-active state let an issue created in project A spawn a
-  // Run with project B's repo + workbench paths — the created issue's
-  // identity is carried end-to-end instead.
-  const runQuickFixNow = useCallback(
-    async (p: LauncherProject, issue: QuickFixIssueRef): Promise<void> => {
-      const res = await window.mc.openProject({ path: p.workbenchDir });
-      setProjects(res.projects);
-      setProjectError(res.error);
-      if (!res.ok) {
-        // Owned by another Window (or any open failure): the issue is safely
-        // queued in the backlog either way — surface the reason and stay put.
-        return;
-      }
-      const switched = isProjectSwitch(activeProjectKeyRef.current, res.activeProjectKey);
-      if (switched) resetForProjectSwitch();
-      setActiveProjectKey(res.activeProjectKey);
-      const target: RunTarget = quickFixRunTarget(p, issue);
-      if (switched) {
-        // The Window just landed on this project: the per-Project state
-        // (backlog, scan, runs) in this closure is the PREVIOUS project's —
-        // or empty — so `startRun`'s isolation reconcile must not run against
-        // it. The freshly created issue is by construction the lone Run here:
-        // add it directly, exactly as startRun's unresolved-project fallback
-        // does — a single bare Pane on the issue's target repo.
-        setRuns((prev) =>
-          prev.some((r) => r.target.issueId === target.issueId) ? prev : [...prev, newRun(target)],
-        );
-        setFocusedId(target.issueId);
-        applyShellEvent({ kind: 'run-started' });
-      } else {
-        // Same project already open: the normal path, with its duplicate and
-        // concurrency-isolation guards against the live Run set.
-        startRun(target);
-      }
-    },
-    [resetForProjectSwitch, startRun],
-  );
+  // The Launcher actions (issue 81, ADR-0016) — `startPlanning`,
+  // `landOnNewProject`, the Just-talk handlers, `debriefDrain`,
+  // `runQuickFixNow` — all live in `./app/useLauncher` now; `startRun` is fed
+  // to it live via `startRunRef` (see the note where the hook is invoked).
+  startRunRef.current = startRun;
 
   const stopRun = useCallback((issueId: number): void => {
     setRuns((prev) =>
@@ -2463,147 +2125,6 @@ export function App(): JSX.Element {
     }
   }, [runLog, debouncedStatusModel, projectPath, logNote]);
 
-  // Write the drain's journal entry (issue 73, ADR-0015): when a drain ends —
-  // any stop reason — ONE dated summary lands in the workbench project's
-  // `memory/journal/`, built from THIS drain's Run-log delta plus its notable
-  // events (adoptions, finished-without-receipt), and auto-committed in main.
-  // Once per drain (both stop paths funnel here), after one Receipt grace
-  // window — a drain often ends on the `done` flip a beat before the final
-  // Run's Receipt is ingested, and the journal should name that Run too.
-  // Legacy Projects: no memory dir; the guard makes both halves inert.
-  const writeDrainJournalFor = useCallback(
-    (reason: string): void => {
-      if (projectPath === null || activeProject?.kind !== 'workbench') return;
-      const seq = drainSeq.current;
-      if (drainJournalSeq.current >= seq) return;
-      drainJournalSeq.current = seq;
-      const journalPath = projectPath;
-      const logBaseline = drainLogBaseline.current;
-      const notableBaseline = drainNotableBaseline.current;
-      setTimeout(() => {
-        // A Project switch mid-window: this journal belongs to the old
-        // Project; writing it against the new one would be a lie — skip.
-        if (projectPathRef.current !== journalPath) return;
-        const records = runLogRef.current.filter((rec) => !logBaseline.has(rec.id));
-        const notables = activityNotesRef.current
-          .filter((a) => !notableBaseline.has(a.id) && isNotableDrainActivity(a.id))
-          .map((a) => a.label);
-        void window.mc
-          .writeDrainJournal({ projectPath: journalPath, reason, records, notables })
-          .then((result) => {
-            // Same Project-switch guard as the write itself: a stale offer
-            // must never surface against whatever Project is now open.
-            if (result.offerDebrief && projectPathRef.current === journalPath) {
-              setDebriefAvailable(true);
-            }
-          })
-          .catch(() => {});
-      }, RECEIPT_AUDIT_GRACE_MS);
-    },
-    [projectPath, activeProject],
-  );
-
-  // The actual drain start (issue 158 split this out of `startDrain`, below):
-  // everything that happens once every refusal gate has passed. Called
-  // directly by the "Initialize git" / "Drain serially" dialog actions so
-  // neither has to re-run the notUnderGit gate it just resolved.
-  const proceedDrain = useCallback(
-    (chosenCap: number): void => {
-      setCap(Math.max(1, Math.floor(chosenCap) || 1));
-      setDrainMessage('');
-      setDebriefAvailable(false);
-      setDraining(true);
-      // Each drain gets its own sequence so its stopped/halted note (issue 66)
-      // carries a stable, deduped id.
-      drainSeq.current += 1;
-      // Journal baselines (issue 73): what predates this drain is not this
-      // drain's story — the entry is built from the delta past these sets.
-      drainLogBaseline.current = new Set(runLogRef.current.map((rec) => rec.id));
-      drainNotableBaseline.current = new Set(activityNotesRef.current.map((a) => a.id));
-      // The drain loop drives the Run Coordinator (`planDrain`) directly
-      // (ADR-0022) — no orchestrator session to spin up here.
-      applyShellEvent({ kind: 'run-started' });
-    },
-    [applyShellEvent],
-  );
-
-  const startDrain = useCallback(
-    (chosenCap: number): void => {
-      // Refuse to drain onto a mid-merge main (issue 24) — resolve/abort first.
-      if (midMerge) {
-        setDrainMessage(
-          'Cannot drain: main is mid-merge — resolve the conflict or Abort the merge first.',
-        );
-        return;
-      }
-      // Drain honesty (issue 90): the Map disables the control when nothing is
-      // startable/unblockable, but a click can land in the beat before the
-      // watch push re-disables it. Refuse here with the same truthful reason
-      // rather than spinning a Dispatcher session up over nothing. (If
-      // eligibility vanishes AFTER this guard passes, the plan effect below
-      // ends the drain immediately with the normal no-eligible stop fact.)
-      const gate = drainAvailability(
-        backlog?.issues ?? [],
-        runs.filter((r) => runStatusOf(r) === 'running').map((r) => r.target.issueId),
-      );
-      if (!gate.available) {
-        setDrainMessage(`Cannot drain: ${gate.reason}.`);
-        return;
-      }
-      // Non-git workspace root + a concurrency ask above 1 (issue 158,
-      // ADR-0017): explain the limitation and offer Initialize git rather than
-      // silently letting issue 157's engine clamp/serialize behind the scenes.
-      if (notUnderGit && Math.max(1, Math.floor(chosenCap) || 1) > 1) {
-        setGitInitError(null);
-        setGitInitPrompt({ cap: chosenCap });
-        return;
-      }
-      proceedDrain(chosenCap);
-    },
-    [midMerge, backlog, runs, runStatusOf, notUnderGit, proceedDrain],
-  );
-
-  // Branch-aware drain start (issue 167): a drain on a protected branch or a
-  // detached HEAD is caught here, BEFORE `startDrain`'s own gates run — so the
-  // human resolves the branch first and every gate below sees the branch they
-  // actually chose.
-  const guardedStartDrain = useCallback(
-    (chosenCap: number): void => {
-      const decision = branchGuardDecision(branchStatus);
-      // Same "never fail open while loading" rule as guardedStartRun (issue
-      // 176) — the Drain control is disabled for this same window.
-      if (decision === 'pending') return;
-      if (decision === 'prompt') {
-        setBranchPromptMode('choose');
-        setBranchPromptError(null);
-        setBranchPrompt({ kind: 'drain', cap: chosenCap });
-        return;
-      }
-      startDrain(chosenCap);
-    },
-    [branchStatus, startDrain],
-  );
-
-  // Resume whichever Run/drain the branch prompt is holding, bypassing the
-  // guard (it just got resolved) — fired by Create/Switch (after the git op
-  // lands) and by Proceed anyway.
-  const resumeBranchPrompt = useCallback((): void => {
-    if (branchPrompt === null) return;
-    const pending = branchPrompt;
-    setBranchPrompt(null);
-    if (pending.kind === 'run') startRun(pending.target);
-    else startDrain(pending.cap);
-  }, [branchPrompt, startRun, startDrain]);
-
-  const stopDrain = useCallback((): void => {
-    setDraining(false);
-    const message = 'Drain stopped by you — in-flight Runs keep going.';
-    setDrainMessage(message);
-    logNote(`drain-stopped:${drainSeq.current}`, 'relay', message);
-    // A user stop is a drain end like any other (issue 73): journal it.
-    writeDrainJournalFor(message);
-  }, [logNote, writeDrainJournalFor]);
-
   // Keep the App's backlog copy fresh from every Map load/live-change so the
   // Coordinator plans against current disk truth.
   const handleBacklogLoaded = useCallback(
@@ -2614,292 +2135,53 @@ export function App(): JSX.Element {
     [],
   );
 
-  // --- The drain loop, expressed as a pure re-plan ------------------------
-  // On any change to the backlog, the tracked Runs, or the cap, ask the Run
-  // Coordinator what to do. Startable issues get a fresh Pane; a stop condition
-  // ends the drain with its reason. This is reactive (no timer): a Run reaching
-  // `done` (disk → backlog push) or its session exiting frees a slot and
-  // re-triggers this effect, which auto-starts the next queued Run.
-  //
-  // Before opening those Panes, isolation is reconciled (ADR-0002): the Git/
-  // Worktree Adapter puts a lone Run on `main` and gives each Run its own
-  // worktree once 2+ are concurrent, then hands back each Run's cwd — so a
-  // parallel Run's Pane spawns inside its worktree, never the shared checkout.
-  //
-  // This effect no longer re-fires on every ~1.5s poll tick (issue 30): its only
-  // status input, `runStatusOf`, now derives from the value-guarded scan
-  // (`committedStatusById`), whose identity is stable across no-change ticks — so
-  // `applyIsolation` runs when the backlog / tracked Runs / cap actually change,
-  // not once per scan. It still early-returns when nothing new is startable, so a
-  // steady-state drain issues no reconcile at all.
-  useEffect(() => {
-    if (!draining || !backlog || projectPath === null) return;
+  // --- Drain-coordinator seam (issue 186) -----------------------------------
+  // Extracted to `./app/useDrain`: the re-plan effect against the Run
+  // Coordinator (`planDrain`), the per-drain generation, the journal-baseline
+  // bookkeeping, and the spawn/telemetry glue (worker tier/effort/timeout
+  // resolution for each startable issue).
+  const drain = useDrain({
+    backlog,
+    projectPath,
+    activeProject,
+    runs,
+    setRuns,
+    setFocusedId,
+    runLog,
+    runLogRef,
+    activityNotesRef,
+    projectPathRef,
+    runStatusOf,
+    isIsolated,
+    needsIsolation,
+    midMerge,
+    finishedUnmergedIds,
+    issueRepoResolutions,
+    repoForIssueId,
+    workbenchPathsForRun,
+    logNote,
+    applyShellEvent,
+    branchStatus,
+    notUnderGit,
+    setGitInitPrompt,
+    setGitInitError,
+    setBranchPrompt,
+    setBranchPromptMode,
+    setBranchPromptError,
+  });
+  drainResetRef.current = drain.reset;
+  drainDismissDebriefRef.current = drain.dismissDebrief;
 
-    // Issues whose `repo:` key doesn't resolve are excluded from the plan and
-    // must not stall their siblings (issue 72), but for two DIFFERENT reasons
-    // (issue 96, ADR-0017):
-    //   - `planned` — the repo is declared but not yet created (planned-first).
-    //     The issue is HELD, not errored: once its creating issue makes the
-    //     repo, it resolves and runs. Surfaced once as a plain hold note.
-    //   - `unknownKey` — the key names neither an existing nor a declared repo
-    //     (a typo/misconfig). Flagged distinctly as an error, as before.
-    // Either way the issue is dropped from `plannable` (its dependents stay
-    // blocked naturally — a missing dependency is an unmet dependency).
-    const plannable = backlog.issues.filter((issue) => {
-      const resolution = issueRepoResolutions.get(issue.id);
-      if (resolution === undefined || resolution.ok) return true;
-      if (resolution.reason === 'planned') {
-        logNote(
-          `repo-planned:${issue.id}:${resolution.repoKey}`,
-          'relay',
-          plannedRepoHoldNote(issue.id, resolution.repoKey),
-        );
-      } else {
-        logNote(
-          `repo-unresolved:${issue.id}:${resolution.unknownKey}`,
-          'relay',
-          unknownRepoKeyNote(
-            issue.id,
-            resolution.unknownKey,
-            Object.keys(activeProject?.repos ?? {}),
-          ),
-        );
-      }
-      return false;
-    });
-
-    // Each Run carries the outcome its latest Receipt DECLARED (or null when
-    // none exists) so the Coordinator can tell a parked HITL Run — a success
-    // the drain continues past — from a genuinely blocked one that halts it
-    // (`isParkedHitl`, issue 64). Declared state only, never prose heuristics.
-    const activeRuns: ActiveRun[] = runs.map((r) => ({
-      issueId: r.target.issueId,
-      status: runStatusOf(r),
-      receiptOutcome: latestReceiptOutcomeFor(runLog, r.target.issueId),
-      // A Run started by an EARLIER drain generation is a leftover phantom
-      // (issue 132): a `claude` Pane still lingering alive from yesterday's
-      // drain that never flipped `done` or wrote a Receipt, so run-state reads
-      // it `running` forever. It must not occupy a slot in — nor halt — this
-      // fresh drain (its issue is still guarded against re-start). A manual Run
-      // (drainGeneration null) or one this drain started counts as before.
-      leftover: r.drainGeneration !== null && r.drainGeneration < drainSeq.current,
-    }));
-    // A dependency's frontmatter can read `done` while its `afk/` branch hasn't
-    // landed on main yet (issue 147, ADR-0021) — `finishedUnmergedIds` is the
-    // on-disk fact that makes the coordinator hold such a dependent as
-    // "waiting on merge of NN" instead of starting it off a main still missing
-    // its own prerequisite.
-    const plan = planDrain({
-      issues: plannable,
-      maxConcurrent: cap,
-      activeRuns,
-      midMerge,
-      finishedUnmergedIds,
-      // The overlap-scheduling god-file list (issue 171): any two eligible
-      // issues both predicted to touch one of these (or sharing a declared
-      // `touches:` footprint) serialize instead of co-scheduling into a
-      // guaranteed merge collision.
-      hotFiles: backlog.hotFiles,
-    });
-
-    // Overlap-forced serialization is never silent (issue 171): note each
-    // deferred pairing once, keyed on the pair + path so a live re-plan that
-    // reports the same overlap round after round doesn't spam the history.
-    for (const notice of plan.overlapNotices) {
-      const [lo, hi] = [notice.issueId, notice.blockingIssueId].sort((a, b) => a - b);
-      logNote(
-        `overlap:${lo}-${hi}:${notice.path}`,
-        'relay',
-        overlapSerializationNote(notice.issueId, notice.blockingIssueId, notice.path),
-      );
-    }
-
-    if (plan.drain.stop) {
-      setDraining(false);
-      setDrainMessage(plan.drain.message);
-      logNote(`drain-halted:${drainSeq.current}`, 'relay', plan.drain.message);
-      // The drain ended (issue 73): one journal entry into the workbench
-      // memory, whatever the stop reason.
-      writeDrainJournalFor(plan.drain.message);
-      return;
-    }
-
-    const have = new Set(runs.map((r) => r.target.issueId));
-    const startableIssues = plan.startable
-      .filter((id) => !have.has(id))
-      .map((id) => backlog.issues.find((i) => i.id === id))
-      .filter((i): i is NonNullable<typeof i> => Boolean(i));
-
-    if (startableIssues.length === 0) return;
-
-    // The set of Runs that need isolation = the tracked Runs that still need a
-    // worktree — live, or finished-unmerged — plus the ones about to start, each
-    // carrying its own target repo (issue 72): isolation keys on concurrency PER
-    // REPO, so two startable issues in different repos each stay solo in their
-    // own repo while 2+ in one repo get worktrees. Solo-chaining is retired
-    // (issue 147, ADR-0021): every startable issue isolates purely by
-    // concurrency, in a worktree like any other — a dependent's dependency
-    // reaches main via the auto-merge lane, never a shared solo commit.
-    // Terminal SOLO Runs (finished/blocked/parked/stopped on `main`) lingering
-    // on screen are scoped OUT via `needsIsolation` (issue 134): feeding them in
-    // used to inflate concurrency and hand a spurious worktree cut that kept
-    // `.afk-parallel` stuck on across drain rounds. This is the same set the
-    // manual "▶ Run" path uses.
-    const isolationRuns: IsolationRun[] = [
-      ...runs.filter(needsIsolation).map((r) => ({
-        issueId: r.target.issueId,
-        slug: slugOf(r.target.issueFileName),
-        repoPath: repoForIssueId(r.target.issueId),
-      })),
-      ...startableIssues.map((i) => ({
-        issueId: i.id,
-        slug: slugOf(i.fileName),
-        repoPath: repoForIssueId(i.id),
-      })),
-    ];
-
-    let cancelled = false;
-
-    const addRuns = (
-      cwdOf: (issueId: number) => string,
-      issuesToStart: typeof startableIssues = startableIssues,
-    ): void => {
-      const additions = issuesToStart.map((issue) => {
-        // The declared drain-worker tier (issue 154): the issue's `model:`
-        // override, else the project CONFIG `worker_model` default, else sonnet
-        // — so unattended draining runs cheap instead of inheriting the
-        // expensive interactive default.
-        const tier = resolveWorkerModel({
-          configDefault: backlog.workerModel,
-          issueModel: issue.model,
-        });
-        const effort = resolveWorkerEffort({
-          tier,
-          configDefault: backlog.workerEffort,
-          issueEffort: issue.effort,
-        });
-        return newRun(
-          {
-            issueId: issue.id,
-            issueFileName: issue.fileName,
-            issueTitle: issue.title,
-            projectPath: cwdOf(issue.id),
-            // Workbench Runs carry the explicit workbench paths in the spawn
-            // prompt (issue 72); null for a legacy Project.
-            workbench: workbenchPathsForRun,
-            // From this slice on, drain Runs execute HEADLESS (issue 139,
-            // ADR-0001 amendment): spawned as `claude -p --output-format
-            // stream-json` and watched via a read-only Feed, never a Pane. A
-            // manual "▶ Run" (startRun) leaves this unset → its interactive Pane.
-            headless: true,
-            // Set ONLY here (the drain path); the manual "▶ Run" and Quick-fix
-            // paths never set model/effort, so they stay on the interactive
-            // defaults.
-            model: tier,
-            // The declared drain-worker effort (issue 155): the issue's
-            // `effort:` override, else the CONFIG `worker_effort` override, else
-            // DERIVED from the resolved tier (haiku→low, sonnet→medium,
-            // opus/fable→high). A second cost lever beside the model, so a
-            // mechanical issue doesn't burn deliberate reasoning tokens.
-            effort,
-            // The `run_timeout` kill timeout, from CONFIG (default 30 min):
-            // armed by the Headless Session Manager so a hung drain Run is
-            // killed rather than watched forever. Drain-only — a manual "▶
-            // Run" leaves this unset. Blunt-kill mitigation (issue 170): the
-            // issue's own `run_timeout` override wins outright when set;
-            // otherwise the CONFIG default scales with this Run's resolved
-            // effort tier, so a `high`/`xhigh`/`max` Worker doing deliberately
-            // harder work (a big refactor) gets more runway before a kill is
-            // blunt rather than protective (the 2026-07-19 incident: issue 161
-            // finished correctly at ~30m and was killed before it could commit).
-            runTimeoutMs:
-              resolveRunTimeoutMinutesFrom(
-                backlog.runTimeoutMinutes,
-                issue.runTimeoutMinutes,
-                effort,
-              ) * 60_000,
-          },
-          // Stamp the Run with THIS drain's generation (issue 132) so a later
-          // drain can tell it apart from a leftover Pane it should not count.
-          drainSeq.current,
-        );
-      });
-      setRuns((prev) => {
-        const present = new Set(prev.map((r) => r.target.issueId));
-        const fresh = additions.filter((a) => !present.has(a.target.issueId));
-        return fresh.length > 0 ? [...prev, ...fresh] : prev;
-      });
-      setFocusedId((cur) => cur ?? additions[0]?.target.issueId ?? cur);
-    };
-
-    void window.mc
-      .applyIsolation({ projectPath, runs: isolationRuns })
-      .then((result) => {
-        if (cancelled) return;
-        // (`Map` the identifier is the Map view component here, so use a record.)
-        const cwdById: Record<number, string> = {};
-        for (const p of result.placements) cwdById[p.issueId] = p.cwd;
-        // A non-isolatable target's concurrency clamp (issue 157, ADR-0017):
-        // 2+ Runs contending for one un-worktree-able tree get only ONE live
-        // placement back; the rest come back in `queuedIssueIds` with no cwd
-        // at all — they must NOT get a Pane this round. Leaving them out of
-        // `runs` keeps them eligible, so the next re-plan (the live Run
-        // finishing frees the slot) picks them up naturally, one at a time.
-        const queued = new Set(result.queuedIssueIds);
-        const toStart = startableIssues.filter((issue) => !queued.has(issue.id));
-        // Surface the "not a git repository" attention item once per path
-        // (issue 157) instead of silently serializing the queue unexplained.
-        for (const path of result.nonGitRoots) {
-          logNote(`non-git-root:${path}`, 'relay', nonGitRootNote(path));
-        }
-        // Newly-started Runs spawn in their resolved cwd (a worktree in parallel
-        // mode; the issue's own target repo when solo). Already-live Panes keep
-        // the cwd they spawned in — a running PTY can't be re-parented; that
-        // live solo→parallel re-parent is left to the batch QA walkthrough /
-        // Merge slice.
-        addRuns((id) => cwdById[id] ?? repoForIssueId(id), toStart);
-      })
-      .catch(() => {
-        if (cancelled) return;
-        // Isolation failed (a git worktree error, a disk error, a partial
-        // reconcile that threw mid-apply). Falling back to the checkout is safe
-        // ONLY for a lone Run per repo; spawning startable Runs on a shared
-        // checkout while others are live in the SAME repo is the concurrent-main
-        // collision isolation exists to prevent (issue 28). Count, per repo, the
-        // Runs that would end up live on that checkout: the startable ones
-        // (all fall back to their repo checkout) plus any Run already running
-        // solo there (an isolated Run keeps its worktree, so it doesn't count).
-        // If ANY repo would hold 2+, STOP the drain and surface the error.
-        const liveOnCheckout = new globalThis.Map<string, number>();
-        for (const r of runs) {
-          if (runStatusOf(r) !== 'running' || isIsolated(r)) continue;
-          const repo = repoForIssueId(r.target.issueId);
-          liveOnCheckout.set(repo, (liveOnCheckout.get(repo) ?? 0) + 1);
-        }
-        for (const issue of startableIssues) {
-          const repo = repoForIssueId(issue.id);
-          liveOnCheckout.set(repo, (liveOnCheckout.get(repo) ?? 0) + 1);
-        }
-        const safe = [...liveOnCheckout.values()].every((count) => canFallBackToMain(count));
-        if (safe) {
-          addRuns((id) => repoForIssueId(id));
-        } else {
-          setDraining(false);
-          const message =
-            'Isolation failed while starting parallel Runs — stopped to avoid ' +
-            'running multiple agents on main. Resolve the worktree/git error, ' +
-            'then start the drain again.';
-          setDrainMessage(message);
-          logNote(`drain-halted:isolation:${drainSeq.current}`, 'relay', message);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-    // `runLog` is a dependency so a Receipt that lands a beat after its session
-    // exits re-plans the drain with the park now visible (issue 64).
-  }, [draining, backlog, runs, cap, projectPath, midMerge, runStatusOf, isIsolated, needsIsolation, runLog, writeDrainJournalFor, issueRepoResolutions, repoForIssueId, workbenchPathsForRun, activeProject, logNote, finishedUnmergedIds]);
+  // Resume whichever Run/drain the branch prompt is holding, bypassing the
+  // guard (it just got resolved) — fired by Create/Switch (after the git op
+  // lands) and by Proceed anyway.
+  const resumeBranchPrompt = useCallback((): void => {
+    if (branchPrompt === null) return;
+    const pending = branchPrompt;
+    setBranchPrompt(null);
+    if (pending.kind === 'run') startRun(pending.target);
+    else drain.startDrain(pending.cap);
+  }, [branchPrompt, startRun, drain]);
 
   // --- Merge / auto-merge-lane seam (issue 185) ----------------------------
   // Extracted to `./app/useMergeLane`. `runMergeCore` also needs to drop the
@@ -3231,7 +2513,7 @@ export function App(): JSX.Element {
       }}
       onBusyChange={setGitInitBusy}
       onErrorChange={setGitInitError}
-      onProceed={proceedDrain}
+      onProceed={drain.proceedDrain}
     />
   );
 
@@ -3380,7 +2662,7 @@ export function App(): JSX.Element {
               <button
                 className="app__inbox-focus-dismiss"
                 title="Dismiss"
-                onClick={() => setOnboardNudge(null)}
+                onClick={dismissOnboardNudge}
               >
                 ✕
               </button>
@@ -3415,14 +2697,14 @@ export function App(): JSX.Element {
             strandedIds={strandedIds}
             commitFailedIds={commitFailedIds}
             onDiscard={(slug, issueId) => discardRun(issueId, slug)}
-            onDrain={guardedStartDrain}
-            onStopDrain={stopDrain}
-            draining={draining}
-            drainMessage={drainMessage}
-            debriefAvailable={debriefAvailable}
+            onDrain={drain.guardedStartDrain}
+            onStopDrain={drain.stopDrain}
+            draining={drain.draining}
+            drainMessage={drain.drainMessage}
+            debriefAvailable={drain.debriefAvailable}
             onDebrief={debriefDrain}
-            cap={cap}
-            onCapChange={setCap}
+            cap={drain.cap}
+            onCapChange={drain.setCap}
             notUnderGit={notUnderGit}
             branchStatus={branchStatus}
             mergeAffordance={mergeAffordance}
