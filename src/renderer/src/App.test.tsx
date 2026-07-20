@@ -4,11 +4,15 @@ import type { Backlog, BacklogIssue } from '../../shared/backlog-model';
 import { createMockBridge, legacyProject } from './app/test/mockBridge';
 
 /**
- * App.tsx has no exported hooks/sub-units for its state seams (issue 184) —
- * `resetForProjectSwitch`, the drain re-plan effect, and the cross-cutting
- * primitives (`logNote`, `runStatusOf`, `midMerge`, `TrackedRun`) all live as
- * closures inside the one component. The fast harness here renders the real
- * `App`, mocks `window.mc` (every IPC call resolves to a safe default,
+ * App.tsx has no exported hooks/sub-units for most of its state seams (issue
+ * 184) — `resetForProjectSwitch` and the cross-cutting primitives (`logNote`,
+ * `runStatusOf`, `midMerge`, `TrackedRun`) still live as closures inside the
+ * one component. The merge/auto-merge-lane seam (issue 185, `./app/
+ * useMergeLane`) and the drain-coordinator seam (issue 186, `./app/useDrain`)
+ * are extracted with their own focused unit tests; the drain re-plan test
+ * below stays as an integration check that the extracted hook still wires
+ * correctly through the real component. The fast harness here renders the
+ * real `App`, mocks `window.mc` (every IPC call resolves to a safe default,
  * overridable per test), and replaces every heavy view (Map, Pane, Launcher,
  * …) with a thin stub that hands its live props to the test via a captured
  * ref — so a test can call `mapProps.current.onBacklogLoaded(...)` exactly as
