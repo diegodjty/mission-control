@@ -6,9 +6,11 @@ import {
   isBlockedPark,
   drainAvailability,
   waitingOnMergeIssues,
+  branchGuardDecision,
   type ActiveRun,
 } from './run-coordinator';
 import type { BacklogIssue, IssueStatus } from './backlog-model';
+import type { GitBranchStatusResult } from './ipc-contract';
 import type { RunStatus } from './run-state';
 
 /** Minimal issue factory — only the fields the coordinator/eligibility read. */
@@ -1016,5 +1018,27 @@ describe('planDrain — overlap-aware scheduling (issue 171)', () => {
     const plan = planDrain({ issues, maxConcurrent: 2, activeRuns: [] });
     expect(plan.startable).toEqual([1, 2]);
     expect(plan.overlapNotices).toEqual([]);
+  });
+});
+
+describe('branchGuardDecision — the pre-start guard never fails open while loading (issue 176)', () => {
+  function status(overrides: Partial<GitBranchStatusResult>): GitBranchStatusResult {
+    return { branch: 'feature-x', detached: false, protectedBranch: false, ...overrides };
+  }
+
+  it('is "pending" — never "proceed" — while branch status is still resolving (null)', () => {
+    expect(branchGuardDecision(null)).toBe('pending');
+  });
+
+  it('is "prompt" on a protected branch', () => {
+    expect(branchGuardDecision(status({ branch: 'main', protectedBranch: true }))).toBe('prompt');
+  });
+
+  it('is "prompt" on a detached HEAD', () => {
+    expect(branchGuardDecision(status({ branch: null, detached: true }))).toBe('prompt');
+  });
+
+  it('is "proceed" on a clean, non-protected branch', () => {
+    expect(branchGuardDecision(status({}))).toBe('proceed');
   });
 });

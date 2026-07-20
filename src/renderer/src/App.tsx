@@ -87,6 +87,7 @@ import {
 import {
   planDrain,
   drainAvailability,
+  branchGuardDecision,
   type ActiveRun,
 } from '../../shared/run-coordinator';
 import { overlapSerializationNote } from '../../shared/file-overlap';
@@ -1940,13 +1941,22 @@ export function App(): JSX.Element {
   const guardedStartRun = useCallback(
     (target: RunTarget): void => {
       const tracked = runs.some((r) => r.target.issueId === target.issueId);
-      if (tracked || branchStatus === null || (!branchStatus.protectedBranch && !branchStatus.detached)) {
+      if (tracked) {
         startRun(target);
         return;
       }
-      setBranchPromptMode('choose');
-      setBranchPromptError(null);
-      setBranchPrompt({ kind: 'run', target });
+      const decision = branchGuardDecision(branchStatus);
+      // 'pending' (status still resolving) must never fall through to an
+      // unguarded start (issue 176) — the Map disables the Run control for
+      // this same window, so a click landing here is a defensive no-op.
+      if (decision === 'pending') return;
+      if (decision === 'prompt') {
+        setBranchPromptMode('choose');
+        setBranchPromptError(null);
+        setBranchPrompt({ kind: 'run', target });
+        return;
+      }
+      startRun(target);
     },
     [runs, branchStatus, startRun],
   );
@@ -2735,13 +2745,17 @@ export function App(): JSX.Element {
   // actually chose.
   const guardedStartDrain = useCallback(
     (chosenCap: number): void => {
-      if (branchStatus === null || (!branchStatus.protectedBranch && !branchStatus.detached)) {
-        startDrain(chosenCap);
+      const decision = branchGuardDecision(branchStatus);
+      // Same "never fail open while loading" rule as guardedStartRun (issue
+      // 176) — the Drain control is disabled for this same window.
+      if (decision === 'pending') return;
+      if (decision === 'prompt') {
+        setBranchPromptMode('choose');
+        setBranchPromptError(null);
+        setBranchPrompt({ kind: 'drain', cap: chosenCap });
         return;
       }
-      setBranchPromptMode('choose');
-      setBranchPromptError(null);
-      setBranchPrompt({ kind: 'drain', cap: chosenCap });
+      startDrain(chosenCap);
     },
     [branchStatus, startDrain],
   );

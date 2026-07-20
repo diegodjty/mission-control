@@ -746,12 +746,14 @@ export function Map({
                   <button
                     className="map__drain"
                     onClick={() => onDrain(cap ?? 2)}
-                    disabled={midMerge || !drainGate.available}
+                    disabled={branchStatus === null || midMerge || !drainGate.available}
                     title={
-                      midMerge
-                        ? 'Blocked: main is mid-merge — resolve or abort the merge first'
-                        : (drainGate.reason ??
-                          'Drain the backlog, starting eligible Runs up to the cap')
+                      branchStatus === null
+                        ? 'Resolving branch status…'
+                        : midMerge
+                          ? 'Blocked: main is mid-merge — resolve or abort the merge first'
+                          : (drainGate.reason ??
+                            'Drain the backlog, starting eligible Runs up to the cap')
                     }
                   >
                     ▶▶ Drain backlog
@@ -1056,7 +1058,7 @@ export function Map({
                   setSelectedId((cur) => (cur === issue.id ? null : issue.id))
                 }
                 onRun={
-                  onRun && resolvedPath !== null && !midMerge
+                  onRun && resolvedPath !== null && !midMerge && branchStatus !== null
                     ? () =>
                         onRun({
                           issueId: issue.id,
