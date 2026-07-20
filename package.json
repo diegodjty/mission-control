@@ -20,6 +20,7 @@
     "test:e2e": "vitest run --config vitest.e2e.config.ts"
   },
   "dependencies": {
+    "mermaid": "^11.16.0",
     "node-pty": "^1.0.0"
   },
   "devDependencies": {

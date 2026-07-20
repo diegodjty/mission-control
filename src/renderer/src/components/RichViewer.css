@@ -1,0 +1,163 @@
+/* =====================================================================
+   RichViewer — shared rich-viewer stylesheet (issue 179, ADR-0023)
+
+   Grown out of Planning.css's doc-render rules (issue 130) once the same
+   block rendering needed a third home (PlanningView, the curator-report
+   view, the CORE-proposal diff). Every colour is an Atlas design token
+   (index.css `:root` + its `[data-theme="light"]` overrides), so both
+   themes render correctly by construction.
+   ===================================================================== */
+
+/* Frontmatter chips: an issue file's status / depends_on / hitl at a glance. */
+.richviewer__frontmatter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.richviewer__fm {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-size: 11px;
+}
+
+.richviewer__fm-key {
+  color: var(--fg-mute);
+}
+
+.richviewer__fm-key::after {
+  content: ':';
+}
+
+.richviewer__fm-value {
+  color: var(--fg);
+  font-family: Menlo, Monaco, 'Courier New', monospace;
+}
+
+.richviewer__render {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--fg-soft);
+}
+
+.richviewer__render code {
+  background: var(--surface-2);
+  border-radius: 4px;
+  padding: 0 5px;
+  font-family: Menlo, Monaco, 'Courier New', monospace;
+  font-size: 12px;
+}
+
+.richviewer__h {
+  font-weight: 600;
+  margin: 16px 0 6px;
+  color: var(--fg);
+}
+
+.richviewer__h--1 {
+  font-size: 19px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+}
+
+.richviewer__h--2 {
+  font-size: 15px;
+}
+
+.richviewer__h--3 {
+  font-size: 13px;
+}
+
+.richviewer__h--4 {
+  font-size: 12px;
+  color: var(--fg-mute);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.richviewer__para {
+  margin: 7px 0;
+}
+
+.richviewer__code {
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  font-family: Menlo, Monaco, 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 10px 0;
+  white-space: pre;
+}
+
+.richviewer__quote {
+  margin: 10px 0;
+  padding: 2px 12px;
+  border-left: 3px solid var(--border-teal);
+  color: var(--fg-soft);
+}
+
+.richviewer__rule {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 14px 0;
+}
+
+.richviewer__list {
+  margin: 6px 0;
+  padding-left: 22px;
+}
+
+.richviewer__list li {
+  margin: 3px 0;
+}
+
+.richviewer__task {
+  list-style: none;
+  margin-left: -18px;
+}
+
+.richviewer__checkbox {
+  margin-right: 6px;
+  color: var(--teal);
+}
+
+/* ---- Mermaid diagrams — lazy-loaded, rendered to inline SVG (issue 179) --- */
+.richviewer__mermaid {
+  margin: 10px 0;
+  overflow-x: auto;
+}
+
+.richviewer__mermaid svg {
+  max-width: 100%;
+}
+
+/* While the lazy `mermaid` chunk loads, or before the first render pass. */
+.richviewer__mermaid-loading {
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--fg-mute);
+}
+
+/* A malformed diagram degrades to the raw fenced text, never a crash — same
+   look as a plain code block so it reads as "this didn't render", not chrome. */
+.richviewer__mermaid-fallback {
+  background: var(--bg1);
+  border: 1px solid var(--red-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  font-family: Menlo, Monaco, 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 10px 0;
+  white-space: pre;
+}
