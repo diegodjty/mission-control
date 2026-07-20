@@ -92,7 +92,8 @@ import {
 import { overlapSerializationNote } from '../../shared/file-overlap';
 import { takeoverKindFor, takeoverTarget } from '../../shared/run-takeover';
 import { isNotableDrainActivity } from '../../shared/workbench-memory';
-import { hasInFlightRun } from '../../shared/run-eligibility';
+import { eligibleForRun, hasInFlightRun } from '../../shared/run-eligibility';
+import { suggestBranchName, checkBranchName } from '../../shared/branch-name';
 import {
   repoForIssue,
   unknownRepoKeyNote,
@@ -3819,14 +3820,23 @@ export function App(): JSX.Element {
   // so the branch choice is still free (unlike issue 113's merge-time-only
   // warning). Create/Switch perform the git op then resume the held action;
   // Proceed anyway resumes unchanged, landing on the current branch.
+  // Issue 174: never hand a raw human-typed name to `git checkout -b` — always
+  // sanitize first (so a typo/space/illegal char is silently corrected) and
+  // validate before calling git (empty, or an already-existing branch), so a
+  // `fatal:` never reaches the user.
+  const branchNameCheck = checkBranchName(branchPromptName, branchPromptBranches);
+
   const submitCreateBranch = (): void => {
     if (projectPath === null) return;
-    const name = branchPromptName.trim();
-    if (name === '') return;
+    const check = checkBranchName(branchPromptName, branchPromptBranches);
+    if (check.error !== null) {
+      setBranchPromptError(check.error);
+      return;
+    }
     setBranchPromptBusy(true);
     setBranchPromptError(null);
     void window.mc
-      .createGitBranch({ projectPath, name })
+      .createGitBranch({ projectPath, name: check.sanitized })
       .then((res) => {
         setBranchPromptBusy(false);
         if (!res.ok) {
@@ -3910,9 +3920,22 @@ export function App(): JSX.Element {
               <Button
                 variant="primary"
                 onClick={() => {
-                  setBranchPromptName('');
+                  // Issue 174: pre-fill with a suggestion derived from the
+                  // issue(s) about to Run/drain, so the human accepts or edits
+                  // rather than hand-crafting a slug from scratch.
+                  const issues = backlog?.issues ?? [];
+                  const suggestionSource =
+                    branchPrompt?.kind === 'run'
+                      ? issues.filter((i) => i.id === branchPrompt.target.issueId)
+                      : issues.filter((i) => eligibleForRun(i, issues, finishedUnmergedIds));
+                  setBranchPromptName(suggestBranchName(suggestionSource));
                   setBranchPromptError(null);
                   setBranchPromptMode('create');
+                  if (projectPath !== null) {
+                    void window.mc
+                      .listGitBranches({ projectPath })
+                      .then((res) => setBranchPromptBranches(res.branches));
+                  }
                 }}
               >
                 Create a new branch
@@ -3957,10 +3980,19 @@ export function App(): JSX.Element {
                   }}
                 />
               </label>
+              {branchNameCheck.error !== null ? (
+                <p className="app__gitinit-error">{branchNameCheck.error}</p>
+              ) : (
+                !branchNameCheck.wasClean && (
+                  <p className="app__gitinit-hint">
+                    Will create as <code>{branchNameCheck.sanitized}</code>
+                  </p>
+                )
+              )}
               <DialogActions>
                 <Button
                   variant="primary"
-                  disabled={branchPromptBusy || branchPromptName.trim() === ''}
+                  disabled={branchPromptBusy || branchNameCheck.error !== null}
                   onClick={submitCreateBranch}
                 >
                   {branchPromptBusy ? 'Creating…' : 'Create + check out'}
