@@ -25,6 +25,7 @@ import {
 } from '../../shared/attention-hub-model';
 import type { Backlog, IssueStatus } from '../../shared/backlog-model';
 import { resolveWorkerEffort, resolveWorkerModel } from '../../shared/worker-model';
+import { resolveRunTimeoutMinutesFrom } from '../../shared/run-timeout';
 import type {
   AttentionSnapshot,
   NavigateAttentionMessage,
@@ -2913,6 +2914,11 @@ export function App(): JSX.Element {
           configDefault: backlog.workerModel,
           issueModel: issue.model,
         });
+        const effort = resolveWorkerEffort({
+          tier,
+          configDefault: backlog.workerEffort,
+          issueEffort: issue.effort,
+        });
         return newRun(
           {
             issueId: issue.id,
@@ -2936,16 +2942,23 @@ export function App(): JSX.Element {
             // DERIVED from the resolved tier (haiku→low, sonnet→medium,
             // opus/fable→high). A second cost lever beside the model, so a
             // mechanical issue doesn't burn deliberate reasoning tokens.
-            effort: resolveWorkerEffort({
-              tier,
-              configDefault: backlog.workerEffort,
-              issueEffort: issue.effort,
-            }),
-            // The `run_timeout` kill timeout (issue 141), from CONFIG
-            // (default 30 min): armed by the Headless Session Manager so a
-            // hung drain Run is killed rather than watched forever. Drain-only
-            // — a manual "▶ Run" leaves this unset.
-            runTimeoutMs: backlog.runTimeoutMinutes * 60_000,
+            effort,
+            // The `run_timeout` kill timeout, from CONFIG (default 30 min):
+            // armed by the Headless Session Manager so a hung drain Run is
+            // killed rather than watched forever. Drain-only — a manual "▶
+            // Run" leaves this unset. Blunt-kill mitigation (issue 170): the
+            // issue's own `run_timeout` override wins outright when set;
+            // otherwise the CONFIG default scales with this Run's resolved
+            // effort tier, so a `high`/`xhigh`/`max` Worker doing deliberately
+            // harder work (a big refactor) gets more runway before a kill is
+            // blunt rather than protective (the 2026-07-19 incident: issue 161
+            // finished correctly at ~30m and was killed before it could commit).
+            runTimeoutMs:
+              resolveRunTimeoutMinutesFrom(
+                backlog.runTimeoutMinutes,
+                issue.runTimeoutMinutes,
+                effort,
+              ) * 60_000,
           },
           // Stamp the Run with THIS drain's generation (issue 132) so a later
           // drain can tell it apart from a leftover Pane it should not count.

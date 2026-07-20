@@ -20,7 +20,11 @@ import {
   type WorkerEffort,
   type WorkerModelTier,
 } from './worker-model';
-import { DEFAULT_RUN_TIMEOUT_MINUTES, parseRunTimeoutMinutes } from './run-timeout';
+import {
+  DEFAULT_RUN_TIMEOUT_MINUTES,
+  parseIssueRunTimeoutMinutes,
+  parseRunTimeoutMinutes,
+} from './run-timeout';
 
 export type IssueStatus = 'open' | 'wip' | 'done';
 
@@ -76,6 +80,15 @@ export interface BacklogIssue {
    * ignore it, exactly like `model`.
    */
   effort: WorkerEffort | null;
+  /**
+   * The issue's declared `run_timeout` frontmatter override, in MINUTES (issue
+   * 170) — a big-refactor issue that knows it needs more runway than the
+   * project CONFIG default declares its own budget, exactly like `model:`/
+   * `effort:`. Null when omitted or malformed (= the CONFIG default, scaled by
+   * the resolved effort tier at the drain spawn site). Drain-only, like
+   * `model`/`effort` above.
+   */
+  runTimeoutMinutes: number | null;
   /** True when `parent` matches the active PRD from CONFIG. */
   inBatch: boolean;
   /** True when the issue has no `## Parent` section at all. */
@@ -215,6 +228,11 @@ function parseIssue(file: RawFile, id: number, slug: string): BacklogIssue {
   // empty value degrades to null (= the CONFIG `worker_effort` override, else
   // the tier-derived default). When set it pins the level across escalation.
   const effort = parseEffort(frontmatterValue(frontmatter, 'effort'));
+  // The optional per-issue `run_timeout` override (issue 170), in minutes.
+  // Reuses run-timeout.ts's own frontmatter parse (it re-derives the block
+  // from `file.content` itself) so the malformed/degrade rules live in one
+  // place rather than being duplicated here.
+  const runTimeoutMinutes = parseIssueRunTimeoutMinutes(file.content);
 
   const heading = firstHeading(body);
   const title = heading ?? slug;
@@ -241,6 +259,7 @@ function parseIssue(file: RawFile, id: number, slug: string): BacklogIssue {
     repoKey,
     model,
     effort,
+    runTimeoutMinutes,
     inBatch: false, // set once we know the active PRD (below)
     standalone,
     body,
