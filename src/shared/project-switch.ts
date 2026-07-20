@@ -48,6 +48,8 @@ export interface ScopedScan {
   previews?: BranchPreview[];
   /** The passive git-floor note (issue 104), or null/absent when previews are on. */
   previewNote?: string | null;
+  /** The self-hosting stale-build banner (issue 173), or null/absent when current. */
+  staleBuildNote?: string | null;
 }
 
 /** The safe, Project-scoped view of a scan: empty unless it matches the active Project. */
@@ -56,10 +58,17 @@ export interface ActiveScanView {
   midMerge: boolean;
   previews: BranchPreview[];
   previewNote: string | null;
+  staleBuildNote: string | null;
 }
 
 /** An empty view — no indicators, not mid-merge, no previews. */
-const EMPTY_VIEW: ActiveScanView = { branches: [], midMerge: false, previews: [], previewNote: null };
+const EMPTY_VIEW: ActiveScanView = {
+  branches: [],
+  midMerge: false,
+  previews: [],
+  previewNote: null,
+  staleBuildNote: null,
+};
 
 /**
  * Whether the active Project genuinely changed — i.e. a switch that should
@@ -97,5 +106,6 @@ export function scanForProject(
     midMerge: scan.midMerge,
     previews: scan.previews ?? [],
     previewNote: scan.previewNote ?? null,
+    staleBuildNote: scan.staleBuildNote ?? null,
   };
 }

@@ -1470,7 +1470,8 @@ export function App(): JSX.Element {
             // verdict flipping recalculating→clean on an otherwise-unchanged
             // tick must still refresh the badge, so it can't be kept as `prev`.
             branchPreviewsEqual(prev.previews ?? [], res.previews) &&
-            (prev.previewNote ?? null) === res.previewNote
+            (prev.previewNote ?? null) === res.previewNote &&
+            (prev.staleBuildNote ?? null) === res.staleBuildNote
               ? prev
               : {
                   projectPath,
@@ -1478,6 +1479,7 @@ export function App(): JSX.Element {
                   midMerge: res.midMerge,
                   previews: res.previews,
                   previewNote: res.previewNote,
+                  staleBuildNote: res.staleBuildNote,
                 },
           );
         })
@@ -2213,7 +2215,7 @@ export function App(): JSX.Element {
           // Refresh the scan immediately so the discarded Run's row/Merge clears.
           void window.mc
             .scanAfkRuns({ projectPath })
-            .then((r) => setAfkScan({ projectPath, branches: r.branches, midMerge: r.midMerge, previews: r.previews, previewNote: r.previewNote }))
+            .then((r) => setAfkScan({ projectPath, branches: r.branches, midMerge: r.midMerge, previews: r.previews, previewNote: r.previewNote, staleBuildNote: r.staleBuildNote }))
             .catch(() => {
               // The 1.5s poll will pick it up regardless.
             });
@@ -3282,7 +3284,7 @@ export function App(): JSX.Element {
         setMergeDisplay(null);
         void window.mc
           .scanAfkRuns({ projectPath })
-          .then((r) => setAfkScan({ projectPath, branches: r.branches, midMerge: r.midMerge, previews: r.previews, previewNote: r.previewNote }))
+          .then((r) => setAfkScan({ projectPath, branches: r.branches, midMerge: r.midMerge, previews: r.previews, previewNote: r.previewNote, staleBuildNote: r.staleBuildNote }))
           .catch(() => {
             // The 1.5s poll will pick up the cleared mid-merge state regardless.
           });
@@ -4248,6 +4250,7 @@ export function App(): JSX.Element {
             aborting={aborting}
             previews={activeScan.previews}
             previewNote={activeScan.previewNote}
+            staleBuildNote={activeScan.staleBuildNote}
             focusIssueId={inboxFocus?.issueId ?? null}
             focusSeq={inboxFocusSeq}
             plannedIssueIds={plannedIssueIds}

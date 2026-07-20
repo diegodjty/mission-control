@@ -38,6 +38,13 @@ import {
   worktreePathFor,
 } from './git-worktree-adapter';
 import { isProtectedBranch } from '../shared/action-authority';
+import {
+  readOwnRunningCommit,
+  isMissionControlRepo,
+  readTipCommit,
+  countCommitsBehind,
+} from './build-version';
+import { evaluateBuildStaleness } from '../shared/build-staleness';
 import { initGitRepo } from './git-init';
 import { mergeRuns, abortMerge } from './run-merge';
 import {
@@ -324,6 +331,31 @@ function scanReposFor(projectKey: string): string[] {
   return [...new Set(repos)];
 }
 
+/**
+ * The self-hosting stale-build note (issue 173): non-null only when one of
+ * `repos` IS the mission-control codebase AND MC's own running build
+ * (`ownBuildCommit`, captured once at startup) is behind that repo's current
+ * default-branch tip. Checks every member repo (a workbench Project may drain
+ * several) and stops at the first one that is both self-hosted and stale.
+ */
+async function computeStaleBuildNote(repos: string[]): Promise<string | null> {
+  if (!ownBuildCommit) return null;
+  for (const repo of repos) {
+    if (!(await isMissionControlRepo(repo))) continue;
+    const branch = await detectDefaultBranch(repo);
+    const tip = await readTipCommit(repo, branch);
+    if (!tip) continue;
+    const commitsBehind = await countCommitsBehind(repo, ownBuildCommit, tip);
+    const decision = evaluateBuildStaleness({
+      runningCommit: ownBuildCommit,
+      targetTipCommit: tip,
+      commitsBehind,
+    });
+    if (decision.stale) return decision.message;
+  }
+  return null;
+}
+
 // --- Workbench auto-commit (issue 72, ADR-0015) ----------------------------
 // MC auto-commits the WORKBENCH repo after each Run event — claim observed
 // (backlog watcher diff), park / done + Receipt / blocked (Receipt ingest) —
@@ -379,6 +411,17 @@ const previewCoordinator = createPreviewCoordinator({
   serializer: repoSerializer,
   isSupported: () => previewProbe.supported,
   simulate: (repoPath, stamp) => simulateSequence(repoPath, stamp),
+});
+
+// Self-hosting stale-build banner (issue 173). MC's own running build's
+// commit is read ONCE, here, at startup, and cached — never re-read live. The
+// hazard is precisely that the in-memory process can fall behind the on-disk
+// repo (e.g. the very drain it is running lands merges into that repo), so
+// re-reading `app.getAppPath()`'s HEAD on every scan tick would always report
+// "current" and defeat the whole point.
+let ownBuildCommit: string | null = null;
+void readOwnRunningCommit(app.getAppPath()).then((commit) => {
+  ownBuildCommit = commit;
 });
 
 /**
@@ -1010,7 +1053,13 @@ function registerIpc(): void {
       // A Window that doesn't own this repo gets an empty scan — it must not
       // derive a Merge affordance or block drains off a repo it doesn't drive.
       if (ownershipError(event, req.projectPath)) {
-        return { branches: [], midMerge: false, previews: [], previewNote: null };
+        return {
+          branches: [],
+          midMerge: false,
+          previews: [],
+          previewNote: null,
+          staleBuildNote: null,
+        };
       }
       const identity = identityFor(req.projectPath);
       // A workbench Project's scan spans EVERY member repo (issue 72) —
@@ -1044,6 +1093,9 @@ function registerIpc(): void {
         // One passive note (ADR-0018), only once the probe has run AND git is
         // below the floor — never a flash before the probe resolves.
         previewNote: previewProbe.done && !previewProbe.supported ? GIT_FLOOR_NOTE : null,
+        // Persistent self-hosting stale-build banner (issue 173); never gates
+        // the scan/drain, just surfaces the drift.
+        staleBuildNote: await computeStaleBuildNote(scanReposFor(req.projectPath)),
       };
     },
   );

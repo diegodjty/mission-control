@@ -152,6 +152,13 @@ interface MapProps {
    */
   previewNote?: string | null;
   /**
+   * The persistent self-hosting stale-build banner (issue 173): non-null only
+   * when this Project's repo IS mission-control and MC's own running build is
+   * behind that repo's tip. Names how far behind and the rebuild command;
+   * never blocks the drain.
+   */
+  staleBuildNote?: string | null;
+  /**
    * The active Project's captured Completion blocks, newest first (issue 34).
    * Rendered as the Run-log feed — one card per Run — which survives closing the
    * Run's Pane (it is App state loaded from disk, not tied to any live Pane).
@@ -262,6 +269,7 @@ export function Map({
   aborting,
   previews,
   previewNote,
+  staleBuildNote,
   runLog,
   focusIssueId,
   focusSeq,
@@ -857,6 +865,17 @@ export function Map({
               {aborting ? 'Aborting…' : 'Abort merge'}
             </button>
           )}
+        </div>
+      )}
+
+      {/* Self-hosting stale-build banner (issue 173): MC's own running build is
+          behind the repo it is draining — a stale checkout silently ignores
+          current CONFIG values (run_timeout) and merge behavior. Persistent
+          and prominent (amber, not blocking) so the drift is impossible to
+          miss; never gates Runs/Drain. */}
+      {staleBuildNote && resolvedPath !== null && (
+        <div className="map__stale-build-banner" title={staleBuildNote}>
+          <span className="map__stale-build-text">{staleBuildNote}</span>
         </div>
       )}
 
