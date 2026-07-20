@@ -71,6 +71,30 @@ describe('tokenBreakdownBars', () => {
     expect(tokenBreakdownBars([record({ slug: 'a' })])).toEqual([]);
   });
 
+  it('excludes a record whose usage is undefined (not null) without throwing — pre-143 logs', () => {
+    const preTelemetryRecord = record({ slug: 'legacy' });
+    delete (preTelemetryRecord as { usage?: unknown }).usage;
+    expect(() => tokenBreakdownBars([preTelemetryRecord])).not.toThrow();
+    expect(tokenBreakdownBars([preTelemetryRecord])).toEqual([]);
+  });
+
+  it('excludes a record whose usage fields are all undefined without throwing', () => {
+    const allUndefinedUsage = record({
+      slug: 'all-undefined',
+      usage: {
+        durationMs: undefined as unknown as number | null,
+        inputTokens: undefined as unknown as number | null,
+        outputTokens: undefined as unknown as number | null,
+        cacheReadTokens: undefined as unknown as number | null,
+        cacheCreationTokens: undefined as unknown as number | null,
+        costUsd: undefined as unknown as number | null,
+        tier: null,
+      },
+    });
+    expect(() => tokenBreakdownBars([allUndefinedUsage])).not.toThrow();
+    expect(tokenBreakdownBars([allUndefinedUsage])).toEqual([]);
+  });
+
   it('builds one stacked row per record, segmented by token kind, top-N by total tokens', () => {
     const records = [
       record({

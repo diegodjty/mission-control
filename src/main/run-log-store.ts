@@ -66,7 +66,13 @@ export class RunLogStore {
       if (trimmed === '') continue;
       try {
         const rec = JSON.parse(trimmed) as RunLogRecord;
-        if (rec && typeof rec.id === 'string') byId.set(rec.id, rec);
+        if (rec && typeof rec.id === 'string') {
+          // Records persisted before issue 143 added `usage` have no key at all
+          // on disk, not `usage: null` — normalize so consumers can rely on the
+          // declared `RunUsage | null` type.
+          if (rec.usage === undefined) rec.usage = null;
+          byId.set(rec.id, rec);
+        }
       } catch {
         // A partial/corrupt line (e.g. a crash mid-append): skip it rather than
         // failing the whole read.
