@@ -77,3 +77,16 @@ describe('NotificationController — drain end (per drain)', () => {
     ]);
   });
 });
+
+describe('NotificationController — scheduled drain skipped (issue 191)', () => {
+  it('pings on every skip, even for the same project and reason across fires', () => {
+    const { ctrl, fired } = harness();
+    ctrl.attentionChanged([]); // seed
+    ctrl.scheduledDrainSkipped('mc', 'scheduled drain skipped — main is mid-merge');
+    ctrl.scheduledDrainSkipped('mc', 'scheduled drain skipped — main is mid-merge');
+    expect(fired.map((i) => i.reason)).toEqual([
+      'scheduled-drain-skipped',
+      'scheduled-drain-skipped',
+    ]);
+  });
+});

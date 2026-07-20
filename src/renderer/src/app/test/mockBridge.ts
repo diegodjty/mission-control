@@ -64,6 +64,7 @@ export function createMockBridge(): MissionControlApi {
       error: null,
       offerDebrief: false,
     }),
+    notifyScheduledDrainSkipped: vi.fn().mockResolvedValue({ notified: false }),
     listAttention: vi.fn().mockResolvedValue({ workbenchRoot: '', items: [], notes: [] }),
     onAttentionChanged: vi.fn().mockReturnValue(() => {}),
     markAttentionSeen: vi.fn().mockResolvedValue({ lastSeen: {} }),

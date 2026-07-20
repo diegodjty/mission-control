@@ -91,6 +91,7 @@ describe('useDrain', () => {
         nonGitRoots: [],
       }),
       writeDrainJournal: vi.fn().mockResolvedValue({ offerDebrief: false }),
+      notifyScheduledDrainSkipped: vi.fn().mockResolvedValue({ notified: false }),
     };
   });
 
@@ -185,6 +186,115 @@ describe('useDrain', () => {
 
     expect(result.current.draining).toBe(false);
     expect(setBranchPrompt).toHaveBeenCalledWith({ kind: 'drain', cap: 1 });
+  });
+
+  it('scheduledFire: an idle branch starts the drain like guardedStartDrain, no notification', async () => {
+    const backlog = backlogWith([issue({ id: 1, status: 'open' })]);
+    (window.mc.applyIsolation as any).mockResolvedValue({
+      placements: [{ issueId: 1, cwd: '/repo' }],
+      queuedIssueIds: [],
+      nonGitRoots: [],
+    });
+    const deps = baseDeps({ backlog });
+    const { result } = renderHook((d: DrainDeps) => useDrain(d), { initialProps: deps });
+
+    act(() => {
+      result.current.scheduledFire(1);
+    });
+
+    expect(result.current.draining).toBe(true);
+    expect(window.mc.notifyScheduledDrainSkipped).not.toHaveBeenCalled();
+  });
+
+  it('scheduledFire on a protected branch skips (never prompts) and notifies the reason', () => {
+    const setBranchPrompt = vi.fn();
+    const deps = baseDeps({
+      branchStatus: { branch: 'main', detached: false, protectedBranch: true },
+      setBranchPrompt,
+    });
+    const { result } = renderHook((d: DrainDeps) => useDrain(d), { initialProps: deps });
+
+    act(() => {
+      result.current.scheduledFire(1);
+    });
+
+    expect(result.current.draining).toBe(false);
+    expect(setBranchPrompt).not.toHaveBeenCalled();
+    expect(window.mc.notifyScheduledDrainSkipped).toHaveBeenCalledWith({
+      projectPath: '/repo',
+      reason: expect.stringContaining('protected branch'),
+    });
+  });
+
+  it('scheduledFire with a detached HEAD skips and notifies, never prompting', () => {
+    const setBranchPrompt = vi.fn();
+    const deps = baseDeps({
+      branchStatus: { branch: null, detached: true, protectedBranch: false },
+      setBranchPrompt,
+    });
+    const { result } = renderHook((d: DrainDeps) => useDrain(d), { initialProps: deps });
+
+    act(() => {
+      result.current.scheduledFire(1);
+    });
+
+    expect(result.current.draining).toBe(false);
+    expect(setBranchPrompt).not.toHaveBeenCalled();
+    expect(window.mc.notifyScheduledDrainSkipped).toHaveBeenCalledWith({
+      projectPath: '/repo',
+      reason: expect.stringContaining('detached'),
+    });
+  });
+
+  it('scheduledFire onto a mid-merge main skips and notifies, without setting drainMessage', () => {
+    const deps = baseDeps({ midMerge: true });
+    const { result } = renderHook((d: DrainDeps) => useDrain(d), { initialProps: deps });
+
+    act(() => {
+      result.current.scheduledFire(1);
+    });
+
+    expect(result.current.draining).toBe(false);
+    expect(window.mc.notifyScheduledDrainSkipped).toHaveBeenCalledWith({
+      projectPath: '/repo',
+      reason: expect.stringContaining('mid-merge'),
+    });
+  });
+
+  it('scheduledFire with nothing eligible skips and notifies with the coordinator reason', () => {
+    const deps = baseDeps({ backlog: backlogWith([issue({ id: 1, status: 'done' })]) });
+    const { result } = renderHook((d: DrainDeps) => useDrain(d), { initialProps: deps });
+
+    act(() => {
+      result.current.scheduledFire(1);
+    });
+
+    expect(result.current.draining).toBe(false);
+    expect(window.mc.notifyScheduledDrainSkipped).toHaveBeenCalledWith({
+      projectPath: '/repo',
+      reason: expect.stringContaining('nothing eligible'),
+    });
+  });
+
+  it('scheduledFire on a non-git root with cap > 1 skips and notifies, never opening the git-init prompt', () => {
+    const setGitInitPrompt = vi.fn();
+    const deps = baseDeps({
+      notUnderGit: true,
+      backlog: backlogWith([issue({ id: 1, status: 'open' })]),
+      setGitInitPrompt,
+    });
+    const { result } = renderHook((d: DrainDeps) => useDrain(d), { initialProps: deps });
+
+    act(() => {
+      result.current.scheduledFire(2);
+    });
+
+    expect(result.current.draining).toBe(false);
+    expect(setGitInitPrompt).not.toHaveBeenCalled();
+    expect(window.mc.notifyScheduledDrainSkipped).toHaveBeenCalledWith({
+      projectPath: '/repo',
+      reason: expect.stringContaining('not a git repository'),
+    });
   });
 
   it('stopDrain: ends the drain, notes it, and writes the journal for a workbench project', async () => {

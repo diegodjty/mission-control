@@ -61,6 +61,7 @@ export function createMcMock(): MissionControlApi {
     watchReceipts: vi.fn(),
     onReceiptCaptured: vi.fn().mockReturnValue(() => {}),
     writeDrainJournal: vi.fn().mockResolvedValue({ offerDebrief: false }),
+    notifyScheduledDrainSkipped: vi.fn().mockResolvedValue({ notified: false }),
     listAttention: vi.fn().mockResolvedValue({ workbenchRoot: '', items: [], notes: [] }),
     onAttentionChanged: vi.fn().mockReturnValue(() => {}),
     markAttentionSeen: vi.fn().mockResolvedValue({ ok: true }),

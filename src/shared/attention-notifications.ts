@@ -15,7 +15,10 @@
  *   - `blocked-park`   — a Run parked blocked (issue 137), needing you to unstick it;
  *   - `merge-conflict` — a Merge hit a conflict only you can resolve;
  *   - `drain-stopped`  — the drain halted early (a blocker / your stop / a mid-merge);
- *   - `drain-finished` — the drain finished (the backlog drained).
+ *   - `drain-finished` — the drain finished (the backlog drained);
+ *   - `scheduled-drain-skipped` — a scheduled drain (issue 190, ADR-0024) fired
+ *     but an interactive gate would have prompted with nobody there to answer,
+ *     so it skipped instead of starting (issue 191).
  *
  * Everything else — routine claim/done flips, curator proposals, setup gates,
  * new-repo candidates, the journal briefing, passive notes — stays silent. "If
@@ -45,7 +48,8 @@ export type NotificationReason =
   | 'blocked-park'
   | 'merge-conflict'
   | 'drain-stopped'
-  | 'drain-finished';
+  | 'drain-finished'
+  | 'scheduled-drain-skipped';
 
 /**
  * One decided notification, ready for the thin adapter to show. `title` and
@@ -93,6 +97,13 @@ export type NotificationEvent =
       outcome: 'stopped' | 'finished';
       /** The drain's stated stop reason, for the body. */
       reason?: string | null;
+    }
+  | {
+      type: 'scheduled-drain-skipped';
+      /** The workbench project directory name. */
+      project: string;
+      /** The "scheduled drain skipped — <reason>" line (built by `shared/scheduled-drain`). */
+      reason: string;
     };
 
 /** The decision: the intents to fire now, plus the grown already-notified set. */
@@ -202,6 +213,23 @@ function drainEndedIntent(event: Extract<NotificationEvent, { type: 'drain-ended
   };
 }
 
+/** Build the intent for a scheduled drain that skipped instead of starting (issue 191). */
+function scheduledDrainSkippedIntent(
+  event: Extract<NotificationEvent, { type: 'scheduled-drain-skipped' }>,
+): NotificationIntent {
+  return {
+    // Each fire is its own one-shot moment (never remembered in the persistent
+    // seen set — see the controller), so the key just needs to be non-empty;
+    // it is never re-checked against a growing set.
+    key: `${event.project}:scheduled-drain-skipped:${event.reason}`,
+    reason: 'scheduled-drain-skipped',
+    project: event.project,
+    issueId: null,
+    title: `${event.project} · scheduled drain skipped`,
+    body: oneLine(event.reason) || 'scheduled drain skipped',
+  };
+}
+
 /**
  * Every intent an event WOULD produce, before deduping — the tier filter only.
  * Non-notifying attention kinds and malformed input drop out here.
@@ -225,6 +253,10 @@ function candidateIntents(event: NotificationEvent): NotificationIntent[] {
     case 'drain-ended':
       if (typeof event.project !== 'string' || event.project === '') return [];
       return [drainEndedIntent(event)];
+    case 'scheduled-drain-skipped':
+      if (typeof event.project !== 'string' || event.project === '') return [];
+      if (typeof event.reason !== 'string' || event.reason === '') return [];
+      return [scheduledDrainSkippedIntent(event)];
     default:
       return [];
   }

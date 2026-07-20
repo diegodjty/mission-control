@@ -258,6 +258,59 @@ describe('App.tsx state-seam harness', () => {
     expect(mapPropsRef.current.schedule).toEqual({ kind: 'idle' });
   }, 10000);
 
+  it('scheduled drain (issue 191): a protected branch skips instead of prompting, and notifies the reason', async () => {
+    const projectPath = '/repo/scheduled-drain-skip-project';
+    (bridge.listProjects as any).mockResolvedValue({
+      projects: [legacyProject({ key: projectPath })],
+      activeProjectKey: projectPath,
+      pendingOpen: null,
+    });
+    (bridge.applyIsolation as any).mockImplementation((req: any) =>
+      Promise.resolve({
+        parallel: false,
+        placements: req.runs.map((r: any) => ({ issueId: r.issueId, cwd: projectPath })),
+        queuedIssueIds: [],
+        nonGitRoots: [],
+      }),
+    );
+    // On a protected branch: the manual Drain path would prompt
+    // (`BranchPromptDialog`) — a scheduled fire must skip instead, never prompt.
+    (bridge.getGitBranchStatus as any).mockResolvedValue({
+      branch: 'main',
+      detached: false,
+      protectedBranch: true,
+    });
+
+    render(<App />);
+    await waitFor(() => expect(mapPropsRef.current).not.toBeNull());
+
+    const backlog = backlogWith([issue({ id: 1, status: 'open' })]);
+    await act(async () => {
+      mapPropsRef.current.onBacklogLoaded(backlog, projectPath);
+    });
+    await waitFor(() => expect(mapPropsRef.current.branchStatus).not.toBeNull());
+
+    const fireAt = Date.now() + 1_100;
+    await act(async () => {
+      mapPropsRef.current.onScheduleDrain(fireAt, 1);
+    });
+
+    // The schedule disarms one-shot at fire time either way — assert on the
+    // notification + no-start, not on `schedule` staying pending.
+    await waitFor(
+      () => expect((bridge.notifyScheduledDrainSkipped as any).mock.calls.length).toBeGreaterThan(0),
+      { timeout: 6000 },
+    );
+    expect((bridge.notifyScheduledDrainSkipped as any).mock.calls[0][0]).toEqual({
+      projectPath,
+      reason: expect.stringContaining('protected branch'),
+    });
+    // Never started, and never asked the (mocked-null) BranchPromptDialog for
+    // input — the drain simply never begins.
+    expect(mapPropsRef.current.draining).toBe(false);
+    expect(runTileCalls.current.some((p) => p.run.target.issueId === 1)).toBe(false);
+  }, 10000);
+
   it('scheduled drain (issue 190): a Project switch drops the pending schedule — it never fires into the new Project, nothing persists', async () => {
     const projectA = '/repo/schedule-switch-a';
     const projectB = '/repo/schedule-switch-b';

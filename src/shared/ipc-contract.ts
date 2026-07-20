@@ -198,6 +198,16 @@ export const IpcChannel = {
    */
   DrainJournal: 'drain:journal',
   /**
+   * renderer → main (invoke): a scheduled drain (issue 190, ADR-0024) fired
+   * but an interactive gate would have prompted with nobody there to answer
+   * (issue 191) — protected branch/detached HEAD, non-git + cap>1, mid-merge,
+   * or nothing eligible — so it skipped instead of starting. Fires exactly
+   * one local OS notification naming the reason (issue 138's path); a quiet
+   * no-op for a legacy Project (no attention surface for the click-through).
+   * Resolves to a ScheduledDrainSkippedResult.
+   */
+  ScheduledDrainSkipped: 'drain:scheduled-skipped',
+  /**
    * renderer → main (invoke): read a workbench Project's raw `memory/journal/`
    * entries (issue 181, ADR-0023) — the Cost tab's only source for drain
    * grouping (a drain's boundary and member Runs exist ONLY in this journal
@@ -1290,6 +1300,23 @@ export interface DrainJournalResult {
 }
 
 /**
+ * A scheduled drain (issue 190) fired but skipped instead of starting
+ * (issue 191, ADR-0024) — an interactive gate would have prompted with
+ * nobody there to answer it.
+ */
+export interface ScheduledDrainSkippedRequest {
+  /** The Project key the scheduled drain would have run against. */
+  projectPath: string;
+  /** The "scheduled drain skipped — <reason>" line (`shared/scheduled-drain`'s `scheduledDrainSkipMessage`). */
+  reason: string;
+}
+
+export interface ScheduledDrainSkippedResult {
+  /** True when the OS notification fired (workbench Projects only). */
+  notified: boolean;
+}
+
+/**
  * The aggregated cross-project attention state (issue 79, ADR-0016): every
  * active workbench project's items from the pure attention model (issue 78),
  * grouped by project (projects ascending; each project's items in the model's
@@ -1827,6 +1854,12 @@ export interface MissionControlApi {
    * A quiet no-op for legacy Projects.
    */
   writeDrainJournal(req: DrainJournalRequest): Promise<DrainJournalResult>;
+  /**
+   * A scheduled drain fired but skipped instead of starting (issue 191) —
+   * fires the "scheduled drain skipped — <reason>" OS notification. A quiet
+   * no-op for legacy Projects.
+   */
+  notifyScheduledDrainSkipped(req: ScheduledDrainSkippedRequest): Promise<ScheduledDrainSkippedResult>;
   /** The current aggregated cross-project attention snapshot (issue 79). */
   listAttention(): Promise<AttentionSnapshot>;
   /** Subscribe to attention-list changes; returns an unsubscribe function. */

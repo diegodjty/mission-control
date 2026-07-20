@@ -115,6 +115,8 @@ import {
   type BacklogWatchRequest,
   type DrainJournalRequest,
   type DrainJournalResult,
+  type ScheduledDrainSkippedRequest,
+  type ScheduledDrainSkippedResult,
   type IsolationApplyRequest,
   type IsolationApplyResult,
   type IssueFileDeleteRequest,
@@ -1747,6 +1749,24 @@ function registerIpc(): void {
         error: outcome.error,
         offerDebrief,
       };
+    },
+  );
+
+  // A scheduled drain (issue 190, ADR-0024) fired but skipped instead of
+  // starting (issue 191) — an interactive gate would have prompted with
+  // nobody there to answer. Fires the same OS-notification path (issue 138)
+  // as a drain's terminal moment; workbench Projects only, same as
+  // `mergeConflicted`/`drainEnded` — a legacy Project has no attention
+  // surface for the click-through to land on.
+  ipcMain.handle(
+    IpcChannel.ScheduledDrainSkipped,
+    async (event, req: ScheduledDrainSkippedRequest): Promise<ScheduledDrainSkippedResult> => {
+      const denied = ownershipError(event, req.projectPath);
+      if (denied) return { notified: false };
+      const identity = identityFor(req.projectPath);
+      if (identity === null || identity.kind !== 'workbench') return { notified: false };
+      notificationController?.scheduledDrainSkipped(basename(identity.key), req.reason);
+      return { notified: true };
     },
   );
 

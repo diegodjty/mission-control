@@ -20,6 +20,12 @@
  *     at its source, so this always pings and is deliberately NOT remembered in
  *     the long-lived seen set: that is how "per drain" is honored for the
  *     terminal moment while parks/merges stay deduped across the session.
+ *   - `scheduledDrainSkipped` — a scheduled drain (issue 190, ADR-0024) fired
+ *     but an interactive gate would have prompted with nobody there to answer
+ *     (issue 191); it skipped instead of starting. Same one-shot-per-fire
+ *     discipline as `drainEnded` — never remembered in the seen set, since a
+ *     later fire of the SAME schedule never happens (one-shot by
+ *     construction) and a fresh schedule's skip is always a new event.
  *
  * Electron-free on purpose (the Electron `Notification` lives behind the injected
  * `show`), so the seed/dedupe behavior is unit-testable with a plain spy — like
@@ -72,6 +78,17 @@ export class NotificationController {
     // one-shot moment (see the class comment).
     const { intents } = decideNotifications(
       { type: 'drain-ended', project, outcome, reason },
+      new Set(),
+    );
+    if (intents.length > 0) this.show(intents);
+  }
+
+  /** A scheduled drain fired but skipped instead of starting (issue 191). */
+  scheduledDrainSkipped(project: string, reason: string): void {
+    // Not threaded through the persistent seen set, same as `drainEnded` —
+    // each fire's skip is its own one-shot moment.
+    const { intents } = decideNotifications(
+      { type: 'scheduled-drain-skipped', project, reason },
       new Set(),
     );
     if (intents.length > 0) this.show(intents);

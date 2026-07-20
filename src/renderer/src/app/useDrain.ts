@@ -6,6 +6,7 @@ import {
   branchGuardDecision,
   type ActiveRun,
 } from '../../../shared/run-coordinator';
+import { scheduledDrainSkipReason, scheduledDrainSkipMessage } from '../../../shared/scheduled-drain';
 import { overlapSerializationNote } from '../../../shared/file-overlap';
 import {
   unknownRepoKeyNote,
@@ -75,6 +76,13 @@ export interface Drain {
   guardedStartDrain: (chosenCap: number) => void;
   /** Bypasses the notUnderGit gate — the "Initialize git" / "Drain serially" dialog action. */
   proceedDrain: (chosenCap: number) => void;
+  /**
+   * The scheduled-drain fire path (issue 191, ADR-0024): re-checks every gate
+   * `guardedStartDrain`/`startDrain` would, but a gate that would PROMPT
+   * instead SKIPS — fires a "scheduled drain skipped — <reason>" notification
+   * and never starts, since nobody is there to answer a dialog at fire time.
+   */
+  scheduledFire: (chosenCap: number) => void;
   stopDrain: () => void;
   /** Marks the "Debrief this drain" affordance consumed. */
   dismissDebrief: () => void;
@@ -261,6 +269,35 @@ export function useDrain(deps: DrainDeps): Drain {
       startDrain(chosenCap);
     },
     [branchStatus, startDrain, setBranchPromptMode, setBranchPromptError, setBranchPrompt],
+  );
+
+  // Scheduled-drain fire path (issue 191, ADR-0024): the SAME gates
+  // `guardedStartDrain`/`startDrain` check, evaluated purely and up front
+  // (`scheduledDrainSkipReason`) so a gate that would PROMPT interactively
+  // instead SKIPS the fire — no dialog is ever shown for a scheduled drain
+  // (ADR-0024). A HITL park mid-drain is a separate, later code path (issue
+  // 64) and is unaffected: it only runs once the drain has already started.
+  const scheduledFire = useCallback(
+    (chosenCap: number): void => {
+      const cap = Math.max(1, Math.floor(chosenCap) || 1);
+      const availability = drainAvailability(
+        backlog?.issues ?? [],
+        runs.filter((r) => runStatusOf(r) === 'running').map((r) => r.target.issueId),
+      );
+      const skip = scheduledDrainSkipReason({ branchStatus, midMerge, notUnderGit, cap, availability });
+      if (skip !== null) {
+        if (projectPath !== null) {
+          void window.mc
+            .notifyScheduledDrainSkipped({ projectPath, reason: scheduledDrainSkipMessage(skip) })
+            .catch(() => {});
+        }
+        return;
+      }
+      // Every gate passed exactly like a manual press of Drain now — the same
+      // entry point, so it re-derives (not re-decides) the same outcome.
+      guardedStartDrain(cap);
+    },
+    [backlog, runs, runStatusOf, branchStatus, midMerge, notUnderGit, projectPath, guardedStartDrain],
   );
 
   const stopDrain = useCallback((): void => {
@@ -598,6 +635,7 @@ export function useDrain(deps: DrainDeps): Drain {
     startDrain,
     guardedStartDrain,
     proceedDrain,
+    scheduledFire,
     stopDrain,
     dismissDebrief,
     reset,

@@ -19,6 +19,8 @@ import {
   type AfkDiscardResult,
   type DrainJournalRequest,
   type DrainJournalResult,
+  type ScheduledDrainSkippedRequest,
+  type ScheduledDrainSkippedResult,
   type IsolationApplyRequest,
   type IsolationApplyResult,
   type LauncherListResult,
@@ -190,6 +192,11 @@ const api: MissionControlApi = {
 
   writeDrainJournal: (req: DrainJournalRequest): Promise<DrainJournalResult> =>
     ipcRenderer.invoke(IpcChannel.DrainJournal, req),
+
+  notifyScheduledDrainSkipped: (
+    req: ScheduledDrainSkippedRequest,
+  ): Promise<ScheduledDrainSkippedResult> =>
+    ipcRenderer.invoke(IpcChannel.ScheduledDrainSkipped, req),
 
   listAttention: (): Promise<AttentionSnapshot> =>
     ipcRenderer.invoke(IpcChannel.AttentionList),

@@ -83,6 +83,28 @@ describe('decideNotifications — the tier filter (only the blocking/terminal se
     expect(stopped.intents[0].key).not.toBe(finished.intents[0].key);
   });
 
+  it('a scheduled drain skip (issue 191) yields exactly one intent naming the reason', () => {
+    const { intents } = decideNotifications({
+      type: 'scheduled-drain-skipped',
+      project: 'mc',
+      reason: 'scheduled drain skipped — main is mid-merge',
+    });
+    expect(intents).toHaveLength(1);
+    expect(intents[0].reason).toBe('scheduled-drain-skipped');
+    expect(intents[0].issueId).toBeNull();
+    expect(intents[0].title).toContain('scheduled drain skipped');
+    expect(intents[0].body).toBe('scheduled drain skipped — main is mid-merge');
+  });
+
+  it('a scheduled drain skip with no project or reason yields nothing', () => {
+    expect(
+      decideNotifications({ type: 'scheduled-drain-skipped', project: '', reason: 'x' }).intents,
+    ).toHaveLength(0);
+    expect(
+      decideNotifications({ type: 'scheduled-drain-skipped', project: 'mc', reason: '' }).intents,
+    ).toHaveLength(0);
+  });
+
   it('passive / routine attention kinds never notify', () => {
     const { intents } = decideNotifications(
       attentionEvent([
