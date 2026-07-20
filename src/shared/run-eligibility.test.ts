@@ -23,6 +23,7 @@ function mk(id: number, status: IssueStatus, dependsOn: number[] = []): BacklogI
     model: null,
     effort: null,
     runTimeoutMinutes: null,
+    touches: [],
     inBatch: true,
     standalone: false,
     body: '',

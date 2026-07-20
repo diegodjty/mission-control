@@ -89,6 +89,7 @@ import {
   drainAvailability,
   type ActiveRun,
 } from '../../shared/run-coordinator';
+import { overlapSerializationNote } from '../../shared/file-overlap';
 import { takeoverKindFor, takeoverTarget } from '../../shared/run-takeover';
 import { isNotableDrainActivity } from '../../shared/workbench-memory';
 import { hasInFlightRun } from '../../shared/run-eligibility';
@@ -2853,7 +2854,24 @@ export function App(): JSX.Element {
       activeRuns,
       midMerge,
       finishedUnmergedIds,
+      // The overlap-scheduling god-file list (issue 171): any two eligible
+      // issues both predicted to touch one of these (or sharing a declared
+      // `touches:` footprint) serialize instead of co-scheduling into a
+      // guaranteed merge collision.
+      hotFiles: backlog.hotFiles,
     });
+
+    // Overlap-forced serialization is never silent (issue 171): note each
+    // deferred pairing once, keyed on the pair + path so a live re-plan that
+    // reports the same overlap round after round doesn't spam the history.
+    for (const notice of plan.overlapNotices) {
+      const [lo, hi] = [notice.issueId, notice.blockingIssueId].sort((a, b) => a - b);
+      logNote(
+        `overlap:${lo}-${hi}:${notice.path}`,
+        'relay',
+        overlapSerializationNote(notice.issueId, notice.blockingIssueId, notice.path),
+      );
+    }
 
     if (plan.drain.stop) {
       setDraining(false);

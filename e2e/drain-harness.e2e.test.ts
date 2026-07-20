@@ -63,6 +63,13 @@
  *                            verdict matrix lives in unit/integration tests; the
  *                            e2e proves only the feature is wired end-to-end —
  *                            the machine gate before any human QA.)
+ *   18. Overlap scheduling  — issue 171: a CONFIG `hot_files` mention serializes
+ *                            two issues predicted to touch the same god file
+ *                            while two disjoint issues fan out to fill the cap;
+ *                            the resulting merges are clean, and a CONTROL
+ *                            branch modeling what co-scheduling would have
+ *                            produced genuinely conflicts — proving the
+ *                            scheduling decision (not luck) avoided it.
  *
  * Checklist items that genuinely need the live Electron shell are declared
  * `manual-only` at the bottom (as named, skipped specs) — zero silent gaps.
@@ -89,7 +96,7 @@ import {
   detectDefaultBranch,
   isParallel,
 } from '../src/main/git-worktree-adapter';
-import { mergeRuns, defaultMergeScriptPath } from '../src/main/run-merge';
+import { mergeRuns, defaultMergeScriptPath, abortMerge } from '../src/main/run-merge';
 import {
   probeMergeTreeSupport,
   readPreviewStamp,
@@ -2341,6 +2348,182 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
     // Confirm the on-disk backlog now reads fully drained.
     const finalBacklog = await readBacklog(workspace);
     expect(finalBacklog.issues.every((i) => i.status === 'done')).toBe(true);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Scenario 18 (issue 171) — overlap-aware drain scheduling: a mixed set of
+  // two hot-file issues (both predicted, via CONFIG `hot_files`, to touch the
+  // same god file) plus two genuinely disjoint issues, at cap 3. The
+  // coordinator must run the two disjoint issues in parallel with the FIRST
+  // hot-file issue (filling the cap-3 budget) and hold the second hot-file
+  // issue queued with a named overlap notice — never co-schedule both hot-file
+  // issues. Proves the real payoff at the git layer too: because the second
+  // hot-file issue's branch is only cut AFTER the first has landed on main, a
+  // real `afk-merge.sh` run over both is clean — no merge conflict — while a
+  // CONTROL branch cut from the pre-merge main (modeling what would have
+  // happened had they been co-scheduled) genuinely conflicts, proving the
+  // scheduling decision is what avoided it, not coincidence.
+  // ---------------------------------------------------------------------------
+  it('Scenario 18 (issue 171): overlap-aware scheduling serializes two hot-file issues, fans out two disjoint ones, and the resulting merges are conflict-free', async () => {
+    const HOT = 'work/hot-target.txt';
+
+    const hotA: SandboxIssue = {
+      id: 20,
+      slug: '20-hot-a',
+      title: 'Hot A',
+      status: 'open',
+      dependsOn: [],
+      hitl: false,
+    };
+    const hotB: SandboxIssue = {
+      id: 21,
+      slug: '21-hot-b',
+      title: 'Hot B',
+      status: 'open',
+      dependsOn: [],
+      hitl: false,
+    };
+    const disjointA: SandboxIssue = {
+      id: 22,
+      slug: '22-disjoint-a',
+      title: 'Disjoint A',
+      status: 'open',
+      dependsOn: [],
+      hitl: false,
+    };
+    const disjointB: SandboxIssue = {
+      id: 23,
+      slug: '23-disjoint-b',
+      title: 'Disjoint B',
+      status: 'open',
+      dependsOn: [],
+      hitl: false,
+    };
+    const mixed = [hotA, hotB, disjointA, disjointB];
+
+    // Both hot-file issues name the god file in their body — the CONFIG
+    // `hot_files` mention heuristic (issue 171's simplest footprint source),
+    // not a hand-authored `touches:` frontmatter — so this exercises the
+    // body-scan path end to end.
+    const hotBody = (issue: SandboxIssue): string =>
+      issueFileContent(issue, issue.status) + `\nThis Run edits \`${HOT}\` directly.\n`;
+    await writeFile(join(repo, 'issues', `${hotA.slug}.md`), hotBody(hotA));
+    await writeFile(join(repo, 'issues', `${hotB.slug}.md`), hotBody(hotB));
+    await writeFile(
+      join(repo, 'issues', `${disjointA.slug}.md`),
+      issueFileContent(disjointA, disjointA.status),
+    );
+    await writeFile(
+      join(repo, 'issues', `${disjointB.slug}.md`),
+      issueFileContent(disjointB, disjointB.status),
+    );
+    await writeFile(
+      join(repo, 'issues', 'CONFIG.md'),
+      `---\nhot_files: [${HOT}]\n---\n\n# CONFIG\n`,
+    );
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-m', 'e2e: seed overlap-scheduling fixture (issue 171)');
+
+    // The scheduling decision, over ONLY this fixture's four issues (the
+    // default sandbox backlog is unrelated and would obscure the assertion).
+    const backlog = await readBacklog(repo);
+    const fixtureIssues = backlog.issues.filter((i) => mixed.some((m) => m.id === i.id));
+    expect(fixtureIssues.find((i) => i.id === hotA.id)?.body).toContain(HOT);
+    const plan = planDrain({
+      issues: fixtureIssues,
+      maxConcurrent: 3,
+      activeRuns: [],
+      hotFiles: backlog.hotFiles,
+    });
+    // AC1/AC2: the two disjoint issues fan out with the FIRST hot-file issue —
+    // filling the cap-3 budget — while the second hot-file issue queues.
+    expect(plan.startable.sort((a, b) => a - b)).toEqual([20, 22, 23]);
+    expect(plan.queued).toEqual([21]);
+    // AC3: the overlap is named, never silent.
+    expect(plan.overlapNotices).toEqual([{ issueId: 21, blockingIssueId: 20, path: HOT }]);
+
+    // Round 1: cut real `afk/` branches for the three STARTABLE issues off the
+    // current main and land each one's edit — hot-file A touches the god file,
+    // the two disjoint issues touch only their own files.
+    for (const issue of [hotA, disjointA, disjointB]) {
+      await git(repo, 'checkout', '-b', branchFor(issue.slug), 'main');
+      if (issue.id === hotA.id) {
+        await mkdir(join(repo, 'work'), { recursive: true });
+        await writeFile(join(repo, 'work', 'hot-target.txt'), 'from hot-a\n');
+      } else {
+        await mkdir(join(repo, 'work'), { recursive: true });
+        await writeFile(join(repo, 'work', `${issue.slug}.txt`), `deliverable for ${issue.slug}\n`);
+      }
+      await writeFile(join(repo, 'issues', `${issue.slug}.md`), issueFileContent(issue, 'done'));
+      await git(repo, 'add', '.');
+      await git(repo, 'commit', '-m', `afk: complete ${issue.slug}`);
+      await git(repo, 'checkout', 'main');
+    }
+
+    // AC4: the real afk-merge.sh over the three round-1 branches is clean.
+    const round1 = await mergeRuns(
+      repo,
+      [hotA.slug, disjointA.slug, disjointB.slug],
+      { scriptPath: SCRIPT },
+    );
+    expect(round1.ok).toBe(true);
+    expect(round1.conflicted).toBe(false);
+    expect(round1.merged.sort()).toEqual([disjointA.slug, disjointB.slug, hotA.slug].sort());
+    expect((await git(repo, 'status', '--porcelain')).trim()).toBe('');
+    expect(await readFile(join(repo, 'work', 'hot-target.txt'), 'utf8')).toBe('from hot-a\n');
+
+    // Round 2: with hot-A done and merged, the coordinator now starts hot-B —
+    // nothing left occupies its footprint.
+    const backlog2 = await readBacklog(repo);
+    const round2Issues = backlog2.issues.filter((i) => i.id === hotB.id);
+    const plan2 = planDrain({
+      issues: round2Issues,
+      maxConcurrent: 3,
+      activeRuns: [],
+      hotFiles: backlog2.hotFiles,
+    });
+    expect(plan2.startable).toEqual([hotB.id]);
+    expect(plan2.overlapNotices).toEqual([]);
+
+    // Hot-B's branch is cut from the POST-merge main — it already contains
+    // hot-A's edit — so its own edit to the same file lands with no conflict.
+    await git(repo, 'checkout', '-b', branchFor(hotB.slug), 'main');
+    await writeFile(join(repo, 'work', 'hot-target.txt'), 'from hot-a\nfrom hot-b\n');
+    await writeFile(join(repo, 'issues', `${hotB.slug}.md`), issueFileContent(hotB, 'done'));
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-m', `afk: complete ${hotB.slug}`);
+    await git(repo, 'checkout', 'main');
+
+    const round2 = await mergeRuns(repo, [hotB.slug], { scriptPath: SCRIPT });
+    expect(round2.ok).toBe(true);
+    expect(round2.conflicted).toBe(false);
+    expect(await readFile(join(repo, 'work', 'hot-target.txt'), 'utf8')).toBe(
+      'from hot-a\nfrom hot-b\n',
+    );
+
+    // CONTROL: had hot-B instead been co-scheduled with hot-A (branched from
+    // the ORIGINAL pre-round-1 main, editing the same file differently — what
+    // the coordinator's overlap check exists to prevent), merging it now
+    // genuinely conflicts. This proves the clean merges above are the
+    // scheduling decision's doing, not coincidence.
+    const rootCommit = (await git(repo, 'rev-list', '--max-parents=0', 'HEAD')).trim().split('\n')[0];
+    await git(repo, 'checkout', '-b', 'afk/control-conflict', rootCommit);
+    // Recreate the state the pre-round-1 main had (issues dir) so the branch
+    // is a plausible sibling, then make the SAME kind of colliding edit hot-A
+    // made — a divergent edit to the god file from a common, older ancestor.
+    await mkdir(join(repo, 'work'), { recursive: true });
+    await writeFile(join(repo, 'work', 'hot-target.txt'), 'from a co-scheduled hot-b\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-m', 'afk: control — co-scheduled hot-b (would conflict)');
+    await git(repo, 'checkout', 'main');
+    const control = await mergeRuns(repo, ['control-conflict'], { scriptPath: SCRIPT });
+    expect(control.ok).toBe(false);
+    expect(control.conflicted).toBe(true);
+    expect(await isMidMerge(repo)).toBe(true);
+    // Clean up the aborted control merge attempt so the fixture's tree stays
+    // usable for the harness's own afterEach cleanup.
+    await abortMerge(repo);
+    expect(await isMidMerge(repo)).toBe(false);
   });
 });
 
