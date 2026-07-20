@@ -286,6 +286,19 @@ export interface DrainInput {
    * overlap serialization).
    */
   hotFiles?: readonly string[];
+  /**
+   * The in-scope issue ids for this drain (issue 192, ADR-0024) — a filter on
+   * top of `eligibleForRun`, orthogonal to `maxConcurrent` (cap = how many at
+   * once; this = which issues at all). Optional/absent ⇒ every eligible issue
+   * is in scope (today's whole-backlog drain, and 190's scheduled-drain
+   * default). When present, an eligible issue NOT in this set is never
+   * started or queued by this plan — it is simply left alone, exactly as if
+   * it were still `wip` elsewhere. This never widens eligibility: a selected
+   * issue whose dependency isn't `done` (and isn't itself selected/startable)
+   * still fails `eligibleForRun` and stays blocked — selection cannot pull in
+   * a dependency that wasn't already going to run.
+   */
+  selectedIds?: readonly number[];
 }
 
 /**
@@ -449,11 +462,19 @@ export function planDrain(input: DrainInput): DrainPlan {
 
   const finishedUnmergedIds = input.finishedUnmergedIds ?? [];
 
+  // Scope filter (issue 192): when `selectedIds` is given, an otherwise-
+  // eligible issue not in it is dropped from `eligible` entirely — never
+  // started, never queued, never reported as an overlap deferral. Absent
+  // means no filter: every eligible issue is in scope, matching today's plan.
+  const selectedSet = input.selectedIds === undefined ? null : new Set(input.selectedIds);
+
   const eligible = [...input.issues]
     .sort((a, b) => a.id - b.id)
     .filter(
       (issue) =>
-        !activeIds.has(issue.id) && eligibleForRun(issue, input.issues, finishedUnmergedIds),
+        !activeIds.has(issue.id) &&
+        (selectedSet === null || selectedSet.has(issue.id)) &&
+        eligibleForRun(issue, input.issues, finishedUnmergedIds),
     )
     .map((issue) => issue.id);
 

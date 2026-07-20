@@ -311,6 +311,58 @@ describe('App.tsx state-seam harness', () => {
     expect(runTileCalls.current.some((p) => p.run.target.issueId === 1)).toBe(false);
   }, 10000);
 
+  it('scheduled drain scoped by selection (issue 192): only the selected eligible issue starts; the unselected one is never touched', async () => {
+    const projectPath = '/repo/scheduled-drain-scope-project';
+    (bridge.listProjects as any).mockResolvedValue({
+      projects: [legacyProject({ key: projectPath })],
+      activeProjectKey: projectPath,
+      pendingOpen: null,
+    });
+    (bridge.applyIsolation as any).mockImplementation((req: any) =>
+      Promise.resolve({
+        parallel: false,
+        placements: req.runs.map((r: any) => ({ issueId: r.issueId, cwd: projectPath })),
+        queuedIssueIds: [],
+        nonGitRoots: [],
+      }),
+    );
+    (bridge.getGitBranchStatus as any).mockResolvedValue({
+      branch: 'main',
+      detached: false,
+      protectedBranch: false,
+    });
+
+    render(<App />);
+    await waitFor(() => expect(mapPropsRef.current).not.toBeNull());
+
+    // Two independent eligible issues; the schedule only selects issue 2.
+    const backlog = backlogWith([
+      issue({ id: 1, status: 'open' }),
+      issue({ id: 2, status: 'open' }),
+    ]);
+    await act(async () => {
+      mapPropsRef.current.onBacklogLoaded(backlog, projectPath);
+    });
+    await waitFor(() => expect(mapPropsRef.current.branchStatus).not.toBeNull());
+
+    const fireAt = Date.now() + 1_100;
+    await act(async () => {
+      mapPropsRef.current.onScheduleDrain(fireAt, 2, [2]);
+    });
+    expect(mapPropsRef.current.schedule).toEqual(
+      expect.objectContaining({ kind: 'pending', fireAt, cap: 2, selectedIds: [2] }),
+    );
+
+    await waitFor(() => expect(mapPropsRef.current.draining).toBe(true), { timeout: 6000 });
+    await waitFor(
+      () => expect(runTileCalls.current.some((p) => p.run.target.issueId === 2)).toBe(true),
+      { timeout: 6000 },
+    );
+    // Issue 1 was eligible too, but never selected — it must never start.
+    expect(runTileCalls.current.some((p) => p.run.target.issueId === 1)).toBe(false);
+    expect(mapPropsRef.current.schedule).toEqual({ kind: 'idle' });
+  }, 10000);
+
   it('scheduled drain (issue 190): a Project switch drops the pending schedule — it never fires into the new Project, nothing persists', async () => {
     const projectA = '/repo/schedule-switch-a';
     const projectB = '/repo/schedule-switch-b';

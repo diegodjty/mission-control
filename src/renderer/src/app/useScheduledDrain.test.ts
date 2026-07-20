@@ -70,6 +70,22 @@ describe('useScheduledDrain', () => {
     expect(onFire).toHaveBeenCalledTimes(1);
   });
 
+  it('fires onFire with the scheduled selection scope (issue 192) when one was armed', () => {
+    const onFire = vi.fn();
+    const { result } = renderHook(() => useScheduledDrain(onFire));
+
+    act(() => {
+      result.current.scheduleDrainAt(Date.now() + 5_000, 2, [1, 3]);
+    });
+
+    act(() => {
+      vi.advanceTimersByTime(5_000);
+    });
+
+    expect(onFire).toHaveBeenCalledTimes(1);
+    expect(onFire).toHaveBeenCalledWith(2, [1, 3]);
+  });
+
   it('reset() clears a pending schedule (the Project-switch teardown) and it never fires', () => {
     const onFire = vi.fn();
     const { result } = renderHook(() => useScheduledDrain(onFire));

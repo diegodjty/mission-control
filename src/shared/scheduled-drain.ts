@@ -28,6 +28,14 @@ export interface PendingSchedule {
   fireAt: number;
   /** The concurrency cap the deferred drain start applies — same meaning as a manual Drain's cap. */
   cap: number;
+  /**
+   * The in-scope issue ids chosen at schedule time (issue 192, ADR-0024), or
+   * `undefined` for "all eligible" — the same "absent ⇒ no filter" convention
+   * `run-coordinator`'s `DrainInput.selectedIds` uses, so this rides straight
+   * through to `planDrain` at fire time with no translation. Orthogonal to
+   * `cap`: selection is which issues at all, cap is how many at once.
+   */
+  selectedIds?: readonly number[];
 }
 
 export type ScheduledDrainState = IdleSchedule | PendingSchedule;
@@ -35,9 +43,22 @@ export type ScheduledDrainState = IdleSchedule | PendingSchedule;
 /** The state before anything is ever scheduled, or after a cancel/fire/reset. */
 export const IDLE_SCHEDULE: ScheduledDrainState = { kind: 'idle' };
 
-/** Arm a schedule for `fireAt`, replacing any existing pending one. */
-export function scheduleDrain(fireAt: number, cap: number): ScheduledDrainState {
-  return { kind: 'pending', fireAt, cap: Math.max(1, Math.floor(cap) || 1) };
+/**
+ * Arm a schedule for `fireAt`, replacing any existing pending one.
+ * `selectedIds` omitted/undefined ⇒ every eligible issue is in scope at fire
+ * time (identical to today's whole-backlog drain and to 190's behavior).
+ */
+export function scheduleDrain(
+  fireAt: number,
+  cap: number,
+  selectedIds?: readonly number[],
+): ScheduledDrainState {
+  return {
+    kind: 'pending',
+    fireAt,
+    cap: Math.max(1, Math.floor(cap) || 1),
+    ...(selectedIds === undefined ? {} : { selectedIds }),
+  };
 }
 
 /** Disarm a pending schedule before it fires. */

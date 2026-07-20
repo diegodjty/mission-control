@@ -1021,6 +1021,60 @@ describe('planDrain — overlap-aware scheduling (issue 171)', () => {
   });
 });
 
+describe('planDrain — scope a drain by issue selection (issue 192, ADR-0024)', () => {
+  it('absent selectedIds starts every eligible issue — unchanged whole-backlog behavior', () => {
+    const issues = [mk(1, 'open'), mk(2, 'open'), mk(3, 'open')];
+    const plan = planDrain({ issues, maxConcurrent: 5, activeRuns: [] });
+    expect(plan.startable).toEqual([1, 2, 3]);
+  });
+
+  it('starts only the selected eligible issues; unselected ones are never touched', () => {
+    const issues = [mk(1, 'open'), mk(2, 'open'), mk(3, 'open')];
+    const plan = planDrain({ issues, maxConcurrent: 5, activeRuns: [], selectedIds: [1, 3] });
+    expect(plan.startable).toEqual([1, 3]);
+    expect(plan.queued).toEqual([]);
+  });
+
+  it('an unselected eligible issue never appears in startable OR queued', () => {
+    const issues = [mk(1, 'open'), mk(2, 'open'), mk(3, 'open')];
+    // Cap of 1 would normally queue 2 and 3 — confirm the unselected one (2)
+    // is dropped entirely rather than merely queued behind the cap.
+    const plan = planDrain({ issues, maxConcurrent: 1, activeRuns: [], selectedIds: [1, 3] });
+    expect(plan.startable).toEqual([1]);
+    expect(plan.queued).toEqual([3]);
+  });
+
+  it('an empty selection starts nothing, even though issues are otherwise eligible', () => {
+    const issues = [mk(1, 'open'), mk(2, 'open')];
+    const plan = planDrain({ issues, maxConcurrent: 5, activeRuns: [], selectedIds: [] });
+    expect(plan.startable).toEqual([]);
+    expect(plan.queued).toEqual([]);
+  });
+
+  it('a selected issue whose dependency is unfinished and unselected stays blocked — no auto-inclusion of dependencies', () => {
+    // Issue 2 depends on 1; only 2 is selected. 1 is open but NOT selected, so
+    // it never starts — and since 1 never runs, 2's dependency is never
+    // satisfied either, so 2 stays blocked too. Selection must never pull an
+    // unselected dependency in to unblock a selected dependent.
+    const issues = [mk(1, 'open'), mk(2, 'open', [1])];
+    const plan = planDrain({ issues, maxConcurrent: 5, activeRuns: [], selectedIds: [2] });
+    expect(plan.startable).toEqual([]);
+    expect(plan.queued).toEqual([]);
+  });
+
+  it('a selected issue whose selected dependency is done starts normally', () => {
+    const issues = [mk(1, 'done'), mk(2, 'open', [1])];
+    const plan = planDrain({ issues, maxConcurrent: 5, activeRuns: [], selectedIds: [2] });
+    expect(plan.startable).toEqual([2]);
+  });
+
+  it('selection is orthogonal to the cap — a smaller selection than the cap still only starts what is selected', () => {
+    const issues = [mk(1, 'open'), mk(2, 'open'), mk(3, 'open'), mk(4, 'open')];
+    const plan = planDrain({ issues, maxConcurrent: 10, activeRuns: [], selectedIds: [2, 4] });
+    expect(plan.startable).toEqual([2, 4]);
+  });
+});
+
 describe('branchGuardDecision — the pre-start guard never fails open while loading (issue 176)', () => {
   function status(overrides: Partial<GitBranchStatusResult>): GitBranchStatusResult {
     return { branch: 'feature-x', detached: false, protectedBranch: false, ...overrides };

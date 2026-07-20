@@ -126,7 +126,7 @@ import {
 } from './app/appHelpers';
 import { newRun, type InboxFocus, type TrackedRun } from './app/appTypes';
 import { useMergeLane, type ProtectedMergeLandTarget } from './app/useMergeLane';
-import { useDrain } from './app/useDrain';
+import { useDrain, type DrainBranchPromptTarget } from './app/useDrain';
 import { useScheduledDrain } from './app/useScheduledDrain';
 import { useLauncher } from './app/useLauncher';
 import { RunTile } from './RunTile';
@@ -243,7 +243,7 @@ export function App(): JSX.Element {
   // 167): null when nothing is held. `create`/`switch` sub-modes reuse the
   // same dialog; resolving either (or Proceed anyway) resumes the held action.
   const [branchPrompt, setBranchPrompt] = useState<
-    { kind: 'run'; target: RunTarget } | { kind: 'drain'; cap: number } | null
+    { kind: 'run'; target: RunTarget } | DrainBranchPromptTarget | null
   >(null);
   const [branchPromptMode, setBranchPromptMode] = useState<'choose' | 'create' | 'switch'>(
     'choose',
@@ -2205,7 +2205,7 @@ export function App(): JSX.Element {
     const pending = branchPrompt;
     setBranchPrompt(null);
     if (pending.kind === 'run') startRun(pending.target);
-    else drain.startDrain(pending.cap);
+    else drain.startDrain(pending.cap, pending.selectedIds);
   }, [branchPrompt, startRun, drain]);
 
   // --- Merge / auto-merge-lane seam (issue 185) ----------------------------
