@@ -8,6 +8,7 @@ import { Launcher, type QuickFixIssueRef } from './Launcher';
 import { PlanningView } from './PlanningView';
 import { ReceiptsView } from './ReceiptsView';
 import { CostView } from './CostView';
+import { DocsView } from './DocsView';
 import { AppShell } from './AppShell';
 import {
   GitInitDialog,
@@ -3612,6 +3613,18 @@ export function App(): JSX.Element {
         {isSlotMounted('cost', view, shellCtx) && (
           <div className="app__slot" style={{ display: 'flex' }}>
             <CostView records={runLog} journals={journals} />
+          </div>
+        )}
+
+        {/* The Docs tab (issue 182, ADR-0023): browse the active repo's
+            ARCHITECTURE.md / CONTEXT.md / ADRs through the shared rich
+            viewer, diagrams live — file-watched (the Planning-view pattern),
+            so an on-disk edit refreshes the view. Remount-on-visit: the
+            view's own effect starts/stops the watch on mount/unmount, so
+            there is nothing to preserve across navigation. */}
+        {isSlotMounted('docs', view, shellCtx) && activeDefaultRepo !== null && (
+          <div className="app__slot" style={{ display: 'flex' }}>
+            <DocsView repoPath={activeDefaultRepo} />
           </div>
         )}
     </AppShell>

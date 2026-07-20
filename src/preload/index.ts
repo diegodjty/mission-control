@@ -46,6 +46,10 @@ import {
   type PlanningDocReadRequest,
   type PlanningDocReadResult,
   type PlanningWatchRequest,
+  type DocsChangedMessage,
+  type DocsWatchRequest,
+  type DocReadRequest,
+  type DocReadResult,
   type CuratorReportReadRequest,
   type CuratorReportReadResult,
   type CuratorReportMarkSeenRequest,
@@ -282,6 +286,19 @@ const api: MissionControlApi = {
 
   readPlanningDoc: (req: PlanningDocReadRequest): Promise<PlanningDocReadResult> =>
     ipcRenderer.invoke(IpcChannel.PlanningDocRead, req),
+
+  watchDocs: (req: DocsWatchRequest): void => {
+    ipcRenderer.send(IpcChannel.DocsWatch, req);
+  },
+
+  onDocsChanged: (listener: (msg: DocsChangedMessage) => void): (() => void) => {
+    const handler = (_e: IpcRendererEvent, msg: DocsChangedMessage): void => listener(msg);
+    ipcRenderer.on(IpcChannel.DocsChanged, handler);
+    return () => ipcRenderer.removeListener(IpcChannel.DocsChanged, handler);
+  },
+
+  readDoc: (req: DocReadRequest): Promise<DocReadResult> =>
+    ipcRenderer.invoke(IpcChannel.DocsRead, req),
 
   readCuratorReport: (req: CuratorReportReadRequest): Promise<CuratorReportReadResult> =>
     ipcRenderer.invoke(IpcChannel.CuratorReportRead, req),

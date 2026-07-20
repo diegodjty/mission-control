@@ -18,7 +18,15 @@
  */
 
 /** The views a Window can show. */
-export type ViewId = 'launcher' | 'map' | 'pane' | 'inbox' | 'planning' | 'receipts' | 'cost';
+export type ViewId =
+  | 'launcher'
+  | 'map'
+  | 'pane'
+  | 'inbox'
+  | 'planning'
+  | 'receipts'
+  | 'cost'
+  | 'docs';
 
 /** Every empty Window is the Launcher — the front door (issue 81, ADR-0016). */
 export const DEFAULT_VIEW: ViewId = 'launcher';
@@ -88,6 +96,11 @@ const REGISTRY: ReadonlyArray<{ id: ViewId; label: string; policy: MountPolicy }
   // Run log plus a one-shot journal read, so there is no live watch of its
   // own to preserve across visits either.
   { id: 'cost', label: 'Cost', policy: 'remount-on-visit' },
+  // The active repo's docs — ARCHITECTURE.md / CONTEXT.md / ADRs (issue 182,
+  // ADR-0023). File-watched, but the watch is started/stopped by the view's
+  // own effect on mount/unmount (same as the Planning view) — nothing needs
+  // to survive navigation away, so remount-on-visit is enough.
+  { id: 'docs', label: 'Docs', policy: 'remount-on-visit' },
 ];
 
 /** A view's mount policy (see MountPolicy). */
@@ -151,6 +164,7 @@ export function isSlotMounted(id: ViewId, active: ViewId, ctx: ShellContext): bo
     case 'inbox':
     case 'receipts':
     case 'cost':
+    case 'docs':
       return active === id;
   }
 }

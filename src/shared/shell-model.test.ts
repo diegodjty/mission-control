@@ -37,7 +37,7 @@ describe('mountPolicy', () => {
 });
 
 describe('shellTabs', () => {
-  it('lists Home, Map, Pane, Attention, Receipts, Cost in order when no planning session exists', () => {
+  it('lists Home, Map, Pane, Attention, Receipts, Cost, Docs in order when no planning session exists', () => {
     expect(shellTabs(idle).map((t) => t.id)).toEqual([
       'launcher',
       'map',
@@ -45,6 +45,7 @@ describe('shellTabs', () => {
       'inbox',
       'receipts',
       'cost',
+      'docs',
     ]);
   });
 
@@ -57,12 +58,22 @@ describe('shellTabs', () => {
     expect(labels.get('inbox')).toBe('Attention');
     expect(labels.get('receipts')).toBe('Receipts');
     expect(labels.get('cost')).toBe('Cost');
+    expect(labels.get('docs')).toBe('Docs');
   });
 
   it('shows the Plan tab only while a planning session exists (issue 83)', () => {
     expect(shellTabs(idle).some((t) => t.id === 'planning')).toBe(false);
     const tabs = shellTabs(withPlanning).map((t) => t.id);
-    expect(tabs).toEqual(['launcher', 'map', 'pane', 'planning', 'inbox', 'receipts', 'cost']);
+    expect(tabs).toEqual([
+      'launcher',
+      'map',
+      'pane',
+      'planning',
+      'inbox',
+      'receipts',
+      'cost',
+      'docs',
+    ]);
   });
 
   it('badges the Pane tab with the live Run count, absent at zero', () => {
@@ -93,7 +104,16 @@ describe('shellTabs', () => {
 });
 
 describe('isSlotMounted', () => {
-  const allViews: ViewId[] = ['launcher', 'map', 'pane', 'inbox', 'planning', 'receipts', 'cost'];
+  const allViews: ViewId[] = [
+    'launcher',
+    'map',
+    'pane',
+    'inbox',
+    'planning',
+    'receipts',
+    'cost',
+    'docs',
+  ];
 
   it('keeps the Map host mounted whatever view is active (live backlog watch)', () => {
     for (const view of allViews) {
@@ -148,6 +168,12 @@ describe('isSlotMounted', () => {
     expect(isSlotMounted('cost', 'cost', idle)).toBe(true);
     expect(isSlotMounted('cost', 'map', idle)).toBe(false);
     expect(isSlotMounted('cost', 'pane', withRun)).toBe(false);
+  });
+
+  it('mounts Docs only while visited (remount-on-visit — its own effect starts/stops the watch)', () => {
+    expect(isSlotMounted('docs', 'docs', idle)).toBe(true);
+    expect(isSlotMounted('docs', 'map', idle)).toBe(false);
+    expect(isSlotMounted('docs', 'pane', withRun)).toBe(false);
   });
 
   it('survives a full view round-trip with a live Run (the tracer invariant)', () => {
