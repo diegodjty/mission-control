@@ -9,10 +9,11 @@
  * can render as real tickable checkboxes.
  *
  * Source precedence (per the issue): the parked Receipt's `detail` body when
- * present — that is where a Worker's HITL block's steps live (see
- * `completion-parser.ts`'s `captureDetail`) — else the issue file's own body,
- * so an issue authored with a checklist in its body (no Receipt yet, or a
- * Receipt with no checklist) still renders one.
+ * it actually contains a checklist — that is where a Worker's HITL block's
+ * steps live (see `completion-parser.ts`'s `captureDetail`) — else the issue
+ * file's own body, so an issue authored with a checklist in its body (no
+ * Receipt yet, or a Receipt whose detail is prose with no `- [ ]` lines)
+ * still renders one instead of being shadowed by a checkbox-less Receipt.
  *
  * PURE: no I/O. Tolerant by contract — any input (missing, empty, no checkbox
  * lines) yields an empty list, never a throw.
@@ -47,14 +48,18 @@ export function parseChecklist(input: unknown): ChecklistItem[] {
 
 /**
  * The text to parse a parked issue's checklist from: the Receipt's `detail`
- * body when it carries one, else the issue file's own body — the fallback
- * the issue's "What to build" calls for.
+ * body when it actually contains checkbox lines, else the issue file's own
+ * body. A non-empty Receipt detail that carries no `- [ ]` lines (e.g. a
+ * prose "Try it yourself" numbered list) is not a checklist source — it
+ * falls through to the body instead of shadowing it (issue 189).
  */
 export function checklistSourceText(
   receiptDetail: string | null | undefined,
   issueBody: string | null | undefined,
 ): string {
-  if (typeof receiptDetail === 'string' && receiptDetail.trim() !== '') return receiptDetail;
+  if (typeof receiptDetail === 'string' && parseChecklist(receiptDetail).length > 0) {
+    return receiptDetail;
+  }
   return typeof issueBody === 'string' ? issueBody : '';
 }
 
