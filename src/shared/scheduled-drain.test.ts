@@ -41,4 +41,15 @@ describe('scheduled-drain', () => {
   it('isDueToFire is false for an idle state at any time', () => {
     expect(isDueToFire(IDLE_SCHEDULE, Number.MAX_SAFE_INTEGER)).toBe(false);
   });
+
+  it('scheduleDrain carries an optional selection scope through to the pending state (issue 192)', () => {
+    const state = scheduleDrain(1_000, 3, [2, 4]);
+    expect(state).toEqual({ kind: 'pending', fireAt: 1_000, cap: 3, selectedIds: [2, 4] });
+  });
+
+  it('scheduleDrain omits selectedIds when not given — "all eligible" by default', () => {
+    const state = scheduleDrain(1_000, 3);
+    expect(state).toEqual({ kind: 'pending', fireAt: 1_000, cap: 3 });
+    expect('selectedIds' in state).toBe(false);
+  });
 });

@@ -6,7 +6,7 @@ import { deleteRefusal } from '../../shared/issue-file-ops';
 import type { LauncherProject, RunLogRecord, RunTarget } from '../../shared/ipc-contract';
 import { QuickFixForm, type QuickFixIssueRef } from './QuickFixForm';
 import { START_VERB_LABELS, startSomething, type StartVerb } from '../../shared/launcher-model';
-import { type InFlightRuns } from '../../shared/run-eligibility';
+import { eligibleForRun, type InFlightRuns } from '../../shared/run-eligibility';
 import { drainAvailability } from '../../shared/run-coordinator';
 import {
   deriveIssueState,
@@ -132,10 +132,13 @@ interface MapProps {
   schedule?: ScheduledDrainState;
   /**
    * Arm a scheduled drain: `fireAt` is the chosen time as epoch ms, `cap` the
-   * concurrency cap it starts with (same meaning as the manual Drain's cap).
-   * At `fireAt` the schedule fires the SAME start path as pressing Drain now.
+   * concurrency cap it starts with (same meaning as the manual Drain's cap),
+   * and `selectedIds` the in-scope issue selection (issue 192, ADR-0024) —
+   * omitted/undefined means every eligible issue is in scope, identical to
+   * 190's whole-backlog default. At `fireAt` the schedule fires the SAME
+   * start path as pressing Drain now, filtered to this selection.
    */
-  onScheduleDrain?: (fireAt: number, cap: number) => void;
+  onScheduleDrain?: (fireAt: number, cap: number, selectedIds?: readonly number[]) => void;
   /** Cancel the pending schedule before it fires. */
   onCancelScheduledDrain?: () => void;
   /**
@@ -365,6 +368,12 @@ export function Map({
   // armed schedule itself lives in the parent (`schedule` prop), same split as
   // `cap`/`onCapChange` above.
   const [scheduleTimeInput, setScheduleTimeInput] = useState('');
+  // Scoped selection for the drain being scheduled (issue 192, ADR-0024): the
+  // eligible issues UNCHECKED by the human, empty by default so "everything
+  // eligible" (today's whole-backlog default, matching 190 exactly) needs no
+  // interaction — the checklist starts fully checked. Reset whenever the
+  // schedule panel goes back to idle (a fresh schedule starts fresh).
+  const [scheduleExcludedIds, setScheduleExcludedIds] = useState<Set<number>>(new Set());
 
   // Issue-file Edit / Delete (issue 89): the Map's one write exception. The
   // editor seeds from a FRESH disk read (never a possibly-stale push), saves
@@ -588,6 +597,17 @@ export function Map({
       setMarkDoneBusy(false);
     }
   }
+
+  // The eligible-issue set the schedule panel offers per-issue selection over
+  // (issue 192): the same `eligibleForRun` predicate the Coordinator itself
+  // uses, so the checklist never diverges from what a drain would actually
+  // start. A live re-plan at fire time may see a different eligible set (an
+  // issue's dependency lands, another goes `wip`) — selection only narrows
+  // what's picked from whatever is eligible then, it never widens it.
+  const scheduleEligibleIds = (backlog?.issues ?? [])
+    .filter((i) => eligibleForRun(i, backlog?.issues ?? [], finishedUnmergedIds ?? []))
+    .map((i) => i.id)
+    .sort((a, b) => a - b);
 
   // Map list order (issue 102): show the latest issues at the top. The shared
   // Backlog Model sorts ascending by id (and eligibility / the lowest-numbered
@@ -815,6 +835,15 @@ export function Map({
                 (schedule && schedule.kind === 'pending' ? (
                   <span className="map__schedule map__schedule--pending">
                     ⏰ Drain scheduled for {formatFireTime(schedule.fireAt)}
+                    {schedule.selectedIds !== undefined && (
+                      <span
+                        className="map__schedule-scope"
+                        title={`Scoped to issue(s) ${schedule.selectedIds.join(', ')}`}
+                      >
+                        {' '}
+                        · {schedule.selectedIds.length} selected
+                      </span>
+                    )}
                     <button
                       className="map__schedule-cancel"
                       onClick={() => onCancelScheduledDrain?.()}
@@ -830,15 +859,56 @@ export function Map({
                       type="time"
                       value={scheduleTimeInput}
                       onChange={(e) => setScheduleTimeInput(e.target.value)}
-                      title="Time of day to start a drain over the whole eligible backlog"
+                      title="Time of day to start a drain over the selected eligible issues"
                     />
+                    {/* Per-issue scope (issue 192, ADR-0024): defaults to every
+                        eligible issue selected — identical to 190's
+                        whole-backlog behavior — until the human unchecks one. */}
+                    {scheduleEligibleIds.length > 0 && (
+                      <details className="map__schedule-scope-picker">
+                        <summary>
+                          {scheduleEligibleIds.length - scheduleExcludedIds.size} of{' '}
+                          {scheduleEligibleIds.length} eligible selected
+                        </summary>
+                        <ul className="map__schedule-scope-list">
+                          {scheduleEligibleIds.map((id) => (
+                            <li key={id}>
+                              <label>
+                                <input
+                                  type="checkbox"
+                                  checked={!scheduleExcludedIds.has(id)}
+                                  onChange={(e) =>
+                                    setScheduleExcludedIds((prev) => {
+                                      const next = new Set(prev);
+                                      if (e.target.checked) next.delete(id);
+                                      else next.add(id);
+                                      return next;
+                                    })
+                                  }
+                                />{' '}
+                                #{String(id).padStart(2, '0')}
+                              </label>
+                            </li>
+                          ))}
+                        </ul>
+                      </details>
+                    )}
                     <button
                       className="map__schedule-arm"
-                      disabled={nextOccurrenceOfTimeOfDay(scheduleTimeInput, Date.now()) === null}
+                      disabled={
+                        nextOccurrenceOfTimeOfDay(scheduleTimeInput, Date.now()) === null ||
+                        (scheduleEligibleIds.length > 0 &&
+                          scheduleExcludedIds.size === scheduleEligibleIds.length)
+                      }
                       onClick={() => {
                         const fireAt = nextOccurrenceOfTimeOfDay(scheduleTimeInput, Date.now());
                         if (fireAt === null) return;
-                        onScheduleDrain(fireAt, cap ?? 2);
+                        const selectedIds =
+                          scheduleExcludedIds.size === 0
+                            ? undefined
+                            : scheduleEligibleIds.filter((id) => !scheduleExcludedIds.has(id));
+                        onScheduleDrain(fireAt, cap ?? 2, selectedIds);
+                        setScheduleExcludedIds(new Set());
                       }}
                       title="Schedule a drain to start at this time (today, or tomorrow if it's already passed)"
                     >

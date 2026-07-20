@@ -26,7 +26,12 @@ import { slugOf, RECEIPT_AUDIT_GRACE_MS } from './appHelpers';
 import { newRun, type TrackedRun } from './appTypes';
 
 /** What the branch-awareness prompt (issue 167) is holding a drain start for. */
-export type DrainBranchPromptTarget = { kind: 'drain'; cap: number };
+export type DrainBranchPromptTarget = {
+  kind: 'drain';
+  cap: number;
+  /** The in-scope issue selection (issue 192) the resumed start carries through, if any. */
+  selectedIds?: readonly number[];
+};
 
 export interface DrainDeps {
   backlog: Backlog | null;
@@ -69,12 +74,17 @@ export interface Drain {
   debriefAvailable: boolean;
   cap: number;
   setCap: Dispatch<SetStateAction<number>>;
-  /** The drain start post branch-guard (the git-init/eligibility gates still run) — used to resume a branch prompt once it's resolved. */
-  startDrain: (chosenCap: number) => void;
+  /**
+   * The drain start post branch-guard (the git-init/eligibility gates still
+   * run) — used to resume a branch prompt once it's resolved. `selectedIds`
+   * (issue 192) scopes the drain to that issue set; omitted/undefined means
+   * every eligible issue is in scope, the whole-backlog behavior.
+   */
+  startDrain: (chosenCap: number, selectedIds?: readonly number[]) => void;
   /** The Map's "Drain" control: branch-aware, the entry point the UI calls. */
-  guardedStartDrain: (chosenCap: number) => void;
+  guardedStartDrain: (chosenCap: number, selectedIds?: readonly number[]) => void;
   /** Bypasses the notUnderGit gate — the "Initialize git" / "Drain serially" dialog action. */
-  proceedDrain: (chosenCap: number) => void;
+  proceedDrain: (chosenCap: number, selectedIds?: readonly number[]) => void;
   stopDrain: () => void;
   /** Marks the "Debrief this drain" affordance consumed. */
   dismissDebrief: () => void;
@@ -141,6 +151,12 @@ export function useDrain(deps: DrainDeps): Drain {
   // The last drain sequence whose journal write was scheduled — "written once
   // per drain": the user-stop and Coordinator-stop paths can't both fire it.
   const drainJournalSeq = useRef<number>(0);
+  // The in-scope issue selection for the CURRENT drain (issue 192, ADR-0024):
+  // set once at `proceedDrain` and read by the re-plan effect below on every
+  // pass, since a drain's scope doesn't change mid-run. `undefined` (the
+  // default — a manual Drain press never passes one) means every eligible
+  // issue is in scope, identical to today's whole-backlog behavior.
+  const drainScopeRef = useRef<readonly number[] | undefined>(undefined);
 
   // Write the drain's journal entry (issue 73, ADR-0015): when a drain ends —
   // any stop reason — ONE dated summary lands in the workbench project's
@@ -187,7 +203,8 @@ export function useDrain(deps: DrainDeps): Drain {
   // directly by the "Initialize git" / "Drain serially" dialog actions so
   // neither has to re-run the notUnderGit gate it just resolved.
   const proceedDrain = useCallback(
-    (chosenCap: number): void => {
+    (chosenCap: number, selectedIds?: readonly number[]): void => {
+      drainScopeRef.current = selectedIds;
       setCap(Math.max(1, Math.floor(chosenCap) || 1));
       setDrainMessage('');
       setDebriefAvailable(false);
@@ -207,7 +224,7 @@ export function useDrain(deps: DrainDeps): Drain {
   );
 
   const startDrain = useCallback(
-    (chosenCap: number): void => {
+    (chosenCap: number, selectedIds?: readonly number[]): void => {
       // Refuse to drain onto a mid-merge main (issue 24) — resolve/abort first.
       if (midMerge) {
         setDrainMessage(
@@ -237,7 +254,7 @@ export function useDrain(deps: DrainDeps): Drain {
         setGitInitPrompt({ cap: chosenCap });
         return;
       }
-      proceedDrain(chosenCap);
+      proceedDrain(chosenCap, selectedIds);
     },
     [midMerge, backlog, runs, runStatusOf, notUnderGit, proceedDrain, setGitInitError, setGitInitPrompt],
   );
@@ -247,7 +264,7 @@ export function useDrain(deps: DrainDeps): Drain {
   // human resolves the branch first and every gate below sees the branch they
   // actually chose.
   const guardedStartDrain = useCallback(
-    (chosenCap: number): void => {
+    (chosenCap: number, selectedIds?: readonly number[]): void => {
       const decision = branchGuardDecision(branchStatus);
       // Same "never fail open while loading" rule as guardedStartRun (issue
       // 176) — the Drain control is disabled for this same window.
@@ -255,10 +272,14 @@ export function useDrain(deps: DrainDeps): Drain {
       if (decision === 'prompt') {
         setBranchPromptMode('choose');
         setBranchPromptError(null);
-        setBranchPrompt({ kind: 'drain', cap: chosenCap });
+        setBranchPrompt(
+          selectedIds === undefined
+            ? { kind: 'drain', cap: chosenCap }
+            : { kind: 'drain', cap: chosenCap, selectedIds },
+        );
         return;
       }
-      startDrain(chosenCap);
+      startDrain(chosenCap, selectedIds);
     },
     [branchStatus, startDrain, setBranchPromptMode, setBranchPromptError, setBranchPrompt],
   );
@@ -280,6 +301,7 @@ export function useDrain(deps: DrainDeps): Drain {
     setDraining(false);
     setDrainMessage('');
     setDebriefAvailable(false);
+    drainScopeRef.current = undefined;
   }, []);
 
   // --- The drain loop, expressed as a pure re-plan ------------------------
@@ -368,6 +390,10 @@ export function useDrain(deps: DrainDeps): Drain {
       // `touches:` footprint) serialize instead of co-scheduling into a
       // guaranteed merge collision.
       hotFiles: backlog.hotFiles,
+      // The in-scope issue selection this drain was started with (issue 192),
+      // or undefined for "every eligible issue" — set once at `proceedDrain`
+      // and stable for the drain's whole lifetime.
+      selectedIds: drainScopeRef.current,
     });
 
     // Overlap-forced serialization is never silent (issue 171): note each
