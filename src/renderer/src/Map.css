@@ -593,15 +593,24 @@
 
 /* ---- Backlog section (collapsible) ---------------------------------------- */
 /* Flex:1 + min-height:0 (issue 159) makes this the one region that grows to
-   fill the remaining view height and clips to it, so its inner `.map__list`
-   scrolls on its own instead of the whole `.map` column growing past the
-   viewport and burying the Run log above. */
+   fill the remaining view height, so the backlog scrolls on its own instead of
+   the whole `.map` column growing past the viewport and burying the Run log
+   above.
+
+   The `<details>` element is itself the scroll region (issue 175). Issue 159's
+   original approach made this a `display:flex` column and put `overflow-y:auto`
+   on the inner `.map__list`, but Chromium does NOT propagate a flex container's
+   height constraint from a `<details>` into its content child — so the inner
+   `<ul>` grew to its full content height, got clipped by this element's
+   `overflow:hidden`, and never showed a scrollbar (the backlog was
+   unscrollable). Scrolling THIS element directly sidesteps that: `.map__section`
+   is a proper flex ITEM of `.map`, so its own height is correctly constrained,
+   and `overflow-y:auto` here scrolls regardless of the details-content quirk. */
 .map__section {
-  display: flex;
-  flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .map__section-summary {
@@ -617,6 +626,14 @@
   color: var(--fg-mute);
   user-select: none;
   list-style: none;
+  /* Keep the "Backlog · N issues" header (and its collapse toggle) in view
+     while the issues scroll beneath it. --bg0 is the effective backdrop behind
+     the Map (nothing between body and .map paints one), and it has a
+     light-theme override, so this reads correctly in both themes. */
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg0);
 }
 
 .map__section-summary::-webkit-details-marker {
@@ -652,11 +669,9 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
-  /* Issue 159: this is the one region that scrolls with backlog size — the
-     Run log and everything else above `.map__section` keeps its own height. */
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
+  /* The list flows at its natural height; scrolling belongs to `.map__section`
+     above (issue 175) — a `<details>` doesn't hand its flex-constrained height
+     down to a content child, so scrolling the child never worked. */
 }
 
 .map__empty {
