@@ -17,6 +17,7 @@ function mk(id: number, status: IssueStatus, over: Partial<BacklogIssue> = {}): 
     repoKey: null,
     model: null,
     effort: null,
+    touches: [],
     inBatch: true,
     standalone: false,
     body: 'body',
@@ -25,7 +26,7 @@ function mk(id: number, status: IssueStatus, over: Partial<BacklogIssue> = {}): 
 }
 
 function backlog(issues: BacklogIssue[], activePrd: string | null = 'docs/PRD.md'): Backlog {
-  return { activePrd, workerModel: 'sonnet', escalationCeiling: 'opus', workerEffort: null, runTimeoutMinutes: 30, issues };
+  return { activePrd, workerModel: 'sonnet', escalationCeiling: 'opus', workerEffort: null, runTimeoutMinutes: 30, hotFiles: [], issues };
 }
 
 describe('isRelevantChange', () => {

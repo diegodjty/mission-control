@@ -263,3 +263,38 @@ describe('buildBacklog — drain-worker tiering from CONFIG (issues 154/155)', (
     expect(backlog.workerEffort).toBeNull();
   });
 });
+
+describe('buildBacklog — overlap-aware scheduling inputs (issue 171)', () => {
+  it('reads a flow-list `hot_files` CONFIG entry', () => {
+    const config = `---\nrepos:\n  a: /x\ndefault_repo: a\nhot_files: [src/renderer/src/App.tsx, src/shared/god.ts]\n---\n\n# proj CONFIG\n`;
+    const backlog = buildBacklog([], config);
+    expect(backlog.hotFiles).toEqual(['src/renderer/src/App.tsx', 'src/shared/god.ts']);
+  });
+
+  it('reads a block-list `hot_files` CONFIG entry', () => {
+    const config =
+      '---\nrepos:\n  a: /x\ndefault_repo: a\nhot_files:\n  - src/renderer/src/App.tsx\n  - src/shared/god.ts\n---\n\n# proj CONFIG\n';
+    const backlog = buildBacklog([], config);
+    expect(backlog.hotFiles).toEqual(['src/renderer/src/App.tsx', 'src/shared/god.ts']);
+  });
+
+  it('defaults to no hot files when unset', () => {
+    expect(buildBacklog([], CONFIG).hotFiles).toEqual([]);
+  });
+
+  it('parses an issue\'s `touches:` frontmatter as a footprint', () => {
+    const files = [
+      issue(
+        '02-map.md',
+        '---\nstatus: open\ndepends_on: []\ntouches: [src/renderer/src/App.tsx, src/shared/*.ts]\n---\n\n# 02 — Map',
+      ),
+    ];
+    const { issues } = buildBacklog(files, CONFIG);
+    expect(issues[0].touches).toEqual(['src/renderer/src/App.tsx', 'src/shared/*.ts']);
+  });
+
+  it('defaults `touches` to an empty list when omitted', () => {
+    const files = [issue('02-map.md', '---\nstatus: open\ndepends_on: []\n---\n\n# 02 — Map')];
+    expect(buildBacklog(files, CONFIG).issues[0].touches).toEqual([]);
+  });
+});

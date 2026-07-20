@@ -436,7 +436,7 @@ describe('stability and degradation', () => {
     expect(() =>
       deriveAttention({
         project: 'demo',
-        backlog: { activePrd: null, workerModel: 'sonnet', escalationCeiling: 'opus', workerEffort: null, runTimeoutMinutes: 30, issues: [] },
+        backlog: { activePrd: null, workerModel: 'sonnet', escalationCeiling: 'opus', workerEffort: null, runTimeoutMinutes: 30, hotFiles: [], issues: [] },
         receipts: null as never,
         coreProposedPresent: false,
         humanSetup: 42 as never,
