@@ -19,6 +19,7 @@ flowchart LR
     APP --> PANE["Panes (xterm) · interactive"]
     APP --> FEED["Feeds · headless drain Runs"]
     APP --> ATT["Attention hub"]
+    APP --> RCP["Receipts (issue 180)"]
   end
   subgraph M["Main process (the backend)"]
     HUB["Coordinator hub / IPC"]

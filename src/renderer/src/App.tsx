@@ -6,6 +6,7 @@ import { CommandPalette } from './CommandPalette';
 import { Attention } from './Attention';
 import { Launcher, type QuickFixIssueRef } from './Launcher';
 import { PlanningView } from './PlanningView';
+import { ReceiptsView } from './ReceiptsView';
 import { AppShell } from './AppShell';
 import {
   GitInitDialog,
@@ -3560,6 +3561,17 @@ export function App(): JSX.Element {
               onRegisterRepo={(item) => void registerRepoFromInbox(item)}
               notice={inboxNotice}
             />
+          </div>
+        )}
+
+        {/* The Receipts tab (issue 180, ADR-0023): browse finished Runs and
+            read a selected one's Receipt through the shared rich viewer, "How
+            it works" mermaid diagram live — replaces Map's inline Run-log
+            strip. Remount-on-visit: it reads the already-loaded `runLog`
+            state, so there is no live watch of its own to preserve. */}
+        {isSlotMounted('receipts', view, shellCtx) && (
+          <div className="app__slot" style={{ display: 'flex' }}>
+            <ReceiptsView records={runLog} />
           </div>
         )}
     </AppShell>
