@@ -127,6 +127,7 @@ import {
 import { newRun, type InboxFocus, type TrackedRun } from './app/appTypes';
 import { useMergeLane, type ProtectedMergeLandTarget } from './app/useMergeLane';
 import { useDrain } from './app/useDrain';
+import { useScheduledDrain } from './app/useScheduledDrain';
 import { useLauncher } from './app/useLauncher';
 import { RunTile } from './RunTile';
 
@@ -475,6 +476,12 @@ export function App(): JSX.Element {
   // drain" affordance through this same ref-to-latest-callback indirection —
   // it is invoked before the drain hook's own inputs (`logNote`) are ready.
   const drainDismissDebriefRef = useRef<(() => void) | null>(null);
+  // The scheduled-drain seam (`./app/useScheduledDrain`, issue 190, ADR-0024):
+  // one-shot and un-persisted by construction, so it must still be dropped on
+  // a Project switch like every other per-Project seam here — same
+  // ref-to-latest-callback indirection, since the hook is invoked further down
+  // (it needs `drain.guardedStartDrain` as its start path).
+  const scheduledDrainResetRef = useRef<(() => void) | null>(null);
 
   // The launcher/planning/project-switch seam (`./app/useLauncher`, issue
   // 187) is invoked further down, once ITS inputs (`liveRunIssueIds`,
@@ -618,6 +625,10 @@ export function App(): JSX.Element {
     // The drain-coordinator seam owns this reset; called via a ref for the
     // same ordering reason as `mergeLaneResetRef` below.
     drainResetRef.current?.();
+    // A pending schedule belongs to the Project it was armed against — never
+    // let it fire into whatever Project happens to be open when its time
+    // arrives (issue 190).
+    scheduledDrainResetRef.current?.();
     // The ambient activity log is per-Project: drop it on a switch so the new
     // Project never inherits the previous one's notes.
     activityFed.current.clear();
@@ -2172,6 +2183,17 @@ export function App(): JSX.Element {
   drainResetRef.current = drain.reset;
   drainDismissDebriefRef.current = drain.dismissDebrief;
 
+  // --- Scheduled drain (issue 190, ADR-0024) --------------------------------
+  // A deferred press of the Drain control: firing calls the SAME
+  // `guardedStartDrain` the button's onClick does (branch guard, git-init
+  // gate, eligibility gate — every refusal the manual path has still applies
+  // at fire time), over the whole eligible backlog exactly like pressing
+  // Drain now. One-shot and un-persisted (ADR-0024): the pending schedule
+  // lives only in this hook's `useState`, so quitting MC or closing this
+  // Project's Window drops it with nothing left behind.
+  const scheduledDrain = useScheduledDrain(drain.guardedStartDrain);
+  scheduledDrainResetRef.current = scheduledDrain.reset;
+
   // Resume whichever Run/drain the branch prompt is holding, bypassing the
   // guard (it just got resolved) — fired by Create/Switch (after the git op
   // lands) and by Proceed anyway.
@@ -2705,6 +2727,9 @@ export function App(): JSX.Element {
             onDebrief={debriefDrain}
             cap={drain.cap}
             onCapChange={drain.setCap}
+            schedule={scheduledDrain.schedule}
+            onScheduleDrain={scheduledDrain.scheduleDrainAt}
+            onCancelScheduledDrain={scheduledDrain.cancelScheduledDrain}
             notUnderGit={notUnderGit}
             branchStatus={branchStatus}
             mergeAffordance={mergeAffordance}

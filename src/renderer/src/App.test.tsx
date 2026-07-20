@@ -200,6 +200,140 @@ describe('App.tsx state-seam harness', () => {
     );
   });
 
+  it('scheduled drain (issue 190): fires the same start path at fire time, one-shot', async () => {
+    const projectPath = '/repo/scheduled-drain-project';
+    (bridge.listProjects as any).mockResolvedValue({
+      projects: [legacyProject({ key: projectPath })],
+      activeProjectKey: projectPath,
+      pendingOpen: null,
+    });
+    (bridge.applyIsolation as any).mockImplementation((req: any) =>
+      Promise.resolve({
+        parallel: false,
+        placements: req.runs.map((r: any) => ({ issueId: r.issueId, cwd: projectPath })),
+        queuedIssueIds: [],
+        nonGitRoots: [],
+      }),
+    );
+    (bridge.getGitBranchStatus as any).mockResolvedValue({
+      branch: 'main',
+      detached: false,
+      protectedBranch: false,
+    });
+
+    render(<App />);
+    await waitFor(() => expect(mapPropsRef.current).not.toBeNull());
+
+    const backlog = backlogWith([issue({ id: 1, status: 'open' })]);
+    await act(async () => {
+      mapPropsRef.current.onBacklogLoaded(backlog, projectPath);
+    });
+    await waitFor(() => expect(mapPropsRef.current.branchStatus).not.toBeNull());
+
+    // Idle until armed.
+    expect(mapPropsRef.current.schedule).toEqual({ kind: 'idle' });
+
+    // A near-future real time — the hook polls wall-clock time every second,
+    // so this fires on the next tick or two without faking timers (which
+    // would also have to fake out the App's own 1.5s scan/branch polls).
+    const fireAt = Date.now() + 1_100;
+    await act(async () => {
+      mapPropsRef.current.onScheduleDrain(fireAt, 1);
+    });
+    expect(mapPropsRef.current.schedule).toEqual(
+      expect.objectContaining({ kind: 'pending', fireAt, cap: 1 }),
+    );
+    // Not due yet — nothing starts.
+    expect(mapPropsRef.current.draining).toBe(false);
+
+    // Fire time reached: the SAME start path a manual Drain click uses ran —
+    // draining flips true and the eligible issue starts, exactly like
+    // `onDrain` in the sibling re-plan test above — and the schedule disarms
+    // (one-shot: it does not stay pending or re-fire).
+    await waitFor(() => expect(mapPropsRef.current.draining).toBe(true), { timeout: 6000 });
+    await waitFor(
+      () => expect(runTileCalls.current.some((p) => p.run.target.issueId === 1)).toBe(true),
+      { timeout: 6000 },
+    );
+    expect(mapPropsRef.current.schedule).toEqual({ kind: 'idle' });
+  }, 10000);
+
+  it('scheduled drain (issue 190): a Project switch drops the pending schedule — it never fires into the new Project, nothing persists', async () => {
+    const projectA = '/repo/schedule-switch-a';
+    const projectB = '/repo/schedule-switch-b';
+
+    (bridge.listProjects as any).mockResolvedValue({
+      projects: [legacyProject({ key: projectA })],
+      activeProjectKey: projectA,
+      pendingOpen: null,
+    });
+    (bridge.applyIsolation as any).mockResolvedValue({
+      parallel: false,
+      placements: [{ issueId: 1, cwd: projectA }],
+      queuedIssueIds: [],
+      nonGitRoots: [],
+    });
+    (bridge.getGitBranchStatus as any).mockResolvedValue({
+      branch: 'main',
+      detached: false,
+      protectedBranch: false,
+    });
+    (bridge.scanAfkRuns as any).mockResolvedValue({
+      branches: [],
+      midMerge: false,
+      previews: [],
+      previewNote: null,
+      staleBuildNote: null,
+    });
+
+    const registryListeners: Array<() => void> = [];
+    (bridge.onProjectRegistryChanged as any).mockImplementation((cb: () => void) => {
+      registryListeners.push(cb);
+      return () => {};
+    });
+
+    render(<App />);
+    await waitFor(() => expect(mapPropsRef.current).not.toBeNull());
+
+    const backlog = backlogWith([issue({ id: 1, status: 'open' })]);
+    await act(async () => {
+      mapPropsRef.current.onBacklogLoaded(backlog, projectA);
+    });
+    await waitFor(() => expect(mapPropsRef.current.branchStatus).not.toBeNull());
+
+    const fireAt = Date.now() + 1_100;
+    await act(async () => {
+      mapPropsRef.current.onScheduleDrain(fireAt, 1);
+    });
+    expect(mapPropsRef.current.schedule.kind).toBe('pending');
+
+    // Another Window switches the shared active Project away from A, exactly
+    // as the sibling reset test above delivers it.
+    (bridge.listProjects as any).mockResolvedValue({
+      projects: [legacyProject({ key: projectA }), legacyProject({ key: projectB })],
+      activeProjectKey: projectB,
+      pendingOpen: null,
+    });
+
+    expect(registryListeners.length).toBeGreaterThan(0);
+    await act(async () => {
+      for (const listener of registryListeners) listener();
+    });
+
+    await waitFor(() => expect(mapPropsRef.current.projectPath).toBe(projectB));
+    // The reset dropped the pending schedule immediately — it is not merely
+    // withheld, it is gone (nothing persisted, nothing to reconnect to).
+    expect(mapPropsRef.current.schedule).toEqual({ kind: 'idle' });
+
+    // Even past the original fire time, nothing starts — the schedule that
+    // would have fired into project A is simply gone, and it must not bleed
+    // into project B either.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 2_500));
+    });
+    expect(mapPropsRef.current.draining).toBe(false);
+  }, 10000);
+
   it('resetForProjectSwitch clears drain + merge + launcher state together on a project switch', async () => {
     const projectA = '/repo/project-a';
     const projectB = '/repo/project-b';

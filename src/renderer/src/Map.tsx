@@ -27,6 +27,7 @@ import {
   type MergePreviewVerdict,
 } from '../../shared/merge-preview';
 import { latestReceiptFor } from '../../shared/receipt-audit';
+import type { ScheduledDrainState } from '../../shared/scheduled-drain';
 import {
   parseChecklist,
   checklistSourceText,
@@ -34,6 +35,29 @@ import {
   type ChecklistItem,
 } from '../../shared/checklist-model';
 import { allChecked } from '../../shared/checklist-state-model';
+
+/**
+ * Turn an `<input type="time">` value ("HH:MM") into the next epoch-ms
+ * occurrence of that wall-clock time — today if it hasn't passed yet, else
+ * tomorrow. Returns null for a blank/unparseable input (nothing to schedule).
+ */
+function nextOccurrenceOfTimeOfDay(hhmm: string, now: number): number | null {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(hhmm);
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (hours > 23 || minutes > 59) return null;
+  const candidate = new Date(now);
+  candidate.setHours(hours, minutes, 0, 0);
+  if (candidate.getTime() <= now) candidate.setDate(candidate.getDate() + 1);
+  return candidate.getTime();
+}
+
+/** `HH:MM` in the local timezone, for the pending-schedule label. */
+function formatFireTime(fireAt: number): string {
+  const d = new Date(fireAt);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
 
 interface MapProps {
   /**
@@ -100,6 +124,20 @@ interface MapProps {
   cap?: number;
   /** Change the cap. */
   onCapChange?: (cap: number) => void;
+  /**
+   * A drain armed to fire later at a chosen wall-clock time (issue 190,
+   * ADR-0024), or idle. Absent/`undefined` hides the schedule affordance
+   * entirely (an uncontrolled Map, same convention as `onDrain`).
+   */
+  schedule?: ScheduledDrainState;
+  /**
+   * Arm a scheduled drain: `fireAt` is the chosen time as epoch ms, `cap` the
+   * concurrency cap it starts with (same meaning as the manual Drain's cap).
+   * At `fireAt` the schedule fires the SAME start path as pressing Drain now.
+   */
+  onScheduleDrain?: (fireAt: number, cap: number) => void;
+  /** Cancel the pending schedule before it fires. */
+  onCancelScheduledDrain?: () => void;
   /**
    * The Merge button's exceptions-entry decision (issue 148, ADR-0021):
    * everyday merging belongs to the always-on lane now, so the button only
@@ -257,6 +295,9 @@ export function Map({
   onDebrief,
   cap,
   onCapChange,
+  schedule,
+  onScheduleDrain,
+  onCancelScheduledDrain,
   mergeAffordance,
   onResolveConflict,
   onMergeStrays,
@@ -318,6 +359,12 @@ export function Map({
   // ＋ Start something (issue 116): whether the populated Map's chooser is
   // expanded. The empty-state chooser is always visible, so it needs no toggle.
   const [startOpen, setStartOpen] = useState(false);
+
+  // Scheduled drain (issue 190, ADR-0024): the `<input type="time">` draft the
+  // human is picking, before "Schedule" arms it. Purely local UI state — the
+  // armed schedule itself lives in the parent (`schedule` prop), same split as
+  // `cap`/`onCapChange` above.
+  const [scheduleTimeInput, setScheduleTimeInput] = useState('');
 
   // Issue-file Edit / Delete (issue 89): the Map's one write exception. The
   // editor seeds from a FRESH disk read (never a possibly-stale push), saves
@@ -758,6 +805,46 @@ export function Map({
                   >
                     ▶▶ Drain backlog
                   </button>
+                ))}
+              {/* Scheduled drain (issue 190, ADR-0024): a deferred press of
+                  Drain — pick a wall-clock time, an open Window's timer fires
+                  it later via the exact same start path. One-shot and
+                  un-persisted: closing this Window/quitting MC before the
+                  time just means it never fires, nothing saved. */}
+              {onScheduleDrain &&
+                (schedule && schedule.kind === 'pending' ? (
+                  <span className="map__schedule map__schedule--pending">
+                    ⏰ Drain scheduled for {formatFireTime(schedule.fireAt)}
+                    <button
+                      className="map__schedule-cancel"
+                      onClick={() => onCancelScheduledDrain?.()}
+                      title="Cancel the scheduled drain before it fires"
+                    >
+                      Cancel
+                    </button>
+                  </span>
+                ) : (
+                  <label className="map__schedule map__schedule--idle">
+                    <input
+                      className="map__schedule-time"
+                      type="time"
+                      value={scheduleTimeInput}
+                      onChange={(e) => setScheduleTimeInput(e.target.value)}
+                      title="Time of day to start a drain over the whole eligible backlog"
+                    />
+                    <button
+                      className="map__schedule-arm"
+                      disabled={nextOccurrenceOfTimeOfDay(scheduleTimeInput, Date.now()) === null}
+                      onClick={() => {
+                        const fireAt = nextOccurrenceOfTimeOfDay(scheduleTimeInput, Date.now());
+                        if (fireAt === null) return;
+                        onScheduleDrain(fireAt, cap ?? 2);
+                      }}
+                      title="Schedule a drain to start at this time (today, or tomorrow if it's already passed)"
+                    >
+                      Schedule drain
+                    </button>
+                  </label>
                 ))}
               {/* Merge exceptions entry (issue 148, ADR-0021): everyday merging
                   belongs to the always-on lane, so this only surfaces a paused
