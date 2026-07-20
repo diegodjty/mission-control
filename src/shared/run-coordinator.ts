@@ -23,6 +23,7 @@
 import type { BacklogIssue } from './backlog-model';
 import type { RunOutcome } from './completion-parser';
 import { footprintOverlap, predictedFootprint } from './file-overlap';
+import type { GitBranchStatusResult } from './ipc-contract';
 import { eligibleForRun } from './run-eligibility';
 import type { RunStatus } from './run-state';
 
@@ -582,4 +583,27 @@ export function planDrain(input: DrainInput): DrainPlan {
   const queued = drain.stop ? eligible : eligible.filter((id) => !startableSet.has(id));
 
   return { startable, queued, drain, waitingOnMerge, overlapNotices };
+}
+
+/**
+ * The pre-start branch guard's decision (issue 167, race fixed by issue 176):
+ * whether a fresh Run/drain may proceed straight to `startRun`/`startDrain`,
+ * must show the Create/Switch/Proceed prompt first, or must hold the click
+ * because branch status hasn't loaded yet.
+ *
+ * `branchStatus === null` means "still resolving" (the initial state before
+ * the first `getGitBranchStatus` poll lands, or no project open at all) — it
+ * must NEVER be read as "safe to proceed". A click that lands in that window
+ * gets `'pending'`, not `'proceed'`; the caller holds the action (disabled
+ * control, or queue-and-retry once status resolves) instead of falling
+ * through to an unguarded start.
+ */
+export type BranchGuardDecision = 'proceed' | 'prompt' | 'pending';
+
+export function branchGuardDecision(
+  branchStatus: GitBranchStatusResult | null,
+): BranchGuardDecision {
+  if (branchStatus === null) return 'pending';
+  if (branchStatus.protectedBranch || branchStatus.detached) return 'prompt';
+  return 'proceed';
 }
