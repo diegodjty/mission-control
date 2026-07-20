@@ -87,8 +87,7 @@ import {
 import { overlapSerializationNote } from '../../shared/file-overlap';
 import { takeoverKindFor, takeoverTarget } from '../../shared/run-takeover';
 import { isNotableDrainActivity } from '../../shared/workbench-memory';
-import { eligibleForRun, hasInFlightRun } from '../../shared/run-eligibility';
-import { suggestBranchName, checkBranchName } from '../../shared/branch-name';
+import { hasInFlightRun } from '../../shared/run-eligibility';
 import {
   repoForIssue,
   unknownRepoKeyNote,
