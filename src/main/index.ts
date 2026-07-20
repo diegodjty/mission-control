@@ -38,6 +38,13 @@ import {
   worktreePathFor,
 } from './git-worktree-adapter';
 import { isProtectedBranch } from '../shared/action-authority';
+import {
+  readOwnRunningCommit,
+  isMissionControlRepo,
+  readTipCommit,
+  countCommitsBehind,
+} from './build-version';
+import { evaluateBuildStaleness } from '../shared/build-staleness';
 import { initGitRepo } from './git-init';
 import { mergeRuns, abortMerge } from './run-merge';
 import {
@@ -63,6 +70,7 @@ import { recordTimeoutSalvage, resolveTimeoutSalvage } from './timeout-salvage-s
 import { slugFromFileName } from './git-worktree-adapter';
 import { acceptCoreProposal, dismissCoreProposal, readCoreMemory, writeDrainJournal } from './memory-files';
 import { extractRunUsage, timeOnlyUsage, type RunUsage } from '../shared/run-telemetry';
+import { applyRunUsage, PendingRunUsageStash, stickyIngestUsage } from './run-usage-pending';
 import type { TerminalResult } from '../shared/headless-feed';
 import type { WorkerModelTier } from '../shared/worker-model';
 import {
@@ -324,6 +332,31 @@ function scanReposFor(projectKey: string): string[] {
   return [...new Set(repos)];
 }
 
+/**
+ * The self-hosting stale-build note (issue 173): non-null only when one of
+ * `repos` IS the mission-control codebase AND MC's own running build
+ * (`ownBuildCommit`, captured once at startup) is behind that repo's current
+ * default-branch tip. Checks every member repo (a workbench Project may drain
+ * several) and stops at the first one that is both self-hosted and stale.
+ */
+async function computeStaleBuildNote(repos: string[]): Promise<string | null> {
+  if (!ownBuildCommit) return null;
+  for (const repo of repos) {
+    if (!(await isMissionControlRepo(repo))) continue;
+    const branch = await detectDefaultBranch(repo);
+    const tip = await readTipCommit(repo, branch);
+    if (!tip) continue;
+    const commitsBehind = await countCommitsBehind(repo, ownBuildCommit, tip);
+    const decision = evaluateBuildStaleness({
+      runningCommit: ownBuildCommit,
+      targetTipCommit: tip,
+      commitsBehind,
+    });
+    if (decision.stale) return decision.message;
+  }
+  return null;
+}
+
 // --- Workbench auto-commit (issue 72, ADR-0015) ----------------------------
 // MC auto-commits the WORKBENCH repo after each Run event — claim observed
 // (backlog watcher diff), park / done + Receipt / blocked (Receipt ingest) —
@@ -379,6 +412,17 @@ const previewCoordinator = createPreviewCoordinator({
   serializer: repoSerializer,
   isSupported: () => previewProbe.supported,
   simulate: (repoPath, stamp) => simulateSequence(repoPath, stamp),
+});
+
+// Self-hosting stale-build banner (issue 173). MC's own running build's
+// commit is read ONCE, here, at startup, and cached — never re-read live. The
+// hazard is precisely that the in-memory process can fall behind the on-disk
+// repo (e.g. the very drain it is running lands merges into that repo), so
+// re-reading `app.getAppPath()`'s HEAD on every scan tick would always report
+// "current" and defeat the whole point.
+let ownBuildCommit: string | null = null;
+void readOwnRunningCommit(app.getAppPath()).then((commit) => {
+  ownBuildCommit = commit;
 });
 
 /**
@@ -572,30 +616,17 @@ const runSpawnMeta = new Map<string, RunSpawnMeta>();
 // A Run's usage may resolve BEFORE its Receipt lands (the common case — a
 // Worker writes the Receipt, then the process exits a beat later) or AFTER
 // (a slow watch). Keyed by Project + issue so either order reaches the same
-// RunLogRecord; the Receipt watch below consumes this map when it applies.
-const pendingRunUsage = new Map<string, RunUsage>();
-
-function pendingUsageKey(projectPath: string, issueId: number): string {
-  return `${normalizeProjectKey(projectPath)}::${issueId}`;
-}
+// RunLogRecord; the Receipt watch below consumes this stash when it applies.
+const pendingRunUsage = new PendingRunUsageStash();
 
 /**
- * Stamp a Run's usage into its persisted Run-log record (issue 143): find the
- * latest record for this issue that has none yet, and re-append a patched copy
- * (the store collapses to the latest per id, same as a Receipt re-capture). If
- * no such record exists yet, stash the usage — the Receipt watch consumes it
- * the moment the Receipt lands. Receipts themselves are NEVER touched.
+ * Stamp a Run's usage into its persisted Run-log record (issue 143) and
+ * broadcast the patched record, if one was written. Receipts themselves are
+ * NEVER touched.
  */
-async function applyRunUsage(projectPath: string, issueId: number, usage: RunUsage): Promise<void> {
-  const records = await runLogStore.read(projectPath).catch(() => []);
-  const latest = records.find((r) => r.issueId === issueId && r.usage == null);
-  if (!latest) {
-    pendingRunUsage.set(pendingUsageKey(projectPath, issueId), usage);
-    return;
-  }
-  const patched = { ...latest, usage };
-  await runLogStore.append(projectPath, patched).catch(() => {});
-  broadcast(IpcChannel.ReceiptCaptured, { projectPath, record: patched });
+async function applyAndBroadcastRunUsage(projectPath: string, issueId: number, usage: RunUsage): Promise<void> {
+  const patched = await applyRunUsage(runLogStore, pendingRunUsage, projectPath, issueId, usage);
+  if (patched) broadcast(IpcChannel.ReceiptCaptured, { projectPath, record: patched });
 }
 
 /** Shared exit-side telemetry tail for both the PTY and headless managers. */
@@ -607,7 +638,7 @@ function finishRunSpawn(sessionId: string): void {
   const usage = meta.headless
     ? extractRunUsage(meta.lastResult, durationMs, meta.tier)
     : timeOnlyUsage(durationMs);
-  if (usage) void applyRunUsage(meta.projectPath, meta.issueId, usage);
+  if (usage) void applyAndBroadcastRunUsage(meta.projectPath, meta.issueId, usage);
 }
 
 // One PTY Session Manager for the app. With many Windows on one backend, PTY
@@ -1010,7 +1041,13 @@ function registerIpc(): void {
       // A Window that doesn't own this repo gets an empty scan — it must not
       // derive a Merge affordance or block drains off a repo it doesn't drive.
       if (ownershipError(event, req.projectPath)) {
-        return { branches: [], midMerge: false, previews: [], previewNote: null };
+        return {
+          branches: [],
+          midMerge: false,
+          previews: [],
+          previewNote: null,
+          staleBuildNote: null,
+        };
       }
       const identity = identityFor(req.projectPath);
       // A workbench Project's scan spans EVERY member repo (issue 72) —
@@ -1044,6 +1081,9 @@ function registerIpc(): void {
         // One passive note (ADR-0018), only once the probe has run AND git is
         // below the floor — never a flash before the probe resolves.
         previewNote: previewProbe.done && !previewProbe.supported ? GIT_FLOOR_NOTE : null,
+        // Persistent self-hosting stale-build banner (issue 173); never gates
+        // the scan/drain, just surfaces the drift.
+        staleBuildNote: await computeStaleBuildNote(scanReposFor(req.projectPath)),
       };
     },
   );
@@ -1439,26 +1479,31 @@ function registerIpc(): void {
       // The Window may have gone away while the seed read ran.
       if (sender.isDestroyed()) return;
       receiptWatcher.watch(key, roots, seen, (record) => {
-        // A headless Run's process may exit (and report usage) BEFORE its
-        // Receipt lands — the common case. Apply it here so the FIRST persisted
-        // version of this Run's record already carries telemetry (issue 143).
-        const pendingKey = record.issueId !== null ? pendingUsageKey(req.projectPath, record.issueId) : null;
-        const pending = pendingKey ? pendingRunUsage.get(pendingKey) : undefined;
-        if (pendingKey && pending) pendingRunUsage.delete(pendingKey);
-        const finalRecord = pending ? { ...record, usage: pending } : record;
-        // Persist first (the durable Run log is the record of truth, ADR-0009);
-        // a failed append still surfaces the record live rather than dropping it.
-        void runLogStore.append(req.projectPath, finalRecord).catch(() => {});
-        // Workbench auto-commit on the Receipt-declared Run event (issue 72):
-        // done (flip + Receipt as ONE commit), park, or blocked. Deduped by
-        // the ingest edge (issue + finished), so a re-scan re-fires nothing.
-        if (isWorkbench) {
-          const runEvent = receiptRunEvent(finalRecord.issueId, finalRecord.outcome);
-          if (runEvent !== null) commitWorkbenchEvents(req.projectPath, [runEvent]);
-        }
-        if (!sender.isDestroyed()) {
-          sender.send(IpcChannel.ReceiptCaptured, { projectPath: req.projectPath, record: finalRecord });
-        }
+        void (async () => {
+          // A headless Run's process may exit (and report usage) BEFORE its
+          // Receipt lands — the common case. Apply it here so the FIRST persisted
+          // version of this Run's record already carries telemetry (issue 143).
+          // `stickyIngestUsage` also guards a re-ingest of the SAME Receipt (a
+          // stability double-read, another Window's independent watch, a
+          // restart re-scan) from clobbering usage a prior ingest already
+          // applied (issue 177) — pending consumed at most once, but a later
+          // re-read still carries forward whatever is already persisted.
+          const pending = record.issueId !== null ? pendingRunUsage.take(req.projectPath, record.issueId) : undefined;
+          const finalRecord = await stickyIngestUsage(runLogStore, req.projectPath, record, pending);
+          // Persist first (the durable Run log is the record of truth, ADR-0009);
+          // a failed append still surfaces the record live rather than dropping it.
+          await runLogStore.append(req.projectPath, finalRecord).catch(() => {});
+          // Workbench auto-commit on the Receipt-declared Run event (issue 72):
+          // done (flip + Receipt as ONE commit), park, or blocked. Deduped by
+          // the ingest edge (issue + finished), so a re-scan re-fires nothing.
+          if (isWorkbench) {
+            const runEvent = receiptRunEvent(finalRecord.issueId, finalRecord.outcome);
+            if (runEvent !== null) commitWorkbenchEvents(req.projectPath, [runEvent]);
+          }
+          if (!sender.isDestroyed()) {
+            sender.send(IpcChannel.ReceiptCaptured, { projectPath: req.projectPath, record: finalRecord });
+          }
+        })();
       });
     });
     // Close this Window's Receipt watch when its renderer goes away, so

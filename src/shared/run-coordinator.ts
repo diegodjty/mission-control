@@ -22,6 +22,8 @@
  */
 import type { BacklogIssue } from './backlog-model';
 import type { RunOutcome } from './completion-parser';
+import { footprintOverlap, predictedFootprint } from './file-overlap';
+import type { GitBranchStatusResult } from './ipc-contract';
 import { eligibleForRun } from './run-eligibility';
 import type { RunStatus } from './run-state';
 
@@ -172,6 +174,23 @@ export function waitingOnMergeIssues(
   return result.sort((a, b) => a.issueId - b.issueId);
 }
 
+/**
+ * An eligible issue's start deferred because its predicted file footprint
+ * overlaps a Run already occupying a slot or another issue already chosen to
+ * start this round (issue 171). Never silent — the Map/drain surface renders
+ * this so "161 and 167 both touch App.tsx" is visible instead of a mystery
+ * queue slot, and the merge collision it prevents never happens in the first
+ * place.
+ */
+export interface OverlapNotice {
+  /** The issue whose start this round was deferred by the overlap. */
+  issueId: number;
+  /** The issue (running, or already selected to start this round) it collides with. */
+  blockingIssueId: number;
+  /** The shared file path/glob responsible, for the human-facing message. */
+  path: string;
+}
+
 /** Why a drain stopped. */
 export type DrainStopReason = 'no-eligible' | 'run-blocked' | 'mid-merge';
 
@@ -213,6 +232,14 @@ export interface DrainPlan {
    * nothing is waiting purely on a merge.
    */
   waitingOnMerge: WaitingOnMerge[];
+  /**
+   * Eligible issues this round's slot-fill skipped over because their
+   * predicted footprint collides with a Run already occupying a slot, or with
+   * another issue already chosen to start this round (issue 171). Ascending
+   * by issue id; empty when no overlap forced a deferral. A deferred issue
+   * still appears in `queued` as before — this just names WHY.
+   */
+  overlapNotices: OverlapNotice[];
 }
 
 export interface DrainInput {
@@ -251,6 +278,14 @@ export interface DrainInput {
    * at all, so it must never read as an ordinary "blocked awaiting you".
    */
   timeoutSalvageIssueIds?: readonly number[];
+  /**
+   * The project CONFIG's `hot_files` list (issue 171) — file paths any two
+   * eligible issues both predicted to touch must serialize against, on top of
+   * whatever each issue's own `touches:` frontmatter declares. Optional/absent
+   * ⇒ no hot files (legacy/test callers get today's behavior: nothing forces
+   * overlap serialization).
+   */
+  hotFiles?: readonly string[];
 }
 
 /**
@@ -394,6 +429,12 @@ export function drainAvailability(
  *  - When the drain is stopping, `startable` is emptied — the whole point of a
  *    stop is to open no further Panes. `queued` still reports what was left
  *    un-started, for the UI to explain.
+ *  - **Overlap-aware slot-fill (issue 171)** — an eligible issue whose
+ *    predicted footprint (its `touches:` frontmatter, or a CONFIG `hot_files`
+ *    entry its body mentions) collides with a Run already occupying a slot,
+ *    or with another issue already picked to start this round, is skipped for
+ *    that slot rather than co-scheduled; a later, disjoint issue fills the
+ *    slot instead. The skip is reported in `overlapNotices`, never silent.
  */
 export function planDrain(input: DrainInput): DrainPlan {
   const cap = normalizeCap(input.maxConcurrent);
@@ -495,15 +536,74 @@ export function planDrain(input: DrainInput): DrainPlan {
   // single integration-branch slot are retired now that a dependency's work
   // reaches main via the auto-merge lane rather than a shared solo commit. No
   // further Panes open once the drain is stopping.
+  //
+  // Overlap-aware scheduling (issue 171): a candidate whose predicted
+  // footprint collides with a Run already occupying a slot, or with another
+  // issue already picked to start THIS round, is skipped for now (it stays
+  // queued and gets an `overlapNotices` entry) rather than co-scheduled — the
+  // whole point being that a disjoint issue further down the list still fills
+  // the slot instead of the drain just running fewer Runs than the cap allows.
+  const hotFiles = input.hotFiles ?? [];
+  const footprintOf = new Map<number, string[]>();
+  const footprintFor = (id: number): string[] => {
+    const cached = footprintOf.get(id);
+    if (cached) return cached;
+    const issue = issueById.get(id);
+    const footprint = issue ? predictedFootprint(issue, hotFiles) : [];
+    footprintOf.set(id, footprint);
+    return footprint;
+  };
+  // Seed with every Run already occupying a slot — a fresh start must never
+  // collide with what's already in flight, not just with its round-mates.
+  const committed: { issueId: number; footprint: string[] }[] = input.activeRuns
+    .filter(isOccupyingSlot)
+    .map((r) => ({ issueId: r.issueId, footprint: footprintFor(r.issueId) }));
+
   const startable: number[] = [];
+  const overlapNotices: OverlapNotice[] = [];
   if (!drain.stop) {
     for (const id of eligible) {
       if (startable.length >= freeSlots) break;
+      const footprint = footprintFor(id);
+      let deferred = false;
+      for (const c of committed) {
+        const path = footprintOverlap(c.footprint, footprint);
+        if (path) {
+          overlapNotices.push({ issueId: id, blockingIssueId: c.issueId, path });
+          deferred = true;
+          break;
+        }
+      }
+      if (deferred) continue;
       startable.push(id);
+      committed.push({ issueId: id, footprint });
     }
   }
   const startableSet = new Set(startable);
   const queued = drain.stop ? eligible : eligible.filter((id) => !startableSet.has(id));
 
-  return { startable, queued, drain, waitingOnMerge };
+  return { startable, queued, drain, waitingOnMerge, overlapNotices };
+}
+
+/**
+ * The pre-start branch guard's decision (issue 167, race fixed by issue 176):
+ * whether a fresh Run/drain may proceed straight to `startRun`/`startDrain`,
+ * must show the Create/Switch/Proceed prompt first, or must hold the click
+ * because branch status hasn't loaded yet.
+ *
+ * `branchStatus === null` means "still resolving" (the initial state before
+ * the first `getGitBranchStatus` poll lands, or no project open at all) — it
+ * must NEVER be read as "safe to proceed". A click that lands in that window
+ * gets `'pending'`, not `'proceed'`; the caller holds the action (disabled
+ * control, or queue-and-retry once status resolves) instead of falling
+ * through to an unguarded start.
+ */
+export type BranchGuardDecision = 'proceed' | 'prompt' | 'pending';
+
+export function branchGuardDecision(
+  branchStatus: GitBranchStatusResult | null,
+): BranchGuardDecision {
+  if (branchStatus === null) return 'pending';
+  if (branchStatus.protectedBranch || branchStatus.detached) return 'prompt';
+  return 'proceed';
 }

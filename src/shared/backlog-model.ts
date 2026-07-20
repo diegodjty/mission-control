@@ -20,7 +20,12 @@ import {
   type WorkerEffort,
   type WorkerModelTier,
 } from './worker-model';
-import { DEFAULT_RUN_TIMEOUT_MINUTES, parseRunTimeoutMinutes } from './run-timeout';
+import {
+  DEFAULT_RUN_TIMEOUT_MINUTES,
+  parseIssueRunTimeoutMinutes,
+  parseRunTimeoutMinutes,
+} from './run-timeout';
+import { parseHotFiles } from './file-overlap';
 
 export type IssueStatus = 'open' | 'wip' | 'done';
 
@@ -76,6 +81,24 @@ export interface BacklogIssue {
    * ignore it, exactly like `model`.
    */
   effort: WorkerEffort | null;
+  /**
+   * The issue's declared `run_timeout` frontmatter override, in MINUTES (issue
+   * 170) — a big-refactor issue that knows it needs more runway than the
+   * project CONFIG default declares its own budget, exactly like `model:`/
+   * `effort:`. Null when omitted or malformed (= the CONFIG default, scaled by
+   * the resolved effort tier at the drain spawn site). Drain-only, like
+   * `model`/`effort` above.
+   */
+  runTimeoutMinutes: number | null;
+  /**
+   * The issue's declared `touches:` frontmatter (issue 171) — a hand-authored
+   * list of file globs this issue is expected to touch, the precise footprint
+   * source the Run Coordinator prefers over its own body-scan guess when
+   * deciding whether two eligible issues must serialize. Empty when omitted
+   * (the coordinator then falls back to scanning the body for CONFIG
+   * `hot_files` mentions).
+   */
+  touches: string[];
   /** True when `parent` matches the active PRD from CONFIG. */
   inBatch: boolean;
   /** True when the issue has no `## Parent` section at all. */
@@ -116,6 +139,13 @@ export interface Backlog {
    * here so the drain spawn site has it without a second CONFIG read.
    */
   runTimeoutMinutes: number;
+  /**
+   * The project CONFIG's `hot_files` list (issue 171) — file paths any two
+   * eligible issues both predicted to touch must serialize against each
+   * other. Surfaced here so the drive loop's `planDrain` call has it without a
+   * second CONFIG read. Empty when unset (no project-declared god files).
+   */
+  hotFiles: string[];
   /** Issues sorted ascending by id. */
   issues: BacklogIssue[];
 }
@@ -131,6 +161,7 @@ export const EMPTY_BACKLOG: Backlog = {
   escalationCeiling: DEFAULT_ESCALATION_CEILING,
   workerEffort: null,
   runTimeoutMinutes: DEFAULT_RUN_TIMEOUT_MINUTES,
+  hotFiles: [],
   issues: [],
 };
 
@@ -161,6 +192,17 @@ function parseNumberList(raw: string | undefined): number[] {
     .split(',')
     .map((part) => Number(part.trim()))
     .filter((n) => Number.isFinite(n));
+}
+
+/** Parse a `[a, b, c]`-style flow list into trimmed, unquoted strings. */
+function parseStringList(raw: string | undefined): string[] {
+  if (!raw) return [];
+  const inner = raw.replace(/^\[/, '').replace(/\]$/, '').trim();
+  if (!inner) return [];
+  return inner
+    .split(',')
+    .map((part) => part.trim().replace(/^['"]|['"]$/g, ''))
+    .filter((s) => s.length > 0);
 }
 
 /** The text of a `## Heading` section, up to the next heading (or EOF). */
@@ -215,6 +257,15 @@ function parseIssue(file: RawFile, id: number, slug: string): BacklogIssue {
   // empty value degrades to null (= the CONFIG `worker_effort` override, else
   // the tier-derived default). When set it pins the level across escalation.
   const effort = parseEffort(frontmatterValue(frontmatter, 'effort'));
+  // The optional per-issue `run_timeout` override (issue 170), in minutes.
+  // Reuses run-timeout.ts's own frontmatter parse (it re-derives the block
+  // from `file.content` itself) so the malformed/degrade rules live in one
+  // place rather than being duplicated here.
+  const runTimeoutMinutes = parseIssueRunTimeoutMinutes(file.content);
+  // The optional `touches:` footprint (issue 171), same flow-list shape as
+  // `depends_on:`. Absent/empty ⇒ [] (the coordinator falls back to a
+  // hot-files body scan for this issue).
+  const touches = parseStringList(frontmatterValue(frontmatter, 'touches'));
 
   const heading = firstHeading(body);
   const title = heading ?? slug;
@@ -241,6 +292,8 @@ function parseIssue(file: RawFile, id: number, slug: string): BacklogIssue {
     repoKey,
     model,
     effort,
+    runTimeoutMinutes,
+    touches,
     inBatch: false, // set once we know the active PRD (below)
     standalone,
     body,
@@ -261,6 +314,8 @@ export function buildBacklog(files: RawFile[], configContent: string | null): Ba
     parseWorkerTieringConfig(configContent);
   // The headless kill timeout (issue 141), from CONFIG `run_timeout`.
   const runTimeoutMinutes = parseRunTimeoutMinutes(configContent);
+  // The overlap-scheduling god-file list (issue 171), from CONFIG `hot_files`.
+  const hotFiles = parseHotFiles(configContent);
 
   const issues: BacklogIssue[] = [];
   for (const file of files) {
@@ -275,5 +330,13 @@ export function buildBacklog(files: RawFile[], configContent: string | null): Ba
   }
 
   issues.sort((a, b) => a.id - b.id);
-  return { activePrd, workerModel, escalationCeiling, workerEffort, runTimeoutMinutes, issues };
+  return {
+    activePrd,
+    workerModel,
+    escalationCeiling,
+    workerEffort,
+    runTimeoutMinutes,
+    hotFiles,
+    issues,
+  };
 }

@@ -71,6 +71,7 @@ describe('scanForProject', () => {
       midMerge: false,
       previews: [],
       previewNote: null,
+      staleBuildNote: null,
     });
   });
 
@@ -80,6 +81,7 @@ describe('scanForProject', () => {
       midMerge: false,
       previews: [],
       previewNote: null,
+      staleBuildNote: null,
     });
   });
 
@@ -107,6 +109,17 @@ describe('scanForProject', () => {
     const view = scanForProject(scanA, '/repo/a');
     expect(view.previews).toEqual([]);
     expect(view.previewNote).toBeNull();
+    expect(view.staleBuildNote).toBeNull();
+  });
+
+  it('carries the stale-build banner through when the Project matches (issue 173)', () => {
+    const stale: ScopedScan = { ...scanA, staleBuildNote: 'old build, 9 commits behind' };
+    expect(scanForProject(stale, '/repo/a').staleBuildNote).toBe('old build, 9 commits behind');
+  });
+
+  it('hides another Project scan\'s stale-build banner (issue 173)', () => {
+    const stale: ScopedScan = { ...scanA, staleBuildNote: 'old build, 9 commits behind' };
+    expect(scanForProject(stale, '/repo/b').staleBuildNote).toBeNull();
   });
 
   it('does not leak a stale scan kept after a transient error post-switch', () => {

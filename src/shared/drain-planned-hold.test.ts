@@ -31,6 +31,8 @@ function mk(id: number, status: IssueStatus, dependsOn: number[], repoKey: strin
     repoKey,
     model: null,
     effort: null,
+    runTimeoutMinutes: null,
+    touches: [],
     inBatch: true,
     standalone: false,
     body: '',

@@ -246,6 +246,25 @@ describe('buildBacklog — per-issue effort level (issue 155)', () => {
   });
 });
 
+describe('buildBacklog — per-issue run_timeout override (issue 170)', () => {
+  it('parses a valid run_timeout: override from frontmatter, in minutes', () => {
+    const files = [
+      issue('05-w.md', '---\nstatus: open\ndepends_on: []\nrun_timeout: 90\n---\n\n# 05 — W\n'),
+    ];
+    expect(buildBacklog(files, CONFIG).issues[0].runTimeoutMinutes).toBe(90);
+  });
+
+  it('degrades a malformed or absent run_timeout: to null (= the CONFIG default, effort-scaled)', () => {
+    const files = [
+      issue('06-x.md', '---\nstatus: open\nrun_timeout: soon\n---\n\n# 06 — X\n'),
+      issue('07-y.md', '---\nstatus: open\n---\n\n# 07 — Y\n'),
+    ];
+    const { issues } = buildBacklog(files, CONFIG);
+    expect(issues[0].runTimeoutMinutes).toBeNull();
+    expect(issues[1].runTimeoutMinutes).toBeNull();
+  });
+});
+
 describe('buildBacklog — drain-worker tiering from CONFIG (issues 154/155)', () => {
   it('reads worker_model / escalation_ceiling / worker_effort from the CONFIG frontmatter', () => {
     const config = `---\nrepos:\n  a: /x\ndefault_repo: a\nworker_model: haiku\nescalation_ceiling: fable\nworker_effort: high\n---\n\n# proj CONFIG\n`;
@@ -261,5 +280,40 @@ describe('buildBacklog — drain-worker tiering from CONFIG (issues 154/155)', (
     expect(backlog.workerModel).toBe('sonnet');
     expect(backlog.escalationCeiling).toBe('opus');
     expect(backlog.workerEffort).toBeNull();
+  });
+});
+
+describe('buildBacklog — overlap-aware scheduling inputs (issue 171)', () => {
+  it('reads a flow-list `hot_files` CONFIG entry', () => {
+    const config = `---\nrepos:\n  a: /x\ndefault_repo: a\nhot_files: [src/renderer/src/App.tsx, src/shared/god.ts]\n---\n\n# proj CONFIG\n`;
+    const backlog = buildBacklog([], config);
+    expect(backlog.hotFiles).toEqual(['src/renderer/src/App.tsx', 'src/shared/god.ts']);
+  });
+
+  it('reads a block-list `hot_files` CONFIG entry', () => {
+    const config =
+      '---\nrepos:\n  a: /x\ndefault_repo: a\nhot_files:\n  - src/renderer/src/App.tsx\n  - src/shared/god.ts\n---\n\n# proj CONFIG\n';
+    const backlog = buildBacklog([], config);
+    expect(backlog.hotFiles).toEqual(['src/renderer/src/App.tsx', 'src/shared/god.ts']);
+  });
+
+  it('defaults to no hot files when unset', () => {
+    expect(buildBacklog([], CONFIG).hotFiles).toEqual([]);
+  });
+
+  it('parses an issue\'s `touches:` frontmatter as a footprint', () => {
+    const files = [
+      issue(
+        '02-map.md',
+        '---\nstatus: open\ndepends_on: []\ntouches: [src/renderer/src/App.tsx, src/shared/*.ts]\n---\n\n# 02 — Map',
+      ),
+    ];
+    const { issues } = buildBacklog(files, CONFIG);
+    expect(issues[0].touches).toEqual(['src/renderer/src/App.tsx', 'src/shared/*.ts']);
+  });
+
+  it('defaults `touches` to an empty list when omitted', () => {
+    const files = [issue('02-map.md', '---\nstatus: open\ndepends_on: []\n---\n\n# 02 — Map')];
+    expect(buildBacklog(files, CONFIG).issues[0].touches).toEqual([]);
   });
 });

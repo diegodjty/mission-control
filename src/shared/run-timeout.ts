@@ -114,11 +114,27 @@ export function resolveRunTimeoutMinutes(
   issueContent: string | null | undefined,
   effort?: WorkerEffort | null,
 ): number {
-  const override = parseIssueRunTimeoutMinutes(issueContent);
-  if (override !== null) return override;
-  const base = parseRunTimeoutMinutes(configContent);
+  return resolveRunTimeoutMinutesFrom(
+    parseRunTimeoutMinutes(configContent),
+    parseIssueRunTimeoutMinutes(issueContent),
+    effort,
+  );
+}
+
+/**
+ * Same resolution as `resolveRunTimeoutMinutes`, but from already-parsed
+ * values instead of raw CONFIG/issue file content — for callers (the drain
+ * spawn site in App.tsx) that already hold the parsed `Backlog`/`BacklogIssue`
+ * structs and shouldn't re-parse raw frontmatter a second time.
+ */
+export function resolveRunTimeoutMinutesFrom(
+  baseMinutes: number,
+  issueOverrideMinutes: number | null,
+  effort?: WorkerEffort | null,
+): number {
+  if (issueOverrideMinutes !== null) return issueOverrideMinutes;
   const multiplier = effort ? (EFFORT_TIMEOUT_MULTIPLIER[effort] ?? 1) : 1;
-  return Math.round(base * multiplier);
+  return Math.round(baseMinutes * multiplier);
 }
 
 /** The resolved `run_timeout` for one Run, in MILLISECONDS — see `resolveRunTimeoutMinutes`. */
