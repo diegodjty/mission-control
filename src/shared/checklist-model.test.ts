@@ -75,6 +75,18 @@ describe('checklistSourceText', () => {
     expect(checklistSourceText('   ', '- [ ] body step')).toBe('- [ ] body step');
   });
 
+  it('falls back to the issue body when the Receipt detail is non-empty prose with no checkbox lines (issue 189)', () => {
+    const proseDetail = `Some prose.
+
+**Try it yourself**
+
+1. Start the dev server.
+2. Open the Map.
+
+Let me know once verified.`;
+    expect(checklistSourceText(proseDetail, '- [ ] body step')).toBe('- [ ] body step');
+  });
+
   it('yields an empty string when both sources are absent', () => {
     expect(checklistSourceText(null, undefined)).toBe('');
   });
