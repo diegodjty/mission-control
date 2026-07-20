@@ -6,7 +6,7 @@
  * Shared by main, preload, and renderer, so it must stay free of node/electron
  * runtime imports (types only).
  */
-import type { AttentionItem } from './attention-hub-model';
+import type { AttentionItem, JournalFile } from './attention-hub-model';
 import type { Backlog, IssueStatus } from './backlog-model';
 import type { PlanningDoc } from './planning-model';
 import type { CompletionRecord, RunOutcome } from './completion-parser';
@@ -196,6 +196,15 @@ export const IpcChannel = {
    * Resolves to a DrainJournalResult.
    */
   DrainJournal: 'drain:journal',
+  /**
+   * renderer → main (invoke): read a workbench Project's raw `memory/journal/`
+   * entries (issue 181, ADR-0023) — the Cost tab's only source for drain
+   * grouping (a drain's boundary and member Runs exist ONLY in this journal
+   * text; per-Run telemetry itself still comes from the Run log). Inert (an
+   * empty file list) for a legacy Project — no `memory/` dir exists there.
+   * Resolves to a JournalLoadResult.
+   */
+  JournalLoad: 'journal:load',
   /**
    * renderer → main (invoke): the current aggregated cross-project attention
    * snapshot (issue 79, ADR-0016) — what the background workbench watch has
@@ -1191,6 +1200,18 @@ export interface RunLogLoadResult {
   records: RunLogRecord[];
 }
 
+export interface JournalLoadRequest {
+  /** The Project repo path whose workbench `memory/journal/` to read. */
+  projectPath: string;
+}
+
+export interface JournalLoadResult {
+  /** The Project's raw journal entries, sorted by file name (oldest first).
+   *  `[]` for a legacy Project (no workbench `memory/` dir) or one with no
+   *  drains yet. */
+  files: JournalFile[];
+}
+
 export interface ReceiptWatchRequest {
   /** The Project repo path whose `issues/completions/` to watch. */
   projectPath: string;
@@ -1740,6 +1761,8 @@ export interface MissionControlApi {
   onProjectRegistryChanged(listener: () => void): () => void;
   /** Load a Project's persisted Run log for the Execution view feed (issue 34). */
   loadRunLog(req: RunLogLoadRequest): Promise<RunLogLoadResult>;
+  /** Read a workbench Project's raw `memory/journal/` entries (issue 181's Cost tab). */
+  loadJournals(req: JournalLoadRequest): Promise<JournalLoadResult>;
   /**
    * Start (or re-point) the Receipt watch for a Project (issue 56): the
    * checkout's `issues/completions/` plus each named worktree's copy.

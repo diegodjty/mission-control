@@ -18,7 +18,7 @@
  */
 
 /** The views a Window can show. */
-export type ViewId = 'launcher' | 'map' | 'pane' | 'inbox' | 'planning' | 'receipts';
+export type ViewId = 'launcher' | 'map' | 'pane' | 'inbox' | 'planning' | 'receipts' | 'cost';
 
 /** Every empty Window is the Launcher — the front door (issue 81, ADR-0016). */
 export const DEFAULT_VIEW: ViewId = 'launcher';
@@ -84,6 +84,10 @@ const REGISTRY: ReadonlyArray<{ id: ViewId; label: string; policy: MountPolicy }
   // Browses finished Runs (issue 180, ADR-0023) — reads the already-loaded
   // Run log, so there is no live watch of its own to preserve across visits.
   { id: 'receipts', label: 'Receipts', policy: 'remount-on-visit' },
+  // Run telemetry as charts (issue 181, ADR-0023) — reads the already-loaded
+  // Run log plus a one-shot journal read, so there is no live watch of its
+  // own to preserve across visits either.
+  { id: 'cost', label: 'Cost', policy: 'remount-on-visit' },
 ];
 
 /** A view's mount policy (see MountPolicy). */
@@ -146,6 +150,7 @@ export function isSlotMounted(id: ViewId, active: ViewId, ctx: ShellContext): bo
     case 'launcher':
     case 'inbox':
     case 'receipts':
+    case 'cost':
       return active === id;
   }
 }

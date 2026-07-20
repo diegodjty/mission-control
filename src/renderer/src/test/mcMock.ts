@@ -57,6 +57,7 @@ export function createMcMock(): MissionControlApi {
     openWindow: vi.fn().mockResolvedValue({ ok: true }),
     onProjectRegistryChanged: vi.fn().mockReturnValue(() => {}),
     loadRunLog: vi.fn().mockResolvedValue({ records: [] }),
+    loadJournals: vi.fn().mockResolvedValue({ files: [] }),
     watchReceipts: vi.fn(),
     onReceiptCaptured: vi.fn().mockReturnValue(() => {}),
     writeDrainJournal: vi.fn().mockResolvedValue({ offerDebrief: false }),

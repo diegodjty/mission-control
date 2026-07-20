@@ -93,6 +93,12 @@ const RAIL_ICONS: Record<ViewId, JSX.Element> = {
       <path d="M9 9h6M9 13h6M9 17h4" />
     </svg>
   ),
+  cost: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 20V10M11 20V4M18 20v-7" />
+      <path d="M3 20h18" />
+    </svg>
+  ),
 };
 
 export function AppShell({

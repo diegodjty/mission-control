@@ -7,6 +7,7 @@ import { Attention } from './Attention';
 import { Launcher, type QuickFixIssueRef } from './Launcher';
 import { PlanningView } from './PlanningView';
 import { ReceiptsView } from './ReceiptsView';
+import { CostView } from './CostView';
 import { AppShell } from './AppShell';
 import {
   GitInitDialog,
@@ -20,6 +21,7 @@ import {
   workbenchProjectPath,
   needsYouCount,
   type AttentionItem,
+  type JournalFile,
 } from '../../shared/attention-hub-model';
 import type { Backlog, IssueStatus } from '../../shared/backlog-model';
 import { resolveWorkerEffort, resolveWorkerModel } from '../../shared/worker-model';
@@ -546,6 +548,11 @@ export function App(): JSX.Element {
   // Project opens (so the feed survives closing Panes / the app / restarts)
   // and upserted as the Receipt edge ingests each Run's Receipt.
   const [runLog, setRunLog] = useState<RunLogRecord[]>([]);
+  // The active Project's raw drain-journal entries (issue 181's Cost tab): a
+  // one-shot read per Project switch, not a live watch — a drain grouping is
+  // frozen the moment its journal entry lands, so there's nothing to observe
+  // between visits.
+  const [journals, setJournals] = useState<JournalFile[]>([]);
   // Live mirror of `projectPath` so an async result that resolves after a
   // Project switch can tell it belongs to the previous Project and skip the
   // feed upsert.
@@ -2114,6 +2121,29 @@ export function App(): JSX.Element {
     };
   }, [projectPath]);
 
+  // Load the active Project's raw drain-journal entries for the Cost tab
+  // (issue 181) alongside the Run log above — a one-shot read per Project
+  // switch (no live watch; see the `journals` state comment). Inert (stays
+  // `[]`) for a legacy Project, same as the main-process reader.
+  useEffect(() => {
+    if (projectPath === null) {
+      setJournals([]);
+      return;
+    }
+    let cancelled = false;
+    void window.mc
+      .loadJournals({ projectPath })
+      .then((res) => {
+        if (!cancelled) setJournals(res.files);
+      })
+      .catch(() => {
+        // A transient read error just leaves the Cost tab showing its last load.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectPath]);
+
   // --- Receipt capture edge (issue 56, ADR-0013) ----------------------------
   // Point main's Receipt watch at the active Project: its checkout
   // `issues/completions/` plus each LIVE worktree's copy (a parallel Run's
@@ -3572,6 +3602,16 @@ export function App(): JSX.Element {
         {isSlotMounted('receipts', view, shellCtx) && (
           <div className="app__slot" style={{ display: 'flex' }}>
             <ReceiptsView records={runLog} />
+          </div>
+        )}
+
+        {/* The Cost tab (issue 181, ADR-0023): Run telemetry as charts,
+            in-app — the same read the `/cost` skill's interim artifact makes,
+            native. Remount-on-visit: it reads the already-loaded `runLog` and
+            a one-shot `journals` read, so there is no live watch to preserve. */}
+        {isSlotMounted('cost', view, shellCtx) && (
+          <div className="app__slot" style={{ display: 'flex' }}>
+            <CostView records={runLog} journals={journals} />
           </div>
         )}
     </AppShell>

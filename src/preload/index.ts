@@ -85,6 +85,8 @@ import {
   type ReceiptWatchRequest,
   type RunLogLoadRequest,
   type RunLogLoadResult,
+  type JournalLoadRequest,
+  type JournalLoadResult,
   type WindowOpenRequest,
   type WindowOpenResult,
   type PtyDataMessage,
@@ -166,6 +168,9 @@ const api: MissionControlApi = {
 
   loadRunLog: (req: RunLogLoadRequest): Promise<RunLogLoadResult> =>
     ipcRenderer.invoke(IpcChannel.RunLogLoad, req),
+
+  loadJournals: (req: JournalLoadRequest): Promise<JournalLoadResult> =>
+    ipcRenderer.invoke(IpcChannel.JournalLoad, req),
 
   watchReceipts: (req: ReceiptWatchRequest): void => {
     ipcRenderer.send(IpcChannel.ReceiptWatch, req);

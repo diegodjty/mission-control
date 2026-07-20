@@ -33,7 +33,7 @@ import { parseTimeoutSalvageRecords, type TimeoutSalvageRecord } from '../shared
 import { TIMEOUT_SALVAGE_FILE_NAME } from './timeout-salvage-store';
 
 /** Read a directory's `.md` files as `{ name, content }`, sorted by name. */
-async function readMarkdownFiles(dir: string): Promise<JournalFile[]> {
+export async function readMarkdownFiles(dir: string): Promise<JournalFile[]> {
   let names: string[];
   try {
     const entries = await readdir(dir, { withFileTypes: true });

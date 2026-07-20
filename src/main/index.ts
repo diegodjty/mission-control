@@ -69,6 +69,7 @@ import { verifyWorktree } from './worktree-verify';
 import { recordTimeoutSalvage, resolveTimeoutSalvage } from './timeout-salvage-store';
 import { slugFromFileName } from './git-worktree-adapter';
 import { acceptCoreProposal, dismissCoreProposal, readCoreMemory, writeDrainJournal } from './memory-files';
+import { readMarkdownFiles } from './attention-reader';
 import { extractRunUsage, timeOnlyUsage, type RunUsage } from '../shared/run-telemetry';
 import { applyRunUsage, PendingRunUsageStash, stickyIngestUsage } from './run-usage-pending';
 import type { TerminalResult } from '../shared/headless-feed';
@@ -177,6 +178,8 @@ import {
   type ReceiptWatchRequest,
   type RunLogLoadRequest,
   type RunLogLoadResult,
+  type JournalLoadRequest,
+  type JournalLoadResult,
   type PtyKillMessage,
   type PtyResizeMessage,
   type PtySpawnRequest,
@@ -1442,6 +1445,21 @@ function registerIpc(): void {
     async (event, req: RunLogLoadRequest): Promise<RunLogLoadResult> => {
       if (ownershipError(event, req.projectPath)) return { records: [] };
       return { records: await runLogStore.read(req.projectPath) };
+    },
+  );
+
+  // Read a workbench Project's raw drain-journal entries for the Cost tab
+  // (issue 181, ADR-0023): the only source of drain grouping (a drain's
+  // boundary and member Runs exist ONLY in this text — per-Run telemetry
+  // itself comes from the Run log). Inert for a legacy Project (no `memory/`
+  // dir exists there) or a non-owner, same shape as RunLogLoad above.
+  ipcMain.handle(
+    IpcChannel.JournalLoad,
+    async (event, req: JournalLoadRequest): Promise<JournalLoadResult> => {
+      if (ownershipError(event, req.projectPath)) return { files: [] };
+      const identity = identityFor(req.projectPath);
+      if (identity === null || identity.kind !== 'workbench') return { files: [] };
+      return { files: await readMarkdownFiles(join(identity.key, 'memory', 'journal')) };
     },
   );
 

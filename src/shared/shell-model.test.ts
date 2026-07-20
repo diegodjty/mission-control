@@ -37,13 +37,14 @@ describe('mountPolicy', () => {
 });
 
 describe('shellTabs', () => {
-  it('lists Home, Map, Pane, Attention, Receipts in order when no planning session exists', () => {
+  it('lists Home, Map, Pane, Attention, Receipts, Cost in order when no planning session exists', () => {
     expect(shellTabs(idle).map((t) => t.id)).toEqual([
       'launcher',
       'map',
       'pane',
       'inbox',
       'receipts',
+      'cost',
     ]);
   });
 
@@ -55,12 +56,13 @@ describe('shellTabs', () => {
     // The Atlas rail names it 'Attention' (issue 124); the ViewId stays `inbox`.
     expect(labels.get('inbox')).toBe('Attention');
     expect(labels.get('receipts')).toBe('Receipts');
+    expect(labels.get('cost')).toBe('Cost');
   });
 
   it('shows the Plan tab only while a planning session exists (issue 83)', () => {
     expect(shellTabs(idle).some((t) => t.id === 'planning')).toBe(false);
     const tabs = shellTabs(withPlanning).map((t) => t.id);
-    expect(tabs).toEqual(['launcher', 'map', 'pane', 'planning', 'inbox', 'receipts']);
+    expect(tabs).toEqual(['launcher', 'map', 'pane', 'planning', 'inbox', 'receipts', 'cost']);
   });
 
   it('badges the Pane tab with the live Run count, absent at zero', () => {
@@ -91,7 +93,7 @@ describe('shellTabs', () => {
 });
 
 describe('isSlotMounted', () => {
-  const allViews: ViewId[] = ['launcher', 'map', 'pane', 'inbox', 'planning', 'receipts'];
+  const allViews: ViewId[] = ['launcher', 'map', 'pane', 'inbox', 'planning', 'receipts', 'cost'];
 
   it('keeps the Map host mounted whatever view is active (live backlog watch)', () => {
     for (const view of allViews) {
@@ -140,6 +142,12 @@ describe('isSlotMounted', () => {
     expect(isSlotMounted('receipts', 'receipts', idle)).toBe(true);
     expect(isSlotMounted('receipts', 'map', idle)).toBe(false);
     expect(isSlotMounted('receipts', 'pane', withRun)).toBe(false);
+  });
+
+  it('mounts Cost only while visited (remount-on-visit — no live watch to preserve)', () => {
+    expect(isSlotMounted('cost', 'cost', idle)).toBe(true);
+    expect(isSlotMounted('cost', 'map', idle)).toBe(false);
+    expect(isSlotMounted('cost', 'pane', withRun)).toBe(false);
   });
 
   it('survives a full view round-trip with a live Run (the tracer invariant)', () => {
