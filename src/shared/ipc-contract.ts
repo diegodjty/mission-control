@@ -828,6 +828,14 @@ export interface AfkScanResult {
    * accompanied by badges.
    */
   previewNote: string | null;
+  /**
+   * The persistent self-hosting stale-build banner (issue 173): non-null only
+   * when this Project's repo IS the mission-control codebase AND MC's own
+   * running build's commit (captured once at startup) is behind that repo's
+   * current tip. Names how far behind and the exact rebuild command; never
+   * gates the drain — v1 is detect + warn only.
+   */
+  staleBuildNote: string | null;
 }
 
 export interface AfkDiscardRequest {

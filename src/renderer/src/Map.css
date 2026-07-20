@@ -358,6 +358,27 @@
   cursor: default;
 }
 
+/* ---- Self-hosting stale-build banner (issue 173): MC's own running build is
+   behind the repo it is draining. Persistent and prominent like the mid-merge
+   alert, but amber (a warning, not a blocker) since it never gates Runs/Drain. */
+.map__stale-build-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--amber-border);
+  border-radius: 12px;
+  background: var(--amber-bg);
+}
+
+.map__stale-build-text {
+  flex: 1 1 260px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--amber-soft);
+}
+
 /* ---- Merge outcome (issue 17): tone-coded headline + collapsible verbatim
    script output for a failed/conflicted Merge. */
 .map__mergeout {

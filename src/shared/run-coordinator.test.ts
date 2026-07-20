@@ -6,9 +6,11 @@ import {
   isBlockedPark,
   drainAvailability,
   waitingOnMergeIssues,
+  branchGuardDecision,
   type ActiveRun,
 } from './run-coordinator';
 import type { BacklogIssue, IssueStatus } from './backlog-model';
+import type { GitBranchStatusResult } from './ipc-contract';
 import type { RunStatus } from './run-state';
 
 /** Minimal issue factory — only the fields the coordinator/eligibility read. */
@@ -17,6 +19,7 @@ function mk(
   status: IssueStatus,
   dependsOn: number[] = [],
   hitl = false,
+  footprint: { touches?: string[]; body?: string } = {},
 ): BacklogIssue {
   return {
     id,
@@ -31,9 +34,11 @@ function mk(
     repoKey: null,
     model: null,
     effort: null,
+    runTimeoutMinutes: null,
+    touches: footprint.touches ?? [],
     inBatch: true,
     standalone: false,
-    body: '',
+    body: footprint.body ?? '',
   };
 }
 
@@ -930,5 +935,110 @@ describe('planDrain — the race path when eligibility vanished before the click
     expect(plan.drain.reason).toBe('no-eligible');
     expect(plan.drain.message).toMatch(/no eligible issue remains/i);
     expect(plan.startable).toEqual([]);
+  });
+});
+
+describe('planDrain — overlap-aware scheduling (issue 171)', () => {
+  const HOT = 'src/renderer/src/App.tsx';
+
+  it('serializes two issues whose declared `touches` collide, and fans out a disjoint one up to the cap', () => {
+    // 1 and 2 both declare the same hot file; 3 is genuinely disjoint.
+    const issues = [
+      mk(1, 'open', [], false, { touches: [HOT] }),
+      mk(2, 'open', [], false, { touches: [HOT] }),
+      mk(3, 'open', [], false, { touches: ['src/shared/unrelated.ts'] }),
+    ];
+    const plan = planDrain({ issues, maxConcurrent: 3, activeRuns: [], hotFiles: [] });
+
+    // Only one of the overlapping pair starts; the disjoint issue also starts.
+    expect(plan.startable).toEqual([1, 3]);
+    expect(plan.queued).toEqual([2]);
+    expect(plan.overlapNotices).toEqual([{ issueId: 2, blockingIssueId: 1, path: HOT }]);
+  });
+
+  it('a CONFIG `hot_files` entry serializes issues whose bodies mention it; issues that don\'t mention it still fan out', () => {
+    const issues = [
+      mk(1, 'open', [], false, { body: `Rewires a route in ${HOT}.` }),
+      mk(2, 'open', [], false, { body: `Also touches ${HOT} for the new tab.` }),
+      mk(3, 'open', [], false, { body: 'Touches only a backend module, unrelated.' }),
+    ];
+    const plan = planDrain({ issues, maxConcurrent: 3, activeRuns: [], hotFiles: [HOT] });
+
+    expect(plan.startable).toEqual([1, 3]);
+    expect(plan.queued).toEqual([2]);
+    expect(plan.overlapNotices).toEqual([{ issueId: 2, blockingIssueId: 1, path: HOT }]);
+  });
+
+  it('never co-schedules a new start with a Run already occupying a slot on the same footprint', () => {
+    const issues = [
+      mk(1, 'open', [], false, { touches: [HOT] }), // already running
+      mk(2, 'open', [], false, { touches: [HOT] }), // must wait for 1
+      mk(3, 'open', [], false, { touches: ['src/shared/unrelated.ts'] }),
+    ];
+    const activeRuns: ActiveRun[] = [{ issueId: 1, status: 'running' }];
+    const plan = planDrain({ issues, maxConcurrent: 3, activeRuns, hotFiles: [] });
+
+    expect(plan.startable).toEqual([3]);
+    expect(plan.queued).toEqual([2]);
+    expect(plan.overlapNotices).toEqual([{ issueId: 2, blockingIssueId: 1, path: HOT }]);
+  });
+
+  it('a leftover Run never forces overlap serialization on a fresh drain (issue 132 precedent)', () => {
+    // Issue 1 already has a (leftover) tracked Run, so it's off the eligible
+    // table regardless (same as any tracked Run); the point here is that its
+    // footprint does NOT get seeded into `committed` and so does not hold
+    // back issue 2, which starts freely.
+    const issues = [
+      mk(1, 'open', [], false, { touches: [HOT] }),
+      mk(2, 'open', [], false, { touches: [HOT] }),
+    ];
+    const activeRuns: ActiveRun[] = [leftover(1)];
+    const plan = planDrain({ issues, maxConcurrent: 2, activeRuns, hotFiles: [] });
+
+    expect(plan.startable).toEqual([2]);
+    expect(plan.overlapNotices).toEqual([]);
+  });
+
+  it('reports no overlap notices and fans out fully when every eligible issue is disjoint', () => {
+    const issues = [
+      mk(1, 'open', [], false, { touches: ['src/a.ts'] }),
+      mk(2, 'open', [], false, { touches: ['src/b.ts'] }),
+      mk(3, 'open', [], false, { touches: ['src/c.ts'] }),
+    ];
+    const plan = planDrain({ issues, maxConcurrent: 3, activeRuns: [], hotFiles: [] });
+    expect(plan.startable).toEqual([1, 2, 3]);
+    expect(plan.overlapNotices).toEqual([]);
+  });
+
+  it('defaults to no overlap serialization when `hotFiles` is omitted (legacy/test callers)', () => {
+    const issues = [
+      mk(1, 'open', [], false, { body: `mentions ${HOT} but no hot_files configured` }),
+      mk(2, 'open', [], false, { body: `also mentions ${HOT}` }),
+    ];
+    const plan = planDrain({ issues, maxConcurrent: 2, activeRuns: [] });
+    expect(plan.startable).toEqual([1, 2]);
+    expect(plan.overlapNotices).toEqual([]);
+  });
+});
+
+describe('branchGuardDecision — the pre-start guard never fails open while loading (issue 176)', () => {
+  function status(overrides: Partial<GitBranchStatusResult>): GitBranchStatusResult {
+    return { branch: 'feature-x', detached: false, protectedBranch: false, ...overrides };
+  }
+
+  it('is "pending" — never "proceed" — while branch status is still resolving (null)', () => {
+    expect(branchGuardDecision(null)).toBe('pending');
+  });
+
+  it('is "prompt" on a protected branch', () => {
+    expect(branchGuardDecision(status({ branch: 'main', protectedBranch: true }))).toBe('prompt');
+  });
+
+  it('is "prompt" on a detached HEAD', () => {
+    expect(branchGuardDecision(status({ branch: null, detached: true }))).toBe('prompt');
+  });
+
+  it('is "proceed" on a clean, non-protected branch', () => {
+    expect(branchGuardDecision(status({}))).toBe('proceed');
   });
 });

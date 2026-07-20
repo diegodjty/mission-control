@@ -5,6 +5,7 @@ import {
   parseIssueRunTimeoutMinutes,
   parseRunTimeoutMinutes,
   resolveRunTimeoutMinutes,
+  resolveRunTimeoutMinutesFrom,
   resolveRunTimeoutMs,
   runTimeoutMsFor,
 } from './run-timeout';
@@ -102,5 +103,31 @@ describe('resolveRunTimeoutMinutes (issue 170) — blunt-kill mitigation', () =>
   it('resolveRunTimeoutMs mirrors the minutes resolution in milliseconds', () => {
     expect(resolveRunTimeoutMs(null, null, 'high')).toBe(45 * 60_000);
     expect(resolveRunTimeoutMs(null, '---\nrun_timeout: 10\n---\n', 'max')).toBe(10 * 60_000);
+  });
+});
+
+describe('resolveRunTimeoutMinutesFrom (issue 170) — same resolution, from already-parsed values', () => {
+  it('an issue override wins outright, with no effort scaling applied on top', () => {
+    expect(resolveRunTimeoutMinutesFrom(30, 90, 'max')).toBe(90);
+    expect(resolveRunTimeoutMinutesFrom(30, 90, null)).toBe(90);
+  });
+
+  it('absent an override, low/medium/null effort applies no scaling to the base', () => {
+    expect(resolveRunTimeoutMinutesFrom(30, null, 'low')).toBe(30);
+    expect(resolveRunTimeoutMinutesFrom(30, null, 'medium')).toBe(30);
+    expect(resolveRunTimeoutMinutesFrom(30, null, null)).toBe(30);
+    expect(resolveRunTimeoutMinutesFrom(30, null, undefined)).toBe(30);
+  });
+
+  it('high/xhigh/max effort scales the base up, matching resolveRunTimeoutMinutes', () => {
+    expect(resolveRunTimeoutMinutesFrom(30, null, 'high')).toBe(45);
+    expect(resolveRunTimeoutMinutesFrom(30, null, 'xhigh')).toBe(60);
+    expect(resolveRunTimeoutMinutesFrom(30, null, 'max')).toBe(75);
+  });
+
+  it('agrees with resolveRunTimeoutMinutes given the equivalent raw content', () => {
+    expect(resolveRunTimeoutMinutesFrom(20, null, 'high')).toBe(
+      resolveRunTimeoutMinutes('---\nrun_timeout: 20\n---\n', null, 'high'),
+    );
   });
 });

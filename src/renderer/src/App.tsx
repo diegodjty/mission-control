@@ -22,6 +22,7 @@ import {
 } from '../../shared/attention-hub-model';
 import type { Backlog, IssueStatus } from '../../shared/backlog-model';
 import { resolveWorkerEffort, resolveWorkerModel } from '../../shared/worker-model';
+import { resolveRunTimeoutMinutesFrom } from '../../shared/run-timeout';
 import type {
   AttentionSnapshot,
   NavigateAttentionMessage,
@@ -83,11 +84,14 @@ import {
 import {
   planDrain,
   drainAvailability,
+  branchGuardDecision,
   type ActiveRun,
 } from '../../shared/run-coordinator';
+import { overlapSerializationNote } from '../../shared/file-overlap';
 import { takeoverKindFor, takeoverTarget } from '../../shared/run-takeover';
 import { isNotableDrainActivity } from '../../shared/workbench-memory';
-import { hasInFlightRun } from '../../shared/run-eligibility';
+import { eligibleForRun, hasInFlightRun } from '../../shared/run-eligibility';
+import { suggestBranchName, checkBranchName } from '../../shared/branch-name';
 import {
   repoForIssue,
   unknownRepoKeyNote,
@@ -1291,7 +1295,8 @@ export function App(): JSX.Element {
             // verdict flipping recalculating→clean on an otherwise-unchanged
             // tick must still refresh the badge, so it can't be kept as `prev`.
             branchPreviewsEqual(prev.previews ?? [], res.previews) &&
-            (prev.previewNote ?? null) === res.previewNote
+            (prev.previewNote ?? null) === res.previewNote &&
+            (prev.staleBuildNote ?? null) === res.staleBuildNote
               ? prev
               : {
                   projectPath,
@@ -1299,6 +1304,7 @@ export function App(): JSX.Element {
                   midMerge: res.midMerge,
                   previews: res.previews,
                   previewNote: res.previewNote,
+                  staleBuildNote: res.staleBuildNote,
                 },
           );
         })
@@ -1756,13 +1762,22 @@ export function App(): JSX.Element {
   const guardedStartRun = useCallback(
     (target: RunTarget): void => {
       const tracked = runs.some((r) => r.target.issueId === target.issueId);
-      if (tracked || branchStatus === null || (!branchStatus.protectedBranch && !branchStatus.detached)) {
+      if (tracked) {
         startRun(target);
         return;
       }
-      setBranchPromptMode('choose');
-      setBranchPromptError(null);
-      setBranchPrompt({ kind: 'run', target });
+      const decision = branchGuardDecision(branchStatus);
+      // 'pending' (status still resolving) must never fall through to an
+      // unguarded start (issue 176) — the Map disables the Run control for
+      // this same window, so a click landing here is a defensive no-op.
+      if (decision === 'pending') return;
+      if (decision === 'prompt') {
+        setBranchPromptMode('choose');
+        setBranchPromptError(null);
+        setBranchPrompt({ kind: 'run', target });
+        return;
+      }
+      startRun(target);
     },
     [runs, branchStatus, startRun],
   );
@@ -2034,7 +2049,7 @@ export function App(): JSX.Element {
           // Refresh the scan immediately so the discarded Run's row/Merge clears.
           void window.mc
             .scanAfkRuns({ projectPath })
-            .then((r) => setAfkScan({ projectPath, branches: r.branches, midMerge: r.midMerge, previews: r.previews, previewNote: r.previewNote }))
+            .then((r) => setAfkScan({ projectPath, branches: r.branches, midMerge: r.midMerge, previews: r.previews, previewNote: r.previewNote, staleBuildNote: r.staleBuildNote }))
             .catch(() => {
               // The 1.5s poll will pick it up regardless.
             });
@@ -2551,13 +2566,17 @@ export function App(): JSX.Element {
   // actually chose.
   const guardedStartDrain = useCallback(
     (chosenCap: number): void => {
-      if (branchStatus === null || (!branchStatus.protectedBranch && !branchStatus.detached)) {
-        startDrain(chosenCap);
+      const decision = branchGuardDecision(branchStatus);
+      // Same "never fail open while loading" rule as guardedStartRun (issue
+      // 176) — the Drain control is disabled for this same window.
+      if (decision === 'pending') return;
+      if (decision === 'prompt') {
+        setBranchPromptMode('choose');
+        setBranchPromptError(null);
+        setBranchPrompt({ kind: 'drain', cap: chosenCap });
         return;
       }
-      setBranchPromptMode('choose');
-      setBranchPromptError(null);
-      setBranchPrompt({ kind: 'drain', cap: chosenCap });
+      startDrain(chosenCap);
     },
     [branchStatus, startDrain],
   );
@@ -2673,7 +2692,24 @@ export function App(): JSX.Element {
       activeRuns,
       midMerge,
       finishedUnmergedIds,
+      // The overlap-scheduling god-file list (issue 171): any two eligible
+      // issues both predicted to touch one of these (or sharing a declared
+      // `touches:` footprint) serialize instead of co-scheduling into a
+      // guaranteed merge collision.
+      hotFiles: backlog.hotFiles,
     });
+
+    // Overlap-forced serialization is never silent (issue 171): note each
+    // deferred pairing once, keyed on the pair + path so a live re-plan that
+    // reports the same overlap round after round doesn't spam the history.
+    for (const notice of plan.overlapNotices) {
+      const [lo, hi] = [notice.issueId, notice.blockingIssueId].sort((a, b) => a - b);
+      logNote(
+        `overlap:${lo}-${hi}:${notice.path}`,
+        'relay',
+        overlapSerializationNote(notice.issueId, notice.blockingIssueId, notice.path),
+      );
+    }
 
     if (plan.drain.stop) {
       setDraining(false);
@@ -2734,6 +2770,11 @@ export function App(): JSX.Element {
           configDefault: backlog.workerModel,
           issueModel: issue.model,
         });
+        const effort = resolveWorkerEffort({
+          tier,
+          configDefault: backlog.workerEffort,
+          issueEffort: issue.effort,
+        });
         return newRun(
           {
             issueId: issue.id,
@@ -2757,16 +2798,23 @@ export function App(): JSX.Element {
             // DERIVED from the resolved tier (haiku→low, sonnet→medium,
             // opus/fable→high). A second cost lever beside the model, so a
             // mechanical issue doesn't burn deliberate reasoning tokens.
-            effort: resolveWorkerEffort({
-              tier,
-              configDefault: backlog.workerEffort,
-              issueEffort: issue.effort,
-            }),
-            // The `run_timeout` kill timeout (issue 141), from CONFIG
-            // (default 30 min): armed by the Headless Session Manager so a
-            // hung drain Run is killed rather than watched forever. Drain-only
-            // — a manual "▶ Run" leaves this unset.
-            runTimeoutMs: backlog.runTimeoutMinutes * 60_000,
+            effort,
+            // The `run_timeout` kill timeout, from CONFIG (default 30 min):
+            // armed by the Headless Session Manager so a hung drain Run is
+            // killed rather than watched forever. Drain-only — a manual "▶
+            // Run" leaves this unset. Blunt-kill mitigation (issue 170): the
+            // issue's own `run_timeout` override wins outright when set;
+            // otherwise the CONFIG default scales with this Run's resolved
+            // effort tier, so a `high`/`xhigh`/`max` Worker doing deliberately
+            // harder work (a big refactor) gets more runway before a kill is
+            // blunt rather than protective (the 2026-07-19 incident: issue 161
+            // finished correctly at ~30m and was killed before it could commit).
+            runTimeoutMs:
+              resolveRunTimeoutMinutesFrom(
+                backlog.runTimeoutMinutes,
+                issue.runTimeoutMinutes,
+                effort,
+              ) * 60_000,
           },
           // Stamp the Run with THIS drain's generation (issue 132) so a later
           // drain can tell it apart from a leftover Pane it should not count.
@@ -3103,7 +3151,7 @@ export function App(): JSX.Element {
         setMergeDisplay(null);
         void window.mc
           .scanAfkRuns({ projectPath })
-          .then((r) => setAfkScan({ projectPath, branches: r.branches, midMerge: r.midMerge, previews: r.previews, previewNote: r.previewNote }))
+          .then((r) => setAfkScan({ projectPath, branches: r.branches, midMerge: r.midMerge, previews: r.previews, previewNote: r.previewNote, staleBuildNote: r.staleBuildNote }))
           .catch(() => {
             // The 1.5s poll will pick up the cleared mid-merge state regardless.
           });
@@ -3558,6 +3606,7 @@ export function App(): JSX.Element {
             aborting={aborting}
             previews={activeScan.previews}
             previewNote={activeScan.previewNote}
+            staleBuildNote={activeScan.staleBuildNote}
             focusIssueId={inboxFocus?.issueId ?? null}
             focusSeq={inboxFocusSeq}
             plannedIssueIds={plannedIssueIds}
