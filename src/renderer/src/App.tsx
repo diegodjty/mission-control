@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Pane } from './Pane';
-import { RunFeed } from './RunFeed';
 import { Map } from './Map';
 import { ProjectSwitcher } from './ProjectSwitcher';
 import { CommandPalette } from './CommandPalette';
@@ -9,13 +8,11 @@ import { Launcher, type QuickFixIssueRef } from './Launcher';
 import { PlanningView } from './PlanningView';
 import { AppShell } from './AppShell';
 import {
-  Button,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogDescription,
-  DialogTitle,
-} from './components';
+  GitInitDialog,
+  BranchPromptDialog,
+  OpenChoiceDialog,
+  InterruptDialog,
+} from './AppDialogs';
 import { stageInvocation, type PlanningStage } from '../../shared/planning-model';
 import { quickFixRunTarget } from '../../shared/launcher-model';
 import {
@@ -145,194 +142,18 @@ import {
   mergeThrewDisplay,
   type MergeDisplay,
 } from '../../shared/merge-display';
-/** localStorage key for the persisted UI theme (Atlas design language). */
-const THEME_KEY = 'mc.theme';
-/** localStorage key for the persisted rail-collapsed preference (issue 124). */
-const RAIL_COLLAPSED_KEY = 'mc.railCollapsed';
-type Theme = 'dark' | 'light';
-
-/** Read the persisted theme; the navy dark stage is the default. */
-function loadTheme(): Theme {
-  try {
-    return window.localStorage.getItem(THEME_KEY) === 'light' ? 'light' : 'dark';
-  } catch {
-    return 'dark';
-  }
-}
-
-/**
- * Grace window before the Receipt audits conclude anything (issue 57,
- * ADR-0012's debounce discipline). A Worker's Receipt can land a beat after
- * its issue's `done` flip is observed (write → watch debounce → stability
- * reads), and a `done` flip can land a beat after its Receipt — so both the
- * finished-without-receipt note and the Receipt/state-mismatch note re-check
- * the live facts after this window and stay silent when reality caught up.
- */
-const RECEIPT_AUDIT_GRACE_MS = 5000;
-
-/**
- * Collapse a (possibly multi-line) fact into one quiet ambient-log line (issue
- * 48): the activity log renders `label` as a single row, so newlines become ` · `
- * separators the way the chat feed flattens its messages.
- */
-function oneLineNote(text: string): string {
-  return text.trim().replace(/\s*[\r\n]+\s*/g, ' · ');
-}
-
-/**
- * The prominent "big warning" (issue 113) shown as a `protected-branch-land`
- * proposal label and typed into the chat: landing a Run's work on a protected
- * branch (`main`/`master`) needs an explicit click because such a branch is
- * usually wired to production/deploy workflows.
- */
-function protectedLandWarning(branch: string): string {
-  return (
-    `⚠️ About to land Run work on the protected branch '${branch}'. ` +
-    `'${branch}' may be tied to production/deploy workflows — approve to proceed, ` +
-    `or reject to leave the finished work on its branch/worktree unmerged.`
-  );
-}
-
-
-/** The `NN-slug` for a Run, from its issue file name (`NN-slug.md`). */
-function slugOf(fileName: string): string {
-  return fileName.replace(/\.md$/, '');
-}
-
-/** The status-dot tone for a Run's derived status (issue 129 tile header): the
- * at-a-glance liveness colour on each tile, the same dot idiom the Map uses for
- * its issues (issue 127). Maps to the `.app__tile-dot--*` tokens in Pane.css. */
-function dotTone(status: RunStatus): 'amber' | 'green' | 'red' | 'teal' | 'neutral' {
-  switch (status) {
-    case 'running':
-      return 'amber';
-    case 'finished':
-      return 'green';
-    case 'blocked':
-      return 'red';
-    case 'parked':
-      return 'teal';
-    case 'stopped':
-    default:
-      return 'neutral';
-  }
-}
-
-/** The maximize / restore glyph for a tile's per-tile control (issue 129, the
- * approved `pane` mock). Inline SVG stroked in `currentColor` so it follows the
- * active Atlas theme; arrows point outward to maximize, inward to restore. */
-function MaximizeIcon({ maximized }: { maximized: boolean }): JSX.Element {
-  return maximized ? (
-    <svg
-      width="13"
-      height="13"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <polyline points="4 14 10 14 10 20" />
-      <polyline points="20 10 14 10 14 4" />
-      <line x1="14" y1="10" x2="21" y2="3" />
-      <line x1="10" y1="14" x2="3" y2="21" />
-    </svg>
-  ) : (
-    <svg
-      width="13"
-      height="13"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <polyline points="15 3 21 3 21 9" />
-      <polyline points="9 21 3 21 3 15" />
-      <line x1="21" y1="3" x2="14" y2="10" />
-      <line x1="3" y1="21" x2="10" y2="14" />
-    </svg>
-  );
-}
-
-/**
- * What the Planning view (issue 83) is planning: the chosen project's two
- * planning roots plus its label. Per-Project state — cleared on a switch.
- */
-interface PlanningTargetState {
-  workbenchDir: string;
-  repoPath: string;
-  label: string;
-}
-
-/**
- * An Inbox click-through's focus request (issue 80): the thing the clicked
- * item referenced, to be surfaced once its project is open — the issue is
- * selected in the Map; the file reference shows as a quiet dismissible line.
- */
-interface InboxFocus {
-  project: string;
-  issueId: number | null;
-  fileRef: string | null;
-}
-
-/**
- * One Run the UI is tracking: its target plus the observable facts
- * (`deriveRunStatus` in run-state turns these into running/finished/blocked/
- * stopped). `stopSignal` is bumped to kill its session on demand.
- */
-interface TrackedRun {
-  target: RunTarget;
-  sessionAlive: boolean;
-  stoppedByUser: boolean;
-  stopSignal: number;
-  /**
-   * The drain generation (`drainSeq`) that started this Run, or null for a
-   * manual "▶ Run" that no drain owns (issue 132). It's how the drain re-plan
-   * tells a Run it started this generation (counts against the cap) from a
-   * LEFTOVER Pane carried over from a PRIOR drain — a `claude` session lingering
-   * alive at its prompt from yesterday, which run-state still reads `running`.
-   * Such a phantom must not silently shrink a fresh drain's effective cap.
-   */
-  drainGeneration: number | null;
-  /**
-   * The MC-internal spawn session id, once its Feed/Pane reports it (issue 139).
-   * Null until spawned. Paired with `claudeSessionId` for a headless Run's
-   * future take-over (kill this process, `claude --resume <claudeSessionId>`).
-   */
-  sessionId?: string | null;
-  /**
-   * A headless drain Run's claude session id, captured from its stream-json
-   * (issue 139, AC3) and persisted here on the Run record for resume/take-over.
-   * Null for a manual (Pane) Run and until the headless Run's init event lands.
-   */
-  claudeSessionId?: string | null;
-  /**
-   * Why this Run's headless process ended with no declared outcome (issue
-   * 141): `timeout` (the Headless Session Manager killed it for exceeding
-   * `run_timeout`), `crashed` (it exited non-zero on its own), or null (a
-   * clean exit, a user stop, or an interactive Pane — none of which name a
-   * cause). Fed to the missing-Receipt audit so its note can name the cause.
-   */
-  endCause?: 'timeout' | 'crashed' | null;
-}
-
-function newRun(target: RunTarget, drainGeneration: number | null = null): TrackedRun {
-  return {
-    target,
-    sessionAlive: true,
-    stoppedByUser: false,
-    stopSignal: 0,
-    drainGeneration,
-    sessionId: null,
-    claudeSessionId: null,
-    endCause: null,
-  };
-}
+import {
+  loadTheme,
+  oneLineNote,
+  protectedLandWarning,
+  slugOf,
+  RECEIPT_AUDIT_GRACE_MS,
+  THEME_KEY,
+  RAIL_COLLAPSED_KEY,
+  type Theme,
+} from './app/appHelpers';
+import { newRun, type InboxFocus, type PlanningTargetState, type TrackedRun } from './app/appTypes';
+import { RunTile } from './RunTile';
 
 /**
  * The Project Window: a header with a Map/Pane switch. The Map (issue 02) is
@@ -3316,209 +3137,31 @@ export function App(): JSX.Element {
   // Renders one Run's tile — a compact Feed card (headless) or a terminal
   // Pane — shared by the Feed board and the Pane grid so take-over (issue 144)
   // is just a re-render of the same tile with a different body underneath the
-  // unchanged header/controls.
-  const renderRunTile = (r: TrackedRun): JSX.Element => {
-    const status = runStatusOf(r);
-    const id = r.target.issueId;
-    const slug = slugOf(r.target.issueFileName);
-    // Take-over affordance (issue 144): a live headless Run offers
-    // "Take over" (grab it mid-flight as a Pane); a finished one offers
-    // "Resume" (reopen the session post-mortem to interrogate it). Both
-    // need a captured claude session id — null until the init event
-    // lands — and only apply to a headless (Feed) Run.
-    const takeover = takeoverKindFor(status, r.target.headless, r.claudeSessionId);
-    // The header shows the issue slug WITHOUT its numeric prefix (the
-    // number is already the "Run NN" / issue-id cue); `slug` itself
-    // keeps the prefix because it names the afk/<slug> branch below.
-    const descriptor = slug.replace(/^\d+-/, '');
-    const isStranded = strandedIds.includes(id);
-    const isCommitFailed = commitFailedIds.includes(id);
-    const isFinishedUnmerged =
-      (status === 'finished' && isIsolated(r)) || finishedUnmergedIds.includes(id);
-    // Any isolated Run whose worktree/branch still holds work — finished-
-    // but-unmerged (committed), stranded, or commit-failed (uncommitted) —
-    // has work that dismissing would hide, so warn first (issue 22, corr).
-    // Previously only `finished` warned. Cross-checks the on-disk scan so a
-    // Run whose state landed off-screen still triggers it.
-    const worktreeWork = isFinishedUnmerged || isStranded || isCommitFailed;
-    // Stranded / commit-failed Runs can never merge as-is: offer to
-    // discard (force-remove the worktree + delete the branch) so the
-    // batch can proceed (issue 22).
-    const discardable = isStranded || isCommitFailed;
-    const commitError = worktreeCommitErrors[id] ?? null;
-    const requestDismiss = (): void => {
-      const message = isFinishedUnmerged
-        ? `Issue ${String(id).padStart(2, '0')} has finished work on branch afk/${slug} ` +
-          `that hasn't been merged into main yet.\n\nDismiss it anyway? The branch stays ` +
-          `on disk and you can still Merge it from the Map.`
-        : `Issue ${String(id).padStart(2, '0')} has unmerged work in its worktree on ` +
-          `branch afk/${slug}.\n\nDismiss it anyway? Dismissing only hides it here — the ` +
-          `worktree stays on disk. Use Discard to remove the worktree and branch.`;
-      if (worktreeWork && !window.confirm(message)) return;
-      dismissRun(id);
-    };
-    const requestDiscard = (): void => {
-      if (
-        window.confirm(
-          `Discard issue ${String(id).padStart(2, '0')}'s worktree and branch afk/${slug}?` +
-            `\n\nThis force-removes the worktree (uncommitted work is lost) and deletes ` +
-            `the branch. Use this to clear a blocked/stopped/commit-failed Run so the ` +
-            `batch can proceed.`,
-        )
-      ) {
-        discardRun(id, slug);
-      }
-    };
-    const isMax = maximizedRun?.target.issueId === r.target.issueId;
-    const hidden = maximizedRun !== null && !isMax;
-    return (
-      <div
-        key={r.target.issueId}
-        className={`app__tile${isMax ? ' app__tile--max' : ''}${
-          r.target.headless ? ' app__tile--feed' : ''
-        }`}
-        style={{ display: hidden ? 'none' : 'flex' }}
-      >
-        <div
-          className="app__tile-head"
-          onClick={() => toggleMaximize(r.target.issueId)}
-          title={r.target.issueTitle}
-        >
-          <span
-            className={`app__tile-dot app__tile-dot--${dotTone(status)}`}
-            title={status}
-            aria-label={`Run status: ${status}`}
-          />
-          <span className="app__tile-run">Run {id}</span>
-          <span className="app__tile-id">{id}</span>
-          <span className="app__tile-sep">·</span>
-          <span className="app__tile-slug">{descriptor}</span>
-          {isCommitFailed && (
-            <span
-              className="run-status run-status--commit-failed"
-              title={
-                commitError
-                  ? `Auto-commit failed: ${commitError}`
-                  : 'The Run finished but its work could not be committed to the afk/ branch'
-              }
-            >
-              commit failed
-            </span>
-          )}
-          {isStranded && (
-            <span
-              className="run-status run-status--stranded"
-              title="This Run ended without committing done; its worktree is stranded"
-            >
-              stranded
-            </span>
-          )}
-          <span className="app__tile-controls">
-            {status === 'running' ? (
-              <>
-                {takeover === 'live' && (
-                  <button
-                    className="run-takeover run-takeover--tile"
-                    title="Kill this headless Run and take over its session in an interactive Pane (same working directory)"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      takeOverRun(r.target.issueId);
-                    }}
-                  >
-                    Take over
-                  </button>
-                )}
-                <button
-                  className="run-stop run-stop--tile"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    stopRun(r.target.issueId);
-                  }}
-                >
-                  Stop
-                </button>
-              </>
-            ) : (
-              <>
-                {takeover === 'post-mortem' && (
-                  <button
-                    className="run-takeover run-takeover--tile"
-                    title="Reopen this finished Run's session in an interactive Pane to interrogate it (no new Run)"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      takeOverRun(r.target.issueId);
-                    }}
-                  >
-                    Resume
-                  </button>
-                )}
-                {discardable && (
-                  <button
-                    className="run-discard run-discard--tile"
-                    title="Discard this Run's worktree and afk/ branch (force remove)"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      requestDiscard();
-                    }}
-                  >
-                    Discard
-                  </button>
-                )}
-                <button
-                  className="app__tile-dismiss"
-                  title={
-                    worktreeWork
-                      ? 'Dismiss this Run (its worktree/branch still has unmerged work)'
-                      : 'Dismiss this finished Run'
-                  }
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    requestDismiss();
-                  }}
-                >
-                  ✕
-                </button>
-              </>
-            )}
-            <button
-              className="app__tile-max"
-              title={isMax ? 'Restore the grid' : 'Maximize this tile'}
-              aria-label={isMax ? 'Restore the grid' : 'Maximize this tile'}
-              aria-pressed={isMax}
-              onClick={(e) => {
-                e.stopPropagation();
-                toggleMaximize(r.target.issueId);
-              }}
-            >
-              <MaximizeIcon maximized={isMax} />
-            </button>
-          </span>
-        </div>
-        {r.target.headless ? (
-          // A drain Run is headless (issue 139): a read-only Feed strip
-          // (status + elapsed), not a terminal — there is no input to
-          // type into. The claude session id it captures is persisted
-          // on the Run for resume/take-over.
-          <RunFeed
-            run={r.target}
-            status={status}
-            stopSignal={r.stopSignal}
-            onSession={(sid) => handleRunSession(r.target.issueId, sid)}
-            onClaudeSession={(sid) => handleRunClaudeSession(r.target.issueId, sid)}
-            onStatusChange={r.target.issueId === focusedId ? setPaneStatus : undefined}
-            onExit={(_exitCode, cause) => handleRunExit(r.target.issueId, cause)}
-          />
-        ) : (
-          <Pane
-            run={r.target}
-            stopSignal={r.stopSignal}
-            onStatusChange={r.target.issueId === focusedId ? setPaneStatus : undefined}
-            onExit={() => handleRunExit(r.target.issueId)}
-          />
-        )}
-      </div>
-    );
-  };
+  // unchanged header/controls. Extracted to `./RunTile` (issue 172) so the
+  // render surface is a plain, prop-driven component.
+  const renderRunTile = (r: TrackedRun): JSX.Element => (
+    <RunTile
+      key={r.target.issueId}
+      run={r}
+      status={runStatusOf(r)}
+      focusedId={focusedId}
+      maximizedIssueId={maximizedRun?.target.issueId ?? null}
+      isIsolated={isIsolated(r)}
+      strandedIds={strandedIds}
+      commitFailedIds={commitFailedIds}
+      finishedUnmergedIds={finishedUnmergedIds}
+      worktreeCommitErrors={worktreeCommitErrors}
+      onToggleMaximize={toggleMaximize}
+      onTakeOver={takeOverRun}
+      onStop={stopRun}
+      onDismiss={dismissRun}
+      onDiscard={discardRun}
+      onSetPaneStatus={setPaneStatus}
+      onRunSession={handleRunSession}
+      onClaudeSession={handleRunClaudeSession}
+      onRunExit={handleRunExit}
+    />
+  );
 
   // --- Atlas shell: header open affordances + command palette (issue 124) ---
 
@@ -3691,413 +3334,80 @@ export function App(): JSX.Element {
     return () => window.removeEventListener('keydown', onKey);
   }, [applyShellEvent]);
 
-  // Open-here-or-new-Window choice (issue 121): this Window already has a
-  // Project open and the user picked a DIFFERENT one from the home grid
-  // (with nothing running — a live runner takes the stronger interrupt
-  // dialog below instead). Rather than silently switching this Window,
-  // offer the same choice the project bar's buttons give — so the user can
-  // open the other Project alongside this one without touching the top bar.
-  // Open here switches this Window; Open in new Window leaves it untouched;
-  // Cancel stays put. Issue 124 moves this onto the Dialog primitive too (the
-  // tracer replaced only the interrupt guard; the shell rebuild folds the last
-  // hand-rolled overlay in), so every modal in the app is now one Radix Dialog
-  // with the same overlay/focus-trap/Escape behavior.
-  // Drain cap>1 on a non-git workspace root (issue 158, ADR-0017): explains
-  // the limitation instead of silently proceeding, and offers a one-click fix.
-  // "Initialize git" runs the IPC then resumes the SAME drain immediately
-  // (proceedDrain bypasses the gate — it's what just got fixed); "Drain
-  // serially" resumes unchanged, relying on issue 157's engine-side clamp;
-  // closing (Escape/backdrop/Cancel) starts nothing.
+  // The four modal dialogs (issue 172: extracted to `./AppDialogs` so this
+  // render surface is plain, prop-driven components) — Radix Dialog primitives
+  // for the "Initialize git" gate (issue 158), the branch-awareness prompt
+  // (issue 167), the open-here-or-new-Window choice (issue 121), and the
+  // live-runner interrupt guard (issue 114).
   const gitInitDialog = (
-    <Dialog
-      open={gitInitPrompt !== null}
-      onOpenChange={(open) => {
-        if (!open) {
-          setGitInitPrompt(null);
-          setGitInitError(null);
-        }
+    <GitInitDialog
+      projectLabel={activeProject?.label ?? null}
+      projectKey={activeProject?.key ?? null}
+      prompt={gitInitPrompt}
+      busy={gitInitBusy}
+      error={gitInitError}
+      onClose={() => {
+        setGitInitPrompt(null);
+        setGitInitError(null);
       }}
-    >
-      {gitInitPrompt !== null && (
-        <DialogContent>
-          <DialogTitle>Not under git yet</DialogTitle>
-          <DialogDescription>
-            <strong>{activeProject?.label ?? 'This project'}</strong>'s workspace root isn't a git
-            repository, so Mission Control can't cut worktrees here — a concurrent drain would
-            collide on the same tree. Initialize git now to enable up to {gitInitPrompt.cap} at
-            once, or drain one at a time instead.
-          </DialogDescription>
-          {gitInitError && <p className="app__gitinit-error">{gitInitError}</p>}
-          <DialogActions>
-            <Button
-              variant="primary"
-              disabled={gitInitBusy}
-              onClick={() => {
-                if (!activeProject) return;
-                const chosenCap = gitInitPrompt.cap;
-                setGitInitBusy(true);
-                setGitInitError(null);
-                void window.mc
-                  .gitInit({ projectKey: activeProject.key })
-                  .then((res) => {
-                    setGitInitBusy(false);
-                    if (!res.ok) {
-                      setGitInitError(res.error ?? 'Could not initialize git.');
-                      return;
-                    }
-                    setGitInitPrompt(null);
-                    proceedDrain(chosenCap);
-                  })
-                  .catch((err) => {
-                    setGitInitBusy(false);
-                    setGitInitError(err instanceof Error ? err.message : String(err));
-                  });
-              }}
-            >
-              {gitInitBusy ? 'Initializing…' : 'Initialize git'}
-            </Button>
-            <Button
-              variant="secondary"
-              disabled={gitInitBusy}
-              onClick={() => {
-                const chosenCap = gitInitPrompt.cap;
-                setGitInitPrompt(null);
-                proceedDrain(chosenCap);
-              }}
-              title="Proceed without initializing git — Runs serialize on this workspace root"
-            >
-              Drain serially
-            </Button>
-            <Button
-              variant="ghost"
-              className="ui-btn--end"
-              disabled={gitInitBusy}
-              onClick={() => setGitInitPrompt(null)}
-            >
-              Cancel
-            </Button>
-          </DialogActions>
-        </DialogContent>
-      )}
-    </Dialog>
+      onBusyChange={setGitInitBusy}
+      onErrorChange={setGitInitError}
+      onProceed={proceedDrain}
+    />
   );
 
-  // Pre-start branch-awareness prompt (issue 167): caught by `guardedStartRun`
-  // / `guardedStartDrain` when the checkout is on a protected branch
-  // (`main`/`master`) or a detached HEAD — BEFORE any Run/drain work starts,
-  // so the branch choice is still free (unlike issue 113's merge-time-only
-  // warning). Create/Switch perform the git op then resume the held action;
-  // Proceed anyway resumes unchanged, landing on the current branch.
-  const submitCreateBranch = (): void => {
-    if (projectPath === null) return;
-    const name = branchPromptName.trim();
-    if (name === '') return;
-    setBranchPromptBusy(true);
-    setBranchPromptError(null);
-    void window.mc
-      .createGitBranch({ projectPath, name })
-      .then((res) => {
-        setBranchPromptBusy(false);
-        if (!res.ok) {
-          setBranchPromptError(res.error ?? 'Could not create the branch.');
-          return;
-        }
-        setBranchStatus({ branch: res.branch, detached: false, protectedBranch: false });
-        resumeBranchPrompt();
-      })
-      .catch((err) => {
-        setBranchPromptBusy(false);
-        setBranchPromptError(err instanceof Error ? err.message : String(err));
-      });
-  };
-
-  const submitSwitchBranch = (): void => {
-    if (projectPath === null) return;
-    const name = branchPromptSelected;
-    if (name === '') return;
-    setBranchPromptBusy(true);
-    setBranchPromptError(null);
-    void window.mc
-      .switchGitBranch({ projectPath, name })
-      .then((res) => {
-        setBranchPromptBusy(false);
-        if (!res.ok) {
-          setBranchPromptError(res.error ?? 'Could not switch branches.');
-          return;
-        }
-        setBranchStatus({
-          branch: res.branch,
-          detached: false,
-          protectedBranch: res.branch !== null && isProtectedBranch(res.branch),
-        });
-        resumeBranchPrompt();
-      })
-      .catch((err) => {
-        setBranchPromptBusy(false);
-        setBranchPromptError(err instanceof Error ? err.message : String(err));
-      });
-  };
-
   const branchPromptDialog = (
-    <Dialog
-      open={branchPrompt !== null}
-      onOpenChange={(open) => {
-        if (!open) {
-          setBranchPrompt(null);
-          setBranchPromptMode('choose');
-          setBranchPromptError(null);
-        }
+    <BranchPromptDialog
+      projectLabel={activeProject?.label ?? null}
+      projectPath={projectPath}
+      branchStatus={branchStatus}
+      prompt={branchPrompt}
+      mode={branchPromptMode}
+      name={branchPromptName}
+      branches={branchPromptBranches}
+      selected={branchPromptSelected}
+      busy={branchPromptBusy}
+      error={branchPromptError}
+      onClose={() => {
+        setBranchPrompt(null);
+        setBranchPromptMode('choose');
+        setBranchPromptError(null);
       }}
-    >
-      {branchPrompt !== null && (
-        <DialogContent>
-          <DialogTitle>
-            {branchStatus?.detached
-              ? 'Detached HEAD'
-              : `On a protected branch (${branchStatus?.branch ?? ''})`}
-          </DialogTitle>
-          <DialogDescription>
-            {branchStatus?.detached ? (
-              <>
-                <strong>{activeProject?.label ?? 'This project'}</strong>'s checkout isn't on any
-                branch right now — a {branchPrompt.kind === 'drain' ? 'drain' : 'Run'} would land
-                its work with nowhere to come back to. Create a branch, switch to one, or proceed
-                anyway (work lands on a detached commit).
-              </>
-            ) : (
-              <>
-                <strong>{activeProject?.label ?? 'This project'}</strong> is checked out on{' '}
-                <strong>{branchStatus?.branch}</strong> — a protected branch. A{' '}
-                {branchPrompt.kind === 'drain' ? 'drain' : 'Run'} would land its work directly
-                there. Create a new branch, switch to an existing one, or proceed anyway.
-              </>
-            )}
-          </DialogDescription>
-          {branchPromptError && <p className="app__gitinit-error">{branchPromptError}</p>}
-          {branchPromptMode === 'choose' && (
-            <DialogActions>
-              <Button
-                variant="primary"
-                onClick={() => {
-                  setBranchPromptName('');
-                  setBranchPromptError(null);
-                  setBranchPromptMode('create');
-                }}
-              >
-                Create a new branch
-              </Button>
-              <Button
-                variant="secondary"
-                onClick={() => {
-                  setBranchPromptError(null);
-                  setBranchPromptSelected('');
-                  setBranchPromptMode('switch');
-                  if (projectPath !== null) {
-                    void window.mc
-                      .listGitBranches({ projectPath })
-                      .then((res) => setBranchPromptBranches(res.branches));
-                  }
-                }}
-              >
-                Switch to an existing branch
-              </Button>
-              <Button
-                variant="ghost"
-                className="ui-btn--end"
-                onClick={resumeBranchPrompt}
-                title="Start anyway, landing work on the current branch"
-              >
-                Proceed anyway
-              </Button>
-            </DialogActions>
-          )}
-          {branchPromptMode === 'create' && (
-            <>
-              <label className="launcher__label">
-                New branch name
-                <input
-                  className="launcher__input"
-                  type="text"
-                  autoFocus
-                  value={branchPromptName}
-                  onChange={(e) => setBranchPromptName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') submitCreateBranch();
-                  }}
-                />
-              </label>
-              <DialogActions>
-                <Button
-                  variant="primary"
-                  disabled={branchPromptBusy || branchPromptName.trim() === ''}
-                  onClick={submitCreateBranch}
-                >
-                  {branchPromptBusy ? 'Creating…' : 'Create + check out'}
-                </Button>
-                <Button
-                  variant="ghost"
-                  disabled={branchPromptBusy}
-                  onClick={() => setBranchPromptMode('choose')}
-                >
-                  Back
-                </Button>
-              </DialogActions>
-            </>
-          )}
-          {branchPromptMode === 'switch' && (
-            <>
-              <label className="launcher__label">
-                Branch
-                <select
-                  className="launcher__select"
-                  value={branchPromptSelected}
-                  onChange={(e) => setBranchPromptSelected(e.target.value)}
-                >
-                  <option value="" disabled>
-                    Pick a branch…
-                  </option>
-                  {branchPromptBranches.map((b) => (
-                    <option key={b} value={b}>
-                      {b}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <DialogActions>
-                <Button
-                  variant="primary"
-                  disabled={branchPromptBusy || branchPromptSelected === ''}
-                  onClick={submitSwitchBranch}
-                >
-                  {branchPromptBusy ? 'Switching…' : 'Switch + check out'}
-                </Button>
-                <Button
-                  variant="ghost"
-                  disabled={branchPromptBusy}
-                  onClick={() => setBranchPromptMode('choose')}
-                >
-                  Back
-                </Button>
-              </DialogActions>
-            </>
-          )}
-        </DialogContent>
-      )}
-    </Dialog>
+      onModeChange={setBranchPromptMode}
+      onNameChange={setBranchPromptName}
+      onBranchesChange={setBranchPromptBranches}
+      onSelectedChange={setBranchPromptSelected}
+      onBusyChange={setBranchPromptBusy}
+      onErrorChange={setBranchPromptError}
+      onBranchCreated={(branch) => setBranchStatus({ branch, detached: false, protectedBranch: false })}
+      onBranchSwitched={(branch) =>
+        setBranchStatus({
+          branch,
+          detached: false,
+          protectedBranch: branch !== null && isProtectedBranch(branch),
+        })
+      }
+      onResume={resumeBranchPrompt}
+    />
   );
 
   const openChoiceDialog = (
-    <Dialog
-      open={pendingOpenChoice !== null}
-      onOpenChange={(open) => {
-        if (!open) setPendingOpenChoice(null);
-      }}
-    >
-      {pendingOpenChoice !== null && (
-        <DialogContent>
-          <DialogTitle>Open {pendingOpenChoice.label}</DialogTitle>
-          <DialogDescription>
-            <strong>
-              {projects.find((p) => p.key === activeProjectKey)?.label ?? 'This project'}
-            </strong>{' '}
-            is open in this window. Open <strong>{pendingOpenChoice.label}</strong> here instead,
-            or in a new window so you can work on both at once?
-          </DialogDescription>
-          <DialogActions>
-            <Button
-              variant="primary"
-              onClick={() => {
-                void openProjectHere(pendingOpenChoice.path);
-                setPendingOpenChoice(null);
-              }}
-              title="Switch this window to the picked project"
-            >
-              Open here
-            </Button>
-            <Button
-              variant="secondary"
-              onClick={() => {
-                void window.mc.openWindow({ path: pendingOpenChoice.path });
-                setPendingOpenChoice(null);
-              }}
-              title="Open the picked project in a new window; this window stays put"
-            >
-              Open in new window
-            </Button>
-            <Button
-              variant="ghost"
-              className="ui-btn--end"
-              onClick={() => setPendingOpenChoice(null)}
-            >
-              Cancel
-            </Button>
-          </DialogActions>
-        </DialogContent>
-      )}
-    </Dialog>
+    <OpenChoiceDialog
+      activeProjectLabel={projects.find((p) => p.key === activeProjectKey)?.label ?? null}
+      pending={pendingOpenChoice}
+      onClose={() => setPendingOpenChoice(null)}
+      onOpenHere={(path) => void openProjectHere(path)}
+      onOpenNewWindow={(path) => void window.mc.openWindow({ path })}
+    />
   );
 
-  // Interrupt confirmation (issue 114): a runner is fixing an issue in the
-  // Project this Window has open, and the user picked a different one in the
-  // switcher or the Launcher's Continue list. Rather than silently killing
-  // the live Run, offer to open the other Project in a NEW Window — which
-  // leaves this one (and its runner) untouched. "Switch here anyway" performs
-  // the interrupting change; Cancel stays put (the controlled
-  // switcher/Launcher snap back on their own). The redesign's tracer (issue
-  // 123): the first modal on the Dialog primitive — Radix supplies the
-  // portal, overlay, focus trap, and Escape/outside-click dismissal (both
-  // land on Cancel); the Atlas tokens supply every visual.
   const interruptDialog = (
-    <Dialog
-      open={pendingProjectChange !== null}
-      onOpenChange={(open) => {
-        if (!open) setPendingProjectChange(null);
-      }}
-    >
-      {pendingProjectChange !== null && (
-        <DialogContent>
-          <DialogTitle>A runner is working here</DialogTitle>
-          <DialogDescription>
-            <strong>
-              {projects.find((p) => p.key === activeProjectKey)?.label ?? 'This project'}
-            </strong>{' '}
-            has a runner fixing an issue. Opening{' '}
-            <strong>{pendingProjectChange.label}</strong> in this window would interrupt it. Open{' '}
-            <strong>{pendingProjectChange.label}</strong> in a new window instead so the running
-            work keeps going?
-          </DialogDescription>
-          <DialogActions>
-            <Button
-              variant="primary"
-              onClick={() => {
-                void window.mc.openWindow({ path: pendingProjectChange.path });
-                setPendingProjectChange(null);
-              }}
-              title="Open the other project in a new window; this window's runner keeps going"
-            >
-              Open in new window
-            </Button>
-            <Button
-              variant="danger"
-              onClick={() => {
-                pendingProjectChange.proceed();
-                setPendingProjectChange(null);
-              }}
-              title="Switch this window now — the running work here is interrupted"
-            >
-              Switch here anyway
-            </Button>
-            <Button
-              variant="ghost"
-              className="ui-btn--end"
-              onClick={() => setPendingProjectChange(null)}
-            >
-              Cancel
-            </Button>
-          </DialogActions>
-        </DialogContent>
-      )}
-    </Dialog>
+    <InterruptDialog
+      activeProjectLabel={projects.find((p) => p.key === activeProjectKey)?.label ?? null}
+      pending={pendingProjectChange}
+      onClose={() => setPendingProjectChange(null)}
+      onOpenNewWindow={(path) => void window.mc.openWindow({ path })}
+    />
   );
 
   return (
