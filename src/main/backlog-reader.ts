@@ -30,6 +30,16 @@ export async function readBacklogAt(issuesDir: string): Promise<Backlog> {
       }),
   );
 
+  // Workbench projects (ADR-0015) keep CONFIG.md at the PROJECT ROOT — one level
+  // above issues/ — while legacy in-repo layouts keep it inside issues/. If it
+  // wasn't found in issuesDir, fall back to the parent so a workbench CONFIG's
+  // run_timeout / worker_model / worker_effort / hot_files / active-PRD are
+  // actually honored (they silently defaulted for every workbench project until
+  // this fallback existed).
+  if (configContent === null) {
+    configContent = await readFile(join(issuesDir, '..', 'CONFIG.md'), 'utf8').catch(() => null);
+  }
+
   return buildBacklog(files, configContent);
 }
 

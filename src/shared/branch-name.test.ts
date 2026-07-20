@@ -18,6 +18,7 @@ function mk(id: number, slug: string, parent: string | null = null): BacklogIssu
     model: null,
     effort: null,
     runTimeoutMinutes: null,
+    touches: [],
     inBatch: parent !== null,
     standalone: parent === null,
     body: '',
