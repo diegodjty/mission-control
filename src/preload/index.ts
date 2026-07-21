@@ -21,6 +21,8 @@ import {
   type DrainJournalResult,
   type ScheduledDrainSkippedRequest,
   type ScheduledDrainSkippedResult,
+  type ScheduledDrainPowerRequest,
+  type ScheduledDrainPowerResult,
   type IsolationApplyRequest,
   type IsolationApplyResult,
   type LauncherListResult,
@@ -197,6 +199,11 @@ const api: MissionControlApi = {
     req: ScheduledDrainSkippedRequest,
   ): Promise<ScheduledDrainSkippedResult> =>
     ipcRenderer.invoke(IpcChannel.ScheduledDrainSkipped, req),
+
+  setScheduledDrainActive: (
+    req: ScheduledDrainPowerRequest,
+  ): Promise<ScheduledDrainPowerResult> =>
+    ipcRenderer.invoke(IpcChannel.ScheduledDrainPower, req),
 
   listAttention: (): Promise<AttentionSnapshot> =>
     ipcRenderer.invoke(IpcChannel.AttentionList),

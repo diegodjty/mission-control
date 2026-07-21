@@ -2194,8 +2194,41 @@ export function App(): JSX.Element {
   // un-persisted (ADR-0024): the pending schedule lives only in this hook's
   // `useState`, so quitting MC or closing this Project's Window drops it with
   // nothing left behind.
-  const scheduledDrain = useScheduledDrain(drain.scheduledFire);
+  // Keep the Mac awake for a scheduled drain (issue 193, ADR-0024). The drain
+  // loop is a renderer effect (ADR-0022), so idle system-sleep / macOS App Nap
+  // could freeze an overnight scheduled drain with nobody watching. While a
+  // scheduled drain is pending OR the drain it fired is still running, the main
+  // process arms a `powerSaveBlocker('prevent-app-suspension')` (the screen may
+  // still sleep); it is released the instant the drain ends — success, skip, or
+  // user-stop. Only a SCHEDULED run holds it: a manual daytime Drain (someone's
+  // watching) never arms it, so `scheduledRunActive` tracks the scheduled fire's
+  // own run, distinct from `drain.draining` which is true for any drain.
+  const [scheduledRunActive, setScheduledRunActive] = useState(false);
+  const scheduledDrain = useScheduledDrain((cap, selectedIds) => {
+    // Hold the blocker across the pending→running handoff. If a gate SKIPS (no
+    // drain starts), the effect below releases it on the next render, since
+    // `drain.draining` stays false.
+    setScheduledRunActive(true);
+    drain.scheduledFire(cap, selectedIds);
+  });
   scheduledDrainResetRef.current = scheduledDrain.reset;
+
+  // A scheduled fire's run is "active" until its drain leaves the running state
+  // (completed / user-stopped) or never entered it (skipped). Clearing off the
+  // authoritative `drain.draining` flag covers all three terminal outcomes with
+  // one rule, so the blocker never lingers past a drain's end.
+  useEffect(() => {
+    if (scheduledRunActive && !drain.draining) setScheduledRunActive(false);
+  }, [scheduledRunActive, drain.draining]);
+
+  // Report the "pending or running" flag to the main process, which owns the
+  // actual `powerSaveBlocker` (a main-only API). Idempotent on the main side, so
+  // the pending→running edge (where `schedule` flips to idle but the run stays
+  // active) never causes a release/re-arm gap.
+  const scheduledDrainPowerActive = scheduledDrain.schedule.kind === 'pending' || scheduledRunActive;
+  useEffect(() => {
+    void window.mc.setScheduledDrainActive({ active: scheduledDrainPowerActive }).catch(() => {});
+  }, [scheduledDrainPowerActive]);
 
   // Resume whichever Run/drain the branch prompt is holding, bypassing the
   // guard (it just got resolved) — fired by Create/Switch (after the git op
