@@ -150,25 +150,166 @@
   opacity: 0.6;
 }
 
-/* Scheduled drain (issue 190): a low-key affordance next to Drain, not a CTA
-   — it only arms a future press of the real button. */
-.map__schedule {
+/* Scheduled drain (issue 190 → restructured issue 195): a clock button that
+   opens a self-contained popover, so scheduling no longer competes for room in
+   the run toolbar. Once armed, the popover is replaced by the pending pill. */
+
+/* Pending pill — a scheduled drain is armed and waiting to fire. */
+.map__schedule.map__schedule--pending {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  padding: 6px 10px;
   font-size: 12px;
-  color: var(--fg-mute);
+  color: var(--fg);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
   white-space: nowrap;
 }
 
+.map__schedule-scope-note {
+  color: var(--fg-mute);
+}
+
+/* The clock trigger — an outlined pill matching the "Start something" toggle. */
+.map__schedule-popover {
+  position: relative;
+  display: inline-block;
+}
+
+.map__schedule-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--surface-2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+  white-space: nowrap;
+  transition: border-color 140ms var(--ease-out), background 140ms var(--ease-out);
+}
+
+/* Strip the native disclosure triangle (both engines). */
+.map__schedule-trigger::-webkit-details-marker,
+.map__schedule-trigger::marker {
+  display: none;
+  content: '';
+}
+
+.map__schedule-trigger:hover {
+  border-color: var(--fg-mute);
+}
+
+.map__schedule-popover[open] .map__schedule-trigger {
+  border-color: var(--fg-mute);
+  background: var(--bg1);
+}
+
+/* The dropdown panel — overlays rather than reflowing the toolbar. */
+.map__schedule-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 30;
+  width: 288px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  text-align: left;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28);
+}
+
+.map__schedule-panel-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.map__schedule-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.map__schedule-field-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+}
+
 .map__schedule-time {
+  align-self: flex-start;
   background: var(--bg1);
   color: var(--fg);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 5px 8px;
+  padding: 6px 8px;
   font-size: 13px;
   font-variant-numeric: tabular-nums;
+}
+
+/* Scope checklist — properly styled (was raw browser bullets before 195). */
+.map__schedule-scope-list {
+  list-style: none;
+  margin: 0;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 168px;
+  overflow-y: auto;
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.map__schedule-scope-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px;
+  font-size: 13px;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.map__schedule-scope-item:hover {
+  background: var(--surface-2);
+}
+
+/* Arm-time branch warning (issue 195) — amber, matching the branch badge. */
+.map__schedule-warn {
+  margin: 0;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--amber-soft);
+  background: var(--amber-bg);
+  border: 1px solid var(--amber-border);
+  border-radius: 8px;
+}
+
+.map__schedule-warn strong {
+  color: var(--amber-soft);
+}
+
+.map__schedule-actions {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .map__schedule-arm,
@@ -177,18 +318,20 @@
   color: var(--fg);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 6px 10px;
+  padding: 6px 12px;
   font-size: 12px;
+  font-weight: 600;
   cursor: pointer;
+}
+
+.map__schedule-arm:hover:not(:disabled),
+.map__schedule-cancel:hover {
+  border-color: var(--fg-mute);
 }
 
 .map__schedule-arm:disabled {
   opacity: 0.45;
   cursor: default;
-}
-
-.map__schedule--pending {
-  color: var(--fg);
 }
 
 /* Drain + Merge — the highest-consequence actions: filled accents (dark/white

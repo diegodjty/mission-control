@@ -126,7 +126,11 @@ import {
 } from './app/appHelpers';
 import { newRun, type InboxFocus, type TrackedRun } from './app/appTypes';
 import { useMergeLane, type ProtectedMergeLandTarget } from './app/useMergeLane';
-import { useDrain, type DrainBranchPromptTarget } from './app/useDrain';
+import {
+  useDrain,
+  type DrainBranchPromptTarget,
+  type ScheduleBranchPromptTarget,
+} from './app/useDrain';
 import { useScheduledDrain } from './app/useScheduledDrain';
 import { useLauncher } from './app/useLauncher';
 import { RunTile } from './RunTile';
@@ -243,7 +247,10 @@ export function App(): JSX.Element {
   // 167): null when nothing is held. `create`/`switch` sub-modes reuse the
   // same dialog; resolving either (or Proceed anyway) resumes the held action.
   const [branchPrompt, setBranchPrompt] = useState<
-    { kind: 'run'; target: RunTarget } | DrainBranchPromptTarget | null
+    | { kind: 'run'; target: RunTarget }
+    | DrainBranchPromptTarget
+    | ScheduleBranchPromptTarget
+    | null
   >(null);
   const [branchPromptMode, setBranchPromptMode] = useState<'choose' | 'create' | 'switch'>(
     'choose',
@@ -2213,6 +2220,29 @@ export function App(): JSX.Element {
   });
   scheduledDrainResetRef.current = scheduledDrain.reset;
 
+  // Branch-aware ARM (issue 195): pressing "Schedule drain" on a protected
+  // branch or detached HEAD gets the SAME Create/Switch/Proceed dialog a manual
+  // Drain shows — surfaced now, while you can still act, instead of only
+  // silently skipping at fire time (`scheduledDrainSkipReason`, the backstop).
+  // `branchGuardDecision('pending')` (branch status still loading) arms anyway:
+  // the fire-time guard re-checks the branch you're actually on when it fires.
+  const guardedScheduleDrain = useCallback(
+    (fireAt: number, cap: number, selectedIds?: readonly number[]): void => {
+      if (branchGuardDecision(branchStatus) === 'prompt') {
+        setBranchPromptMode('choose');
+        setBranchPromptError(null);
+        setBranchPrompt(
+          selectedIds === undefined
+            ? { kind: 'schedule', fireAt, cap }
+            : { kind: 'schedule', fireAt, cap, selectedIds },
+        );
+        return;
+      }
+      scheduledDrain.scheduleDrainAt(fireAt, cap, selectedIds);
+    },
+    [branchStatus, scheduledDrain],
+  );
+
   // A scheduled fire's run is "active" until its drain leaves the running state
   // (completed / user-stopped) or never entered it (skipped). Clearing off the
   // authoritative `drain.draining` flag covers all three terminal outcomes with
@@ -2238,8 +2268,12 @@ export function App(): JSX.Element {
     const pending = branchPrompt;
     setBranchPrompt(null);
     if (pending.kind === 'run') startRun(pending.target);
+    // A 'schedule' prompt resolves to ARMING the schedule (issue 195), not
+    // starting a drain now — the branch is settled, the timer takes it from here.
+    else if (pending.kind === 'schedule')
+      scheduledDrain.scheduleDrainAt(pending.fireAt, pending.cap, pending.selectedIds);
     else drain.startDrain(pending.cap, pending.selectedIds);
-  }, [branchPrompt, startRun, drain]);
+  }, [branchPrompt, startRun, drain, scheduledDrain]);
 
   // --- Merge / auto-merge-lane seam (issue 185) ----------------------------
   // Extracted to `./app/useMergeLane`. `runMergeCore` also needs to drop the
@@ -2764,7 +2798,7 @@ export function App(): JSX.Element {
             cap={drain.cap}
             onCapChange={drain.setCap}
             schedule={scheduledDrain.schedule}
-            onScheduleDrain={scheduledDrain.scheduleDrainAt}
+            onScheduleDrain={guardedScheduleDrain}
             onCancelScheduledDrain={scheduledDrain.cancelScheduledDrain}
             notUnderGit={notUnderGit}
             branchStatus={branchStatus}

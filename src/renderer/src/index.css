@@ -887,6 +887,13 @@ body {
   background: var(--amber-bg);
 }
 
+/* Ready HITL (issue 195) — a walkthrough eligible for the human but never
+   drained — reads as ready (teal), the same tone the Map's status dot uses. */
+.attention__item--hitl-ready {
+  border-color: var(--teal-border);
+  background: var(--teal-bg);
+}
+
 .attention__project {
   color: var(--teal);
   font-size: 12px;
@@ -922,6 +929,12 @@ body {
   color: var(--amber-soft);
   border-color: var(--amber-border);
   background: var(--amber-bg);
+}
+
+.attention__badge--hitl-ready {
+  color: var(--teal);
+  border-color: var(--teal-border);
+  background: var(--teal-bg);
 }
 
 .attention__badge--curator-proposal {

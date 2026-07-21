@@ -103,7 +103,7 @@ export interface BranchPromptDialogProps {
   projectLabel: string | null;
   projectPath: string | null;
   branchStatus: GitBranchStatusResult | null;
-  prompt: { kind: 'run' } | { kind: 'drain' } | null;
+  prompt: { kind: 'run' } | { kind: 'drain' } | { kind: 'schedule' } | null;
   mode: 'choose' | 'create' | 'switch';
   name: string;
   branches: string[];
@@ -198,6 +198,11 @@ export function BranchPromptDialog({
       });
   };
 
+  // What the held action is, for the prose: a Run, a drain now, or a scheduled
+  // drain (issue 195 — arm-time branch guard reuses this same dialog).
+  const actionNoun =
+    prompt?.kind === 'run' ? 'Run' : prompt?.kind === 'schedule' ? 'scheduled drain' : 'drain';
+
   return (
     <Dialog
       open={prompt !== null}
@@ -214,16 +219,25 @@ export function BranchPromptDialog({
             {branchStatus?.detached ? (
               <>
                 <strong>{projectLabel ?? 'This project'}</strong>'s checkout isn't on any branch
-                right now — a {prompt.kind === 'drain' ? 'drain' : 'Run'} would land its work with
-                nowhere to come back to. Create a branch, switch to one, or proceed anyway (work
-                lands on a detached commit).
+                right now — a {actionNoun} would land its work with nowhere to come back to. Create a
+                branch, switch to one, or proceed anyway (work lands on a detached commit).
+                {prompt.kind === 'schedule' && (
+                  <> If you schedule anyway and are still detached at fire time, the drain is skipped.</>
+                )}
               </>
             ) : (
               <>
                 <strong>{projectLabel ?? 'This project'}</strong> is checked out on{' '}
-                <strong>{branchStatus?.branch}</strong> — a protected branch. A{' '}
-                {prompt.kind === 'drain' ? 'drain' : 'Run'} would land its work directly there.
-                Create a new branch, switch to an existing one, or proceed anyway.
+                <strong>{branchStatus?.branch}</strong> — a protected branch. A {actionNoun} would
+                land its work directly there. Create a new branch, switch to an existing one, or
+                proceed anyway.
+                {prompt.kind === 'schedule' && (
+                  <>
+                    {' '}
+                    If you schedule anyway and are still on{' '}
+                    <strong>{branchStatus?.branch}</strong> at fire time, the drain is skipped.
+                  </>
+                )}
               </>
             )}
           </DialogDescription>
@@ -259,9 +273,13 @@ export function BranchPromptDialog({
                 variant="ghost"
                 className="ui-btn--end"
                 onClick={onResume}
-                title="Start anyway, landing work on the current branch"
+                title={
+                  prompt.kind === 'schedule'
+                    ? 'Arm the schedule anyway — it will be skipped at fire time if you are still on this branch'
+                    : 'Start anyway, landing work on the current branch'
+                }
               >
-                Proceed anyway
+                {prompt.kind === 'schedule' ? 'Schedule anyway' : 'Proceed anyway'}
               </Button>
             </DialogActions>
           )}

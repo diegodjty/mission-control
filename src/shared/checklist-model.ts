@@ -66,15 +66,19 @@ export function checklistSourceText(
 // The closed frontmatter fence — same shape `issue-file-ops.ts` validates
 // against: a `---` line, the raw block, a closing `---` line.
 const FRONTMATTER_FENCE = /^---\s*\n([\s\S]*?)\n---\s*(\n|$)/;
-const STATUS_LINE = /^(\s*status\s*:\s*)wip(\s*)$/m;
+// `open` OR `wip` flips to `done` (issue 195): a HITL walkthrough is closeable
+// by the human straight from `open` — it never has to be drained/parked into
+// `wip` first, which was the dangerous "drain it first" workflow. An already-
+// `done` issue has nothing to flip (the fence stays `done`, no match here).
+const STATUS_LINE = /^(\s*status\s*:\s*)(?:open|wip)(\s*)$/m;
 
 /**
- * Build the full replacement text for a human's "Mark verified & done": the
- * frontmatter's `status: wip` flips to `status: done`, and a one-line
- * sign-off note (with the date) is appended to the body — never a silent
- * flip (the issue's own requirement). Null when the text has no closed
- * frontmatter fence or no `status: wip` line (nothing to flip) — the caller
- * should not write in that case.
+ * Build the full replacement text for a human's "Mark done": the frontmatter's
+ * `status: open`/`status: wip` flips to `status: done`, and a one-line sign-off
+ * note (with the date) is appended to the body — never a silent flip (the
+ * issue's own requirement). Null when the text has no closed frontmatter fence
+ * or no flippable `status: open`/`status: wip` line (nothing to flip — e.g.
+ * already `done`) — the caller should not write in that case.
  */
 export function markVerifiedDoneText(fileText: string, dateIso: string): string | null {
   const fence = FRONTMATTER_FENCE.exec(fileText);

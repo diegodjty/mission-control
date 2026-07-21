@@ -483,29 +483,31 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Scenario 3 — a full cap-1 mixed drain with LINGERING Workers: zero
-  // unclassifiable records, and the drain CONTINUES past the parked HITL issue
-  // (issues 64 + 65). The Workers here linger the way a real claude Pane does —
-  // they finish their exit and keep their session alive at the prompt — so the
-  // slot only frees if the Run's status turns terminal on DECLARED facts (the
-  // `done` flip, or the Receipt's outcome), never on session death. Before
-  // issue 65 this exact drain stalled at 05: the parked HITL Run read
-  // `running` forever and the cap-1 coordinator (correctly) waited for a slot
-  // that never came. Fake workers that exit hid it; lingering ones catch it.
+  // Scenario 3 — a full cap-1 mixed drain over a backlog INCLUDING a HITL issue
+  // (issue 195). A HITL issue is human-only BY CONSTRUCTION: the Coordinator
+  // never makes it startable, so the drain spawns no Worker and cuts no worktree
+  // for it — the earlier soft, worker-side §2 park guard (which relied on the
+  // LLM Worker reading afk-issue-runner and parking) is no longer the defense,
+  // and the stale-worktree ghost-commit that rode in through the worktree the
+  // drain never should have cut can't happen. The eligible HITL issue (05) is
+  // left UNTOUCHED at `open` and surfaces in Attention as awaiting the human;
+  // every non-HITL issue still runs, and its dependent (08) stays blocked until
+  // a human closes 05. The Workers linger (session alive at their prompt) the
+  // way a real claude Pane does, so the slot frees on DECLARED facts (the `done`
+  // flip), never on session death (issue 65 — no regression).
   // ---------------------------------------------------------------------------
-  it('Scenario 3: a cap-1 mixed drain with lingering Workers parks the HITL issue, frees its slot, and completes the rest', async () => {
+  it('Scenario 3: a cap-1 mixed drain never starts the HITL issue, completes the rest, and reports it awaiting the human (issue 195)', async () => {
     ingestFrom(sandbox.issuesDir);
 
     // Drive the drain the way the app does: re-plan with the REAL coordinator
     // against the REAL backlog after every Run, cap 1, each Run carrying its
-    // latest Receipt's declared outcome (issue 64). Scripted exits: 02/03/04
-    // complete (03 becomes eligible only after 02 is done), 05 parks HITL,
-    // 06/07 complete AFTER the park — the drain must not halt at 05.
+    // latest Receipt's declared outcome. Scripted exits: 02/03/04 complete (03
+    // becomes eligible only after 02 is done), 06/07 complete. There is NO exit
+    // for 05 — the drain must never start it (it is HITL, human-only).
     const exits = new Map<number, WorkerExit>([
       [2, 'completed'],
       [3, 'completed'],
       [4, 'completed'],
-      [5, 'needs-verification'],
       [6, 'completed'],
       [7, 'completed'],
     ]);
@@ -550,90 +552,79 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
       terminal.push({ issueId: id, status, receiptOutcome: record.outcome });
     }
 
-    // Issue 65's core assertion: the lingering HITL park did NOT wedge the
-    // cap — its Run turned terminal (`parked`) on the Receipt's declared
-    // outcome alone, freeing the slot while the session stayed alive.
+    // No slot ever wedged (issue 65, no regression): the cap-1 drain flowed
+    // through every non-HITL issue without stalling.
     expect(stalledAtFullCap).toBe(false);
-    expect(terminal.find((r) => r.issueId === 5)?.status).toBe('parked');
 
-    // Issue 64's core assertion: the drain ran EVERY eligible issue, parking
-    // 05 along the way — no halt at the park. It ended because nothing
-    // eligible remained, never because a Run "blocked".
-    expect(started).toEqual([2, 3, 4, 5, 6, 7]);
+    // Issue 195's core assertion: the drain ran every NON-HITL eligible issue
+    // and NEVER started 05 (HITL). It ended because nothing eligible remained,
+    // never because a Run "blocked".
+    expect(started).toEqual([2, 3, 4, 6, 7]);
+    expect(started).not.toContain(5);
     expect(stop).not.toBeNull();
     expect(stop!.reason).toBe('no-eligible');
 
-    // The park is real: 05 is left `wip` (awaiting the human), everything
-    // else the drain touched is `done`.
+    // 05 is left UNTOUCHED at `open` (never claimed, never parked) — the drain
+    // did not so much as flip it to `wip`. Everything else it touched is `done`.
     const backlog = await readBacklog(repo);
     const five = backlog.issues.find((i) => i.id === 5)!;
-    expect(five.status).toBe('wip');
+    expect(five.status).toBe('open');
     expect(five.hitl).toBe(true);
     for (const id of [2, 3, 4, 6, 7]) {
       expect(backlog.issues.find((i) => i.id === id)?.status).toBe('done');
     }
 
-    // A park blocks only its dependents: 08 (`depends_on: [5]`) was never
-    // started and stays open — no special casing, its dependency simply
-    // never reached `done`.
+    // A HITL issue holds only its dependents: 08 (`depends_on: [5]`) was never
+    // started and stays open — 05 never reached `done`, and only a human can
+    // close it.
     expect(started).not.toContain(8);
     expect(backlog.issues.find((i) => i.id === 8)?.status).toBe('open');
 
-    // Exactly ONE hitl-waiting event derives from the whole drain's records —
-    // and it is delivered exactly once through the real pump into the chat PTY.
-    const isHitlIssue = (issueId: number | null): boolean =>
-      issueId !== null && (backlog.issues.find((i) => i.id === issueId)?.hitl ?? false);
-    const hitlRecords = records.filter(
-      (r) => lifecycleKindForOutcome(r.outcome, isHitlIssue(r.issueId)) === 'hitl-waiting',
+    // The HITL issue is REPORTED as awaiting the human (issue 195): 05 is open
+    // with its dependency done, so it derives exactly one `hitl-ready` Attention
+    // item — the human's cue to run and close the walkthrough by hand, never a
+    // Run the drain silently swallowed. The drain produced NO HITL Receipt (05
+    // was never started), so there is no `hitl-park` item.
+    const completionsDir = join(repo, 'issues', 'completions');
+    const receiptNames = (await readdir(completionsDir)).filter((f) => f.endsWith('.md'));
+    const receipts = await Promise.all(
+      receiptNames.map(async (f) => parseReceipt(await readFile(join(completionsDir, f), 'utf8'))),
     );
-    expect(hitlRecords).toHaveLength(1);
-    expect(hitlRecords[0].issueId).toBe(5);
-
-    const pty = new FakePty();
-    pty.create('dispatcher');
-    const pump = createSubmitPump({ write: pty.write, canFlush: () => true });
-    pump.attachSession('dispatcher');
-    for (const rec of hitlRecords) {
-      const reaction = reactToLifecycleEvent({
-        kind: 'hitl-waiting',
-        runId: rec.id,
-        issueId: rec.issueId,
-        slug: rec.slug,
-        title: rec.title,
-        detail: rec.detail,
-      });
-      // Enqueue twice on the same key — dedupe keeps delivery at one.
-      pump.enqueue({ key: `hitl-waiting:${rec.id}`, text: reaction.notification! });
-      pump.enqueue({ key: `hitl-waiting:${rec.id}`, text: reaction.notification! });
-    }
-    await waitFor(
-      () => pty.submittedMessages('dispatcher').length > 0,
-      'hitl-waiting notification delivered',
-    );
-    const delivered = pty.submittedMessages('dispatcher');
-    expect(delivered).toHaveLength(1);
-    expect(delivered[0]).toContain('HITL gate waiting');
-    expect(delivered[0]).toContain('05');
+    const attention = deriveAttention({
+      project: 'sandbox',
+      backlog,
+      receipts,
+      coreProposedPresent: false,
+      humanSetup: null,
+      journal: [],
+      lastSeen: null,
+    });
+    const readyItems = attention.items.filter((i) => i.kind === 'hitl-ready');
+    expect(readyItems).toHaveLength(1);
+    expect(readyItems[0].issueId).toBe(5);
+    expect(readyItems[0].text).toMatch(/walkthrough ready for you/);
+    expect(attention.items.filter((i) => i.kind === 'hitl-park')).toEqual([]);
 
     // ZERO ghosts: every ingested record is a classified, real capture — no
     // `unknown`s, no boot-screen junk, exactly one record per Receipt written.
-    expect(records).toHaveLength(6);
+    // Five records now (2/3/4/6/7) — none for 05, which never ran.
+    expect(records).toHaveLength(5);
     expect(records.every((r) => r.outcome !== 'unknown')).toBe(true);
     expect(records.every((r) => isRealCapture(r))).toBe(true);
     expect(records.every((r) => isReceiptRecord(r))).toBe(true);
+    expect(records.every((r) => r.issueId !== 5)).toBe(true);
     const outcomes = new Map(records.map((r) => [r.issueId, r.outcome]));
     expect(outcomes.get(2)).toBe('completed');
     expect(outcomes.get(3)).toBe('completed');
     expect(outcomes.get(4)).toBe('completed');
-    expect(outcomes.get(5)).toBe('needs-verification');
     expect(outcomes.get(6)).toBe('completed');
     expect(outcomes.get(7)).toBe('completed');
 
     // The durable Run log agrees, with unique ids (no double-feeds).
     await Promise.all(appends);
     const persisted = await store.read(repo);
-    expect(persisted).toHaveLength(6);
-    expect(new Set(persisted.map((r) => r.id)).size).toBe(6);
+    expect(persisted).toHaveLength(5);
+    expect(new Set(persisted.map((r) => r.id)).size).toBe(5);
 
     // An MC "restart" — a fresh watcher whose `seen` is seeded from the
     // persisted Run log — re-scans every existing Receipt and feeds NOTHING.
@@ -647,6 +638,65 @@ describe('e2e drain harness — real modules, real infrastructure', () => {
     } finally {
       restarted.closeAll();
     }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Scenario 3d — issue 195: a PARALLEL drain over a mix including an eligible
+  // HITL issue cuts NO worktree and writes NO commit for the HITL issue. This
+  // is the isolation half of "human-only by construction": the 2026-07-21
+  // walkthrough-183 ghost-deletion rode in through a worktree the drain never
+  // should have cut for a HITL issue. Now the Coordinator excludes it from the
+  // startable set, so `applyIsolation` is only ever handed the non-HITL Runs —
+  // the HITL issue gets no worktree, no `afk/` branch, no ghost-commit — and it
+  // surfaces as awaiting the human instead.
+  // ---------------------------------------------------------------------------
+  it('Scenario 3d: a parallel drain cuts no worktree and writes no commit for an eligible HITL issue (issue 195)', async () => {
+    ingestFrom(sandbox.issuesDir);
+    const backlog = await readBacklog(repo);
+    const hitl = backlog.issues.find((i) => i.id === 5)!;
+    // Ground truth: 05 is HITL, open, and has every dependency met (none), so
+    // pre-195 it was startable like any other issue.
+    expect(hitl.hitl).toBe(true);
+    expect(hitl.status).toBe('open');
+
+    // Cap 3: the non-HITL independents 02/04/06/07 fan out; 05 (HITL) is neither
+    // startable nor queued, and 08 stays blocked behind it.
+    const plan = planDrain({ issues: backlog.issues, maxConcurrent: 3, activeRuns: [] });
+    expect(plan.startable).not.toContain(5);
+    expect(plan.queued).not.toContain(5);
+    expect(plan.startable.every((id) => backlog.issues.find((i) => i.id === id)?.hitl !== true)).toBe(true);
+
+    // The drain hands ONLY the startable (non-HITL) Runs to isolation — the very
+    // reason no worktree is cut for 05.
+    const startableRuns = plan.startable.map((id) => ({
+      issueId: id,
+      slug: backlog.issues.find((i) => i.id === id)!.slug,
+    }));
+    const iso = await applyIsolation(repo, startableRuns);
+    expect(iso.placements.map((p) => p.issueId).sort((a, b) => a - b)).toEqual(plan.startable);
+    expect(iso.placements.some((p) => p.issueId === 5)).toBe(false);
+
+    // The HITL issue has NO worktree on disk and NO `afk/05` branch — nothing to
+    // carry a ghost-commit, because nothing was ever cut for it.
+    expect(existsSync(worktreePathFor(repo, hitl.slug))).toBe(false);
+    const afkScan = await scanAfkBranches(repo);
+    expect(afkScan.some((b) => b.slug === hitl.slug)).toBe(false);
+
+    // 05 is untouched at `open`, and it surfaces as awaiting the human.
+    const after = await readBacklog(repo);
+    expect(after.issues.find((i) => i.id === 5)?.status).toBe('open');
+    const attention = deriveAttention({
+      project: 'sandbox',
+      backlog: after,
+      receipts: [],
+      coreProposedPresent: false,
+      humanSetup: null,
+      journal: [],
+      lastSeen: null,
+    });
+    const ready = attention.items.filter((i) => i.kind === 'hitl-ready');
+    expect(ready).toHaveLength(1);
+    expect(ready[0].issueId).toBe(5);
   });
 
   // ---------------------------------------------------------------------------

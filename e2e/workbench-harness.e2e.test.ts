@@ -17,8 +17,9 @@
  *                           03 in repo-b) executes in order; each fake
  *                           Worker's cwd is asserted (revert issue 72's
  *                           repo-targeting and these go red). Workers LINGER
- *                           (misbehavior mode) so the HITL park frees its
- *                           slot on the declared Receipt alone.
+ *                           (misbehavior mode) so a non-HITL Run frees its slot
+ *                           on the declared Receipt alone; the HITL issue (05)
+ *                           is never started at all (human-only, issue 195).
  *   b. Receipts + cards   — Receipts land in the WORKBENCH completions root
  *                           (one root, never per-repo) and drive exactly one
  *                           narrative message each through the real pump.
@@ -290,9 +291,10 @@ describe('e2e workbench harness — real modules over the workbench fixture', ()
   // Scenario a — cross-repo drain with lingering Workers: `repo:` targets are
   // honored per issue (cwd asserted per Run — reverting issue 72's targeting
   // turns these red), the cross-repo dep chain executes in order, the HITL
-  // park frees its slot, and BOTH code repos end with only code commits.
+  // issue (05) is NEVER started (human-only by construction, issue 195), and
+  // BOTH code repos end with only code commits.
   // ---------------------------------------------------------------------------
-  it('Scenario a: cross-repo drain — each Worker in its issue\'s target repo, dep chain in order, park continuation', async () => {
+  it('Scenario a: cross-repo drain — each Worker in its issue\'s target repo, dep chain in order, HITL left untouched', async () => {
     ingestFrom(wb.projectRoot);
 
     // Opening the project by EITHER handle yields the SAME identity (issue
@@ -307,28 +309,27 @@ describe('e2e workbench harness — real modules over the workbench fixture', ()
     expect(identity.defaultRepoPath).toBe(wb.repoA);
     expect(identity.repos).toEqual({ a: wb.repoA, b: wb.repoB });
 
-    // Workers LINGER (misbehavior mode, issue 65): the parked HITL Run must
-    // free its slot on the declared Receipt alone, session still alive.
+    // Workers LINGER (misbehavior mode, issue 65): a lingering non-HITL Run
+    // still frees its slot on the declared Receipt alone, session still alive.
+    // No exit for 05 — the drain must never start it (HITL, human-only).
     const result = await driveDrain(identity, {
       exits: new Map<number, WorkerExit>([
         [2, 'completed'],
         [3, 'completed'],
         [4, 'completed'],
-        [5, 'needs-verification'],
         [8, 'completed'],
       ]),
       linger: true,
     });
 
-    // Every eligible issue ran, lowest-first, the park continuing past 05 —
+    // Every NON-HITL eligible issue ran, lowest-first, SKIPPING 05 (HITL) —
     // and EACH Worker's cwd is its issue's declared target repo (issue 72):
-    // 02/05/08 in repo-a, 03/04 in repo-b. Reverting repo-targeting would
+    // 02/08 in repo-a, 03/04 in repo-b. Reverting repo-targeting would
     // send 03/04 to the default repo-a and fail here.
     expect(result.started).toEqual([
       { id: 2, cwd: wb.repoA },
       { id: 3, cwd: wb.repoB },
       { id: 4, cwd: wb.repoB },
-      { id: 5, cwd: wb.repoA },
       { id: 8, cwd: wb.repoA },
     ]);
 
@@ -345,21 +346,23 @@ describe('e2e workbench harness — real modules over the workbench fixture', ()
     expect(existsSync(join(wb.repoB, 'work', '02-core-api.txt'))).toBe(false);
     expect(existsSync(join(wb.repoA, 'work', '03-b-consumes-core.txt'))).toBe(false);
 
-    // The drain ended because nothing eligible remained — the park (05) and
-    // the unknown-key block (06, scenario e's focus) never halted it.
+    // The drain ended because nothing eligible remained — the HITL 05 (never
+    // started) and the unknown-key block (06, scenario e's focus) never halted
+    // it. 05 was never even claimed, so it has no tracked Run at all.
     expect(result.stop).not.toBeNull();
     expect(result.stop!.reason).toBe('no-eligible');
-    expect(result.terminal.find((r) => r.issueId === 5)?.status).toBe('parked');
+    expect(result.terminal.find((r) => r.issueId === 5)).toBeUndefined();
+    expect(startedIds).not.toContain(5);
     expect(startedIds).not.toContain(6);
     expect(startedIds).not.toContain(7);
 
-    // Ground truth in the WORKBENCH: 02/03/04/08 done, 05 parked wip (hitl),
-    // 06/07 untouched.
+    // Ground truth in the WORKBENCH: 02/03/04/08 done, 05 UNTOUCHED at open
+    // (hitl, human-only), 06/07 untouched.
     const backlog = await readBacklogAt(wb.issuesRoot);
     const statusOf = (id: number): IssueStatus | undefined =>
       backlog.issues.find((i) => i.id === id)?.status;
     for (const id of [2, 3, 4, 8]) expect(statusOf(id)).toBe('done');
-    expect(statusOf(5)).toBe('wip');
+    expect(statusOf(5)).toBe('open');
     expect(backlog.issues.find((i) => i.id === 5)?.hitl).toBe(true);
     expect(statusOf(6)).toBe('open');
     expect(statusOf(7)).toBe('open');
@@ -428,17 +431,18 @@ describe('e2e workbench harness — real modules over the workbench fixture', ()
     expect(seed).toContain(WORKBENCH_CORE_FACT);
 
     // A finished drain writes exactly ONE dated journal entry naming every
-    // Run with its declared outcome.
+    // Run with its declared outcome. 05 (HITL) is never started, so it never
+    // appears in the drain's Run delta.
     const result = await driveDrain(identity, {
       exits: new Map<number, WorkerExit>([
         [2, 'completed'],
         [3, 'completed'],
         [4, 'completed'],
-        [5, 'needs-verification'],
         [8, 'completed'],
       ]),
     });
     expect(result.stop?.reason).toBe('no-eligible');
+    expect(result.started.map((s) => s.id)).not.toContain(5);
     await Promise.all(appends);
     const persisted = await store.read(wb.projectRoot);
 
@@ -455,7 +459,8 @@ describe('e2e workbench harness — real modules over the workbench fixture', ()
     const entry = await readFile(journal.path!, 'utf8');
     expect(entry).toContain('02-core-api: completed');
     expect(entry).toContain('03-b-consumes-core: completed');
-    expect(entry).toContain('05-manual-check: parked (needs manual verification)');
+    // 05 (HITL) was never started, so it never lands in the drain's journal.
+    expect(entry).not.toContain('05-manual-check');
     expect(entry).toContain('no eligible issue remains');
   });
 
@@ -503,7 +508,6 @@ describe('e2e workbench harness — real modules over the workbench fixture', ()
         [2, 'completed'],
         [3, 'completed'],
         [4, 'completed'],
-        [5, 'needs-verification'],
         [8, 'completed'],
       ]),
       onClaimed: observeClaims,
@@ -511,8 +515,9 @@ describe('e2e workbench harness — real modules over the workbench fixture', ()
     });
     expect(result.stop?.reason).toBe('no-eligible');
 
-    // The trail: seed + (claim, done/park) per Run, in Run order — ONE commit
-    // per Run event, messages exactly as ADR-0015 fixes them.
+    // The trail: seed + (claim, done) per Run, in Run order — ONE commit per
+    // Run event, messages exactly as ADR-0015 fixes them. 05 (HITL) is never
+    // started, so it produces NO claim/park commits at all.
     const log = (await git(wb.workbenchRoot, 'log', '--reverse', '--pretty=%s'))
       .trim()
       .split('\n');
@@ -524,8 +529,6 @@ describe('e2e workbench harness — real modules over the workbench fixture', ()
       'proj: issue 03 done',
       'proj: issue 04 claim',
       'proj: issue 04 done',
-      'proj: issue 05 claim',
-      'proj: issue 05 park',
       'proj: issue 08 claim',
       'proj: issue 08 done',
     ]);
@@ -577,15 +580,16 @@ describe('e2e workbench harness — real modules over the workbench fixture', ()
         [2, 'completed'],
         [3, 'completed'],
         [4, 'completed'],
-        [5, 'needs-verification'],
         [8, 'completed'],
       ]),
     });
 
-    // 06 never started; 07 (depends_on: [6]) never became eligible — a
-    // missing dependency is an unmet dependency, no special casing.
+    // 05 (HITL) never started; 06 never started; 07 (depends_on: [6]) never
+    // became eligible — a missing dependency is an unmet dependency, and a
+    // HITL issue is human-only, no special casing for either.
     const startedIds = result.started.map((s) => s.id);
-    expect(startedIds).toEqual([2, 3, 4, 5, 8]);
+    expect(startedIds).toEqual([2, 3, 4, 8]);
+    expect(startedIds).not.toContain(5);
     expect(startedIds).not.toContain(6);
     expect(startedIds).not.toContain(7);
 
@@ -622,7 +626,6 @@ describe('e2e workbench harness — real modules over the workbench fixture', ()
         [2, 'completed'],
         [3, 'completed'],
         [4, 'completed'],
-        [5, 'needs-verification'],
         [8, 'completed'],
       ]),
       misbehaviors: new Map<number, Misbehavior>([
@@ -632,8 +635,9 @@ describe('e2e workbench harness — real modules over the workbench fixture', ()
     });
 
     // The drain CONTINUED past both misbehaving Workers: 02's done flip (in
-    // the workbench) unblocked the cross-repo 03, and everything eligible ran.
-    expect(result.started.map((s) => s.id)).toEqual([2, 3, 4, 5, 8]);
+    // the workbench) unblocked the cross-repo 03, and every NON-HITL eligible
+    // issue ran (05 is human-only, never started).
+    expect(result.started.map((s) => s.id)).toEqual([2, 3, 4, 8]);
     expect(result.stop?.reason).toBe('no-eligible');
 
     // Ground truth healed: the flips are done in the workbench, the code
