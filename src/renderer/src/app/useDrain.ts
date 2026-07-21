@@ -86,6 +86,7 @@ export interface Drain {
   guardedStartDrain: (chosenCap: number, selectedIds?: readonly number[]) => void;
   /** Bypasses the notUnderGit gate — the "Initialize git" / "Drain serially" dialog action. */
   proceedDrain: (chosenCap: number, selectedIds?: readonly number[]) => void;
+<<<<<<< HEAD
   /**
    * The scheduled-drain fire path (issue 191, ADR-0024): re-checks every gate
    * `guardedStartDrain`/`startDrain` would, but a gate that would PROMPT
@@ -95,6 +96,8 @@ export interface Drain {
    * omitted means every eligible issue is in scope, same as a manual press.
    */
   scheduledFire: (chosenCap: number, selectedIds?: readonly number[]) => void;
+=======
+>>>>>>> afk/192-scope-scheduled-drain-by-selection
   stopDrain: () => void;
   /** Marks the "Debrief this drain" affordance consumed. */
   dismissDebrief: () => void;

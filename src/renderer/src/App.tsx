@@ -2184,6 +2184,7 @@ export function App(): JSX.Element {
   drainDismissDebriefRef.current = drain.dismissDebrief;
 
   // --- Scheduled drain (issue 190, ADR-0024) --------------------------------
+<<<<<<< HEAD
   // A deferred press of the Drain control: firing calls `drain.scheduledFire`
   // (issue 191) — every gate the manual Drain button's `guardedStartDrain`
   // would check (branch guard, mid-merge, eligibility, git-init) still
@@ -2195,6 +2196,16 @@ export function App(): JSX.Element {
   // `useState`, so quitting MC or closing this Project's Window drops it with
   // nothing left behind.
   const scheduledDrain = useScheduledDrain(drain.scheduledFire);
+=======
+  // A deferred press of the Drain control: firing calls the SAME
+  // `guardedStartDrain` the button's onClick does (branch guard, git-init
+  // gate, eligibility gate — every refusal the manual path has still applies
+  // at fire time), over the whole eligible backlog exactly like pressing
+  // Drain now. One-shot and un-persisted (ADR-0024): the pending schedule
+  // lives only in this hook's `useState`, so quitting MC or closing this
+  // Project's Window drops it with nothing left behind.
+  const scheduledDrain = useScheduledDrain(drain.guardedStartDrain);
+>>>>>>> afk/192-scope-scheduled-drain-by-selection
   scheduledDrainResetRef.current = scheduledDrain.reset;
 
   // Resume whichever Run/drain the branch prompt is holding, bypassing the

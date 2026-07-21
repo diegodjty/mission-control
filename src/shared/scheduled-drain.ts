@@ -14,7 +14,10 @@
  * CONFIG key, no daemon — quitting MC or closing the Project's Window simply
  * drops this state, so a schedule that hasn't fired yet never fires at all.
  */
+<<<<<<< HEAD
 import type { GitBranchStatusResult } from './ipc-contract';
+=======
+>>>>>>> afk/192-scope-scheduled-drain-by-selection
 
 /** No drain is armed. */
 export interface IdleSchedule {
@@ -70,6 +73,7 @@ export function cancelSchedule(): ScheduledDrainState {
 export function isDueToFire(state: ScheduledDrainState, now: number): boolean {
   return state.kind === 'pending' && now >= state.fireAt;
 }
+<<<<<<< HEAD
 
 /**
  * Scheduled-drain skip decision (PURE) — issue 191, ADR-0024.
@@ -166,3 +170,5 @@ export function scheduledDrainSkipMessage(reason: ScheduledDrainSkipReason): str
       return 'scheduled drain skipped';
   }
 }
+=======
+>>>>>>> afk/192-scope-scheduled-drain-by-selection

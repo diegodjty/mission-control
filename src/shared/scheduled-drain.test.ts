@@ -4,12 +4,17 @@ import {
   cancelSchedule,
   isDueToFire,
   scheduleDrain,
+<<<<<<< HEAD
   scheduledDrainSkipMessage,
   scheduledDrainSkipReason,
   type ScheduledDrainGateInput,
   type ScheduledDrainState,
 } from './scheduled-drain';
 import type { GitBranchStatusResult } from './ipc-contract';
+=======
+  type ScheduledDrainState,
+} from './scheduled-drain';
+>>>>>>> afk/192-scope-scheduled-drain-by-selection
 
 describe('scheduled-drain', () => {
   it('IDLE_SCHEDULE starts idle and is never due', () => {
@@ -57,6 +62,7 @@ describe('scheduled-drain', () => {
     expect('selectedIds' in state).toBe(false);
   });
 });
+<<<<<<< HEAD
 
 describe('scheduledDrainSkipReason', () => {
   const ready: GitBranchStatusResult = { branch: 'afk/191', detached: false, protectedBranch: false };
@@ -182,3 +188,5 @@ describe('scheduledDrainSkipMessage', () => {
     );
   });
 });
+=======
+>>>>>>> afk/192-scope-scheduled-drain-by-selection

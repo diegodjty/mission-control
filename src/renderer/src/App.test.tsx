@@ -258,6 +258,7 @@ describe('App.tsx state-seam harness', () => {
     expect(mapPropsRef.current.schedule).toEqual({ kind: 'idle' });
   }, 10000);
 
+<<<<<<< HEAD
   it('scheduled drain (issue 191): a protected branch skips instead of prompting, and notifies the reason', async () => {
     const projectPath = '/repo/scheduled-drain-skip-project';
     (bridge.listProjects as any).mockResolvedValue({
@@ -311,6 +312,8 @@ describe('App.tsx state-seam harness', () => {
     expect(runTileCalls.current.some((p) => p.run.target.issueId === 1)).toBe(false);
   }, 10000);
 
+=======
+>>>>>>> afk/192-scope-scheduled-drain-by-selection
   it('scheduled drain scoped by selection (issue 192): only the selected eligible issue starts; the unselected one is never touched', async () => {
     const projectPath = '/repo/scheduled-drain-scope-project';
     (bridge.listProjects as any).mockResolvedValue({
