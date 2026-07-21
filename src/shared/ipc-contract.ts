@@ -208,6 +208,18 @@ export const IpcChannel = {
    */
   ScheduledDrainSkipped: 'drain:scheduled-skipped',
   /**
+   * renderer → main (invoke): a scheduled drain (issue 193, ADR-0024) is
+   * pending or running (`active: true`) or has reached its terminal moment —
+   * completed, skipped, or user-stopped (`active: false`). While active the
+   * main process arms a single `powerSaveBlocker('prevent-app-suspension')` so
+   * idle system-sleep / macOS App Nap can't freeze the renderer-side drain loop
+   * (ADR-0022) overnight; it releases the instant `active` goes false. The
+   * screen is left free to sleep (app-suspension level, not display).
+   * Idempotent — a repeated `true` never double-arms, a repeated `false` never
+   * throws. Resolves to a ScheduledDrainPowerResult.
+   */
+  ScheduledDrainPower: 'drain:scheduled-power',
+  /**
    * renderer → main (invoke): read a workbench Project's raw `memory/journal/`
    * entries (issue 181, ADR-0023) — the Cost tab's only source for drain
    * grouping (a drain's boundary and member Runs exist ONLY in this journal
@@ -1317,6 +1329,21 @@ export interface ScheduledDrainSkippedResult {
 }
 
 /**
+ * The renderer's "a scheduled drain is pending or running" flag (issue 193,
+ * ADR-0024): true while the main process should hold a `prevent-app-suspension`
+ * power-save blocker, false at the drain's terminal moment.
+ */
+export interface ScheduledDrainPowerRequest {
+  /** Arm the blocker while true; release it when false. */
+  active: boolean;
+}
+
+export interface ScheduledDrainPowerResult {
+  /** Whether a blocker is armed after applying the request (mainly for tests). */
+  armed: boolean;
+}
+
+/**
  * The aggregated cross-project attention state (issue 79, ADR-0016): every
  * active workbench project's items from the pure attention model (issue 78),
  * grouped by project (projects ascending; each project's items in the model's
@@ -1860,6 +1887,15 @@ export interface MissionControlApi {
    * no-op for legacy Projects.
    */
   notifyScheduledDrainSkipped(req: ScheduledDrainSkippedRequest): Promise<ScheduledDrainSkippedResult>;
+  /**
+   * Report whether a scheduled drain is pending or running (issue 193): the
+   * main process arms a `powerSaveBlocker('prevent-app-suspension')` while
+   * `active` is true and releases it when false, so an overnight scheduled
+   * drain's renderer loop can't be frozen by system-sleep / App Nap. The screen
+   * is left free to sleep. A quiet no-op on any platform where the blocker is
+   * unsupported.
+   */
+  setScheduledDrainActive(req: ScheduledDrainPowerRequest): Promise<ScheduledDrainPowerResult>;
   /** The current aggregated cross-project attention snapshot (issue 79). */
   listAttention(): Promise<AttentionSnapshot>;
   /** Subscribe to attention-list changes; returns an unsubscribe function. */

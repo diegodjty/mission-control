@@ -90,6 +90,8 @@ import { needsYouByProject } from '../shared/attention-hub-model';
 import { classifyDrainStop } from '../shared/attention-notifications';
 import { NotificationController } from './notification-controller';
 import { showNotifications, type NotificationTarget } from './notification-adapter';
+import { PowerSaveController } from './power-save-controller';
+import { electronPowerSaveApi } from './power-save-adapter';
 import { isAllowedPlanningDoc } from '../shared/planning-model';
 import { isAllowedDoc } from '../shared/docs-model';
 import {
@@ -117,6 +119,8 @@ import {
   type DrainJournalResult,
   type ScheduledDrainSkippedRequest,
   type ScheduledDrainSkippedResult,
+  type ScheduledDrainPowerRequest,
+  type ScheduledDrainPowerResult,
   type IsolationApplyRequest,
   type IsolationApplyResult,
   type IssueFileDeleteRequest,
@@ -746,6 +750,13 @@ let debriefSeen: DebriefSeenStore;
 // do. Driven from the SINGLE attention watch (so N Windows never ping N times)
 // plus the merge/drain-journal edges below. Instantiated in `whenReady`.
 let notificationController: NotificationController | null = null;
+
+// Keep the Mac awake for a scheduled drain (issue 193, ADR-0024): the one
+// app-level power-save-blocker controller. The renderer owns the "a scheduled
+// drain is pending or running" truth (the schedule is a React hook, ADR-0022)
+// and reports it over `ScheduledDrainPower`; this arms/releases the actual
+// `powerSaveBlocker` (a main-process-only API). Instantiated in `whenReady`.
+let powerSaveController: PowerSaveController | null = null;
 
 // The workbench root the attention watch (and Inbox click-through) keys on.
 const WORKBENCH_ROOT = join(homedir(), 'Workbench');
@@ -1770,6 +1781,19 @@ function registerIpc(): void {
     },
   );
 
+  // Keep the Mac awake for a scheduled drain (issue 193, ADR-0024): the renderer
+  // reports "pending or running" (true) and the drain's terminal moment (false);
+  // the main process arms/releases the `powerSaveBlocker` since that API lives
+  // only here. App-wide and benign (no git mutation, no project identity), so it
+  // is not ownership-gated — just a mirror of the renderer's flag onto the OS.
+  ipcMain.handle(
+    IpcChannel.ScheduledDrainPower,
+    (_event, req: ScheduledDrainPowerRequest): ScheduledDrainPowerResult => {
+      powerSaveController?.setActive(req.active);
+      return { armed: powerSaveController?.armed ?? false };
+    },
+  );
+
   // --- Launcher (issue 81, ADR-0016) ----------------------------------------
 
   /** Read a file's text, or null when missing/unreadable — never throw. */
@@ -2433,6 +2457,11 @@ app.whenReady().then(async () => {
   notificationController = new NotificationController({
     show: (intents) => showNotifications(intents, focusAndNavigate),
   });
+  // Keep the Mac awake for a scheduled drain (issue 193, ADR-0024): armed while
+  // the renderer reports a scheduled drain pending/running, released the instant
+  // it ends. The real Electron `powerSaveBlocker` is injected here; unit tests
+  // drive the controller with a fake.
+  powerSaveController = new PowerSaveController({ api: electronPowerSaveApi });
   // Background cross-project attention watch (issue 79): starts with the app,
   // independent of any Window, and stays inert when ~/Workbench doesn't exist.
   attentionWatcher = new AttentionWatcher({
@@ -2481,6 +2510,10 @@ app.on('window-all-closed', () => {
   receiptWatcher.closeAll();
   planningWatcher.closeAll();
   docsWatcher.closeAll();
+  // Every renderer is gone, so no scheduled-drain loop is alive — release the
+  // blocker (issue 193) rather than hold it while the app idles on macOS. A
+  // renderer that owned it dropped its schedule with the Window (ADR-0024).
+  powerSaveController?.setActive(false);
   if (process.platform !== 'darwin') app.quit();
 });
 
