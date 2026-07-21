@@ -386,7 +386,9 @@ export function drainAvailability(
   // Fixed point: the set of open issues the drain can eventually start. A
   // dependency is satisfiable when it is done, will be landed by a live Run,
   // or is itself drain-startable. Cycles and missing/parked dependencies never
-  // satisfy, so they stay out of the set.
+  // satisfy, so they stay out of the set. A HITL issue is never drain-startable
+  // (issue 195) — it is human-only — so it is never added to this set, and a
+  // non-HITL issue depending on it only unblocks once the human closes it.
   const startable = new Set<number>();
   const satisfiable = (depId: number): boolean => {
     const dep = byId.get(depId);
@@ -399,7 +401,7 @@ export function drainAvailability(
   while (grew) {
     grew = false;
     for (const issue of issues) {
-      if (issue.status !== 'open' || startable.has(issue.id)) continue;
+      if (issue.status !== 'open' || issue.hitl || startable.has(issue.id)) continue;
       if (issue.dependsOn.every(satisfiable)) {
         startable.add(issue.id);
         grew = true;
@@ -408,12 +410,25 @@ export function drainAvailability(
   }
   if (startable.size > 0) return { available: true, reason: null };
 
+  // A HITL issue whose dependencies are all done is READY FOR THE HUMAN (issue
+  // 195), not blocked and not something the drain can start — so it gets its
+  // own reason clause rather than being miscounted as "blocked". A HITL issue
+  // with an unmet dependency is genuinely blocked and counts there.
+  const depsAllDone = (issue: BacklogIssue): boolean =>
+    issue.dependsOn.every((depId) => byId.get(depId)?.status === 'done');
+  const hitlReady = (issue: BacklogIssue): boolean =>
+    issue.status === 'open' && issue.hitl && depsAllDone(issue);
+
   const wipAwaiting = issues.filter((i) => i.status === 'wip' && !running.has(i.id)).length;
+  const hitlAwaiting = issues.filter((i) => hitlReady(i) && !running.has(i.id)).length;
   const live = issues.filter((i) => i.status !== 'done' && running.has(i.id)).length;
-  const blocked = issues.filter((i) => i.status === 'open' && !running.has(i.id)).length;
+  const blocked = issues.filter(
+    (i) => i.status === 'open' && !running.has(i.id) && !hitlReady(i),
+  ).length;
 
   const parts: string[] = [];
   if (wipAwaiting > 0) parts.push(`${wipAwaiting} wip awaiting you`);
+  if (hitlAwaiting > 0) parts.push(`${hitlAwaiting} HITL awaiting you`);
   if (live > 0) parts.push(`${live} running`);
   if (blocked > 0) parts.push(`${blocked} blocked`);
   const reason =
@@ -468,11 +483,22 @@ export function planDrain(input: DrainInput): DrainPlan {
   // means no filter: every eligible issue is in scope, matching today's plan.
   const selectedSet = input.selectedIds === undefined ? null : new Set(input.selectedIds);
 
+  // A HITL issue is NEVER startable by a drain (issue 195): human-only by
+  // construction, not by worker discipline. Excluding it here means the drain
+  // spawns no worker and cuts no worktree for it — the soft, worker-side §2
+  // park guard (which relied on the LLM Worker reading afk-issue-runner and
+  // parking) is no longer the primary defense, and the stale-worktree ghost-
+  // commit that rode in through the worktree the drain never should have cut
+  // (the 2026-07-21 walkthrough-183 incident) can't happen. An eligible HITL
+  // issue instead surfaces in Attention (`hitl-ready`) for the human, never as
+  // a Run. `isParkedHitl` stays for legacy parked Runs, but the park path is no
+  // longer how a HITL issue is kept out of the drain — this is.
   const eligible = [...input.issues]
     .sort((a, b) => a.id - b.id)
     .filter(
       (issue) =>
         !activeIds.has(issue.id) &&
+        !issue.hitl &&
         (selectedSet === null || selectedSet.has(issue.id)) &&
         eligibleForRun(issue, input.issues, finishedUnmergedIds),
     )

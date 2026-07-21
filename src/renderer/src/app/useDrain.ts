@@ -34,6 +34,24 @@ export type DrainBranchPromptTarget = {
   selectedIds?: readonly number[];
 };
 
+/**
+ * What the branch-awareness prompt is holding a scheduled-drain ARM for (issue
+ * 195): the same protected-branch/detached-HEAD guard the manual Drain shows,
+ * but caught at the moment you press "Schedule drain" — while you can still act
+ * — instead of only silently skipping at fire time (`scheduledDrainSkipReason`).
+ * Resuming (Create/Switch/Schedule-anyway) arms the schedule rather than
+ * starting a drain now; the fire-time skip remains the backstop if you land
+ * back on a protected branch before it fires.
+ */
+export type ScheduleBranchPromptTarget = {
+  kind: 'schedule';
+  /** Wall-clock fire time, epoch ms — armed unchanged once the branch is resolved. */
+  fireAt: number;
+  cap: number;
+  /** The in-scope issue selection (issue 192) the armed schedule carries through, if any. */
+  selectedIds?: readonly number[];
+};
+
 export interface DrainDeps {
   backlog: Backlog | null;
   projectPath: string | null;
@@ -63,7 +81,11 @@ export interface DrainDeps {
   setGitInitPrompt: (v: { cap: number } | null) => void;
   setGitInitError: (v: string | null) => void;
   setBranchPrompt: (
-    v: { kind: 'run'; target: RunTarget } | DrainBranchPromptTarget | null,
+    v:
+      | { kind: 'run'; target: RunTarget }
+      | DrainBranchPromptTarget
+      | ScheduleBranchPromptTarget
+      | null,
   ) => void;
   setBranchPromptMode: (v: 'choose' | 'create' | 'switch') => void;
   setBranchPromptError: (v: string | null) => void;

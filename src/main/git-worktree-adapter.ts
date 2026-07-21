@@ -35,6 +35,7 @@ import {
 import { ensureLocallyIgnored } from './local-ignore';
 import { dirtyPathsFromPorcelain } from '../shared/merge-output';
 import { ignoredArtifactPaths } from '../shared/artifact-hygiene';
+import { stagedDeletions, ghostCommitRefusal } from '../shared/ghost-commit-guard';
 import {
   splitAdoptablePaths,
   adoptionCommitMessage,
@@ -974,6 +975,21 @@ export async function commitFinishedWorktree(
     // artifact): with nothing left to commit, there is no mergeable change.
     const staged = await git(worktreePath, ['diff', '--cached', '--name-only']);
     if (staged.trim().length === 0) return { committed: false, error: null };
+    // Ghost-commit guard (issue 153): NEVER commit a tree that deletes tracked
+    // files the Worker did not create. A staged deletion vs. the branch tip is
+    // the exact signature of the 2026-07-21 walkthrough-183 ghost-deletion (a
+    // stale worktree missing core files, swept in by `git add -A`). Refuse it
+    // outright — the work stays uncommitted, the Run reads "commit failed", and
+    // the human inspects rather than a corrupt "completion" landing on the branch.
+    const deletions = stagedDeletions(
+      // `--find-renames` forces rename detection ON regardless of the repo's
+      // `diff.renames` config, so a legitimate MOVE reads as `R` (allowed) and
+      // never as a `D`+`A` pair that would trip the guard as a false positive.
+      await git(worktreePath, ['diff', '--cached', '--find-renames', '--name-status']),
+    );
+    if (deletions.length > 0) {
+      return { committed: false, error: ghostCommitRefusal(slug, deletions) };
+    }
     await git(worktreePath, ['commit', '-m', commitMessageForRun(slug)]);
     return { committed: true, error: null };
   } catch (err) {
@@ -1126,6 +1142,15 @@ export async function commitFinishedMain(
       return { committed: false, error: null, adopted: adoption.adopted };
     }
     await git(projectPath, ['add', '-A']);
+    // Ghost-commit guard (issue 153), same as the worktree path: a solo Run on
+    // `main` must not commit a tree that deletes tracked files it did not
+    // create. Refuse rather than land a ghost-deletion on the default branch.
+    const deletions = stagedDeletions(
+      await git(projectPath, ['diff', '--cached', '--find-renames', '--name-status']),
+    );
+    if (deletions.length > 0) {
+      return { committed: false, error: ghostCommitRefusal(slug, deletions), adopted: adoption.adopted };
+    }
     await git(projectPath, ['commit', '-m', commitMessageForRun(slug)]);
     return { committed: true, error: null, adopted: adoption.adopted };
   } catch (err) {

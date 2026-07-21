@@ -16,6 +16,12 @@
  *       - `hitl-park` — an `hitl: true` issue at `wip` whose latest Receipt
  *         declares `needs-verification`: a park awaiting the human's sign-off.
  *         A `needs-verification` Receipt on a non-HITL issue is NOT a park.
+ *       - `hitl-ready` (issue 195) — an `hitl: true` issue at `open` whose every
+ *         dependency is `done`: a walkthrough ready for the human to run. A HITL
+ *         issue is never drain-startable (the Coordinator excludes it), so a
+ *         newly-eligible one surfaces HERE for the human instead of silently
+ *         waiting to be picked up as a Run that never comes. Yields to a Receipt
+ *         item for the same issue (a park/blocked state is more specific).
  *       - `run-timeout` (issue 170) — a Run killed for exceeding `run_timeout`
  *         (issue 141), its worktree still standing with the Worker's
  *         (possibly finished, possibly broken) uncommitted work. Distinct from
@@ -61,6 +67,7 @@ import type { TimeoutSalvageRecord } from './timeout-salvage';
 
 export type AttentionKind =
   | 'hitl-park'
+  | 'hitl-ready'
   | 'run-timeout'
   | 'curator-proposal'
   | 'curator-report'
@@ -237,6 +244,47 @@ function deriveReceiptItems(
     }
   }
 
+  return items.sort((a, b) => (a.issueId ?? 0) - (b.issueId ?? 0));
+}
+
+// ---------------------------------------------------------------------------
+// (b) hitl-ready — an eligible HITL issue awaiting the human (issue 195)
+// ---------------------------------------------------------------------------
+
+/**
+ * Derive `hitl-ready` items: a HITL issue that is `open` with every dependency
+ * already `done`. Since the Run Coordinator never starts a HITL issue as a
+ * drain Run, a newly-eligible one would otherwise sit silent forever; this
+ * surfaces it as "walkthrough ready for you" so the human knows to run it (and
+ * then close it by hand from the detail panel). `alreadyOnReceipt` names the
+ * issue ids that already produced a Receipt-derived item (a park/blocked state
+ * is more specific) — those are skipped so one issue never shows twice.
+ * Dependency satisfaction reads the backlog's own `done` statuses; pure.
+ */
+function deriveHitlReadyItems(
+  project: string,
+  backlog: Backlog,
+  alreadyOnReceipt: ReadonlySet<number>,
+): AttentionItem[] {
+  const issues = asArray(backlog?.issues);
+  const byId = new Map(issues.map((i) => [i.id, i]));
+  const items: AttentionItem[] = [];
+  for (const issue of issues) {
+    if (!issue.hitl || issue.status !== 'open') continue;
+    if (alreadyOnReceipt.has(issue.id)) continue;
+    const depsAllDone = asArray(issue.dependsOn).every(
+      (depId) => byId.get(depId)?.status === 'done',
+    );
+    if (!depsAllDone) continue;
+    items.push({
+      project,
+      kind: 'hitl-ready',
+      issueId: issue.id,
+      fileRef: `issues/${issue.fileName}`,
+      text: `${issueLabel(issue)} — walkthrough ready for you`,
+      id: `${project}:hitl-ready:${issue.id}`,
+    });
+  }
   return items.sort((a, b) => (a.issueId ?? 0) - (b.issueId ?? 0));
 }
 
@@ -424,6 +472,7 @@ function deriveRepoCandidates(project: string, selfHeal: SelfHealInput | null): 
 
 const KIND_ORDER: readonly AttentionKind[] = [
   'hitl-park',
+  'hitl-ready',
   'run-timeout',
   'curator-proposal',
   'blocked-run',
@@ -444,6 +493,12 @@ export function deriveAttention(input: AttentionInput): AttentionResult {
     input?.backlog && Array.isArray(input.backlog.issues) ? input.backlog : EMPTY_BACKLOG;
 
   const receiptItems = deriveReceiptItems(project, backlog, asArray(input?.receipts), notes);
+  // A HITL issue with a Receipt-derived item (park/blocked) is already covered
+  // by the more-specific item — don't also surface the generic ready item.
+  const onReceipt = new Set(
+    receiptItems.map((i) => i.issueId).filter((id): id is number => id !== null),
+  );
+  const hitlReadyItems = deriveHitlReadyItems(project, backlog, onReceipt);
   const timeoutItems = deriveTimeoutSalvageItems(project, backlog, asArray(input?.timeoutSalvage));
 
   const proposal: AttentionItem[] = input?.coreProposedPresent
@@ -463,7 +518,15 @@ export function deriveAttention(input: AttentionInput): AttentionResult {
   const candidates = deriveRepoCandidates(project, input?.selfHeal ?? null);
   const briefing = deriveBriefing(project, asArray(input?.journal), input?.lastSeen ?? null, notes);
 
-  const items = [...receiptItems, ...timeoutItems, ...proposal, ...gates, ...candidates, ...briefing].sort(
+  const items = [
+    ...receiptItems,
+    ...hitlReadyItems,
+    ...timeoutItems,
+    ...proposal,
+    ...gates,
+    ...candidates,
+    ...briefing,
+  ].sort(
     (a, b) => {
       const kind = KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind);
       if (kind !== 0) return kind;
@@ -605,6 +668,8 @@ export function kindLabel(kind: AttentionKind): string {
   switch (kind) {
     case 'hitl-park':
       return 'PARKED';
+    case 'hitl-ready':
+      return 'HITL';
     case 'run-timeout':
       return 'TIMEOUT';
     case 'curator-proposal':

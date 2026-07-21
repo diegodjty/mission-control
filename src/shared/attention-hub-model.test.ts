@@ -182,6 +182,77 @@ describe('hitl-park', () => {
   });
 });
 
+describe('hitl-ready (issue 195) — an eligible HITL issue awaits the human, never a Run', () => {
+  it('derives from an open HITL issue whose dependencies are all done', () => {
+    // 05 is HITL; flip it open (never drained) — a drain will never start it,
+    // so it surfaces here as ready for the human to walk through.
+    const { items, notes } = deriveAttention(input({ backlog: fixtureBacklog({ '05': 'open' }) }));
+    const ready = itemsOfKind(items, 'hitl-ready');
+    expect(ready).toHaveLength(1);
+    expect(ready[0]).toMatchObject({
+      project: 'demo',
+      kind: 'hitl-ready',
+      issueId: 5,
+      fileRef: 'issues/05-manual-check.md',
+      id: 'demo:hitl-ready:5',
+    });
+    expect(ready[0].text).toMatch(/walkthrough ready for you/);
+    expect(notes).toEqual([]);
+  });
+
+  it('does NOT derive for a non-HITL open issue', () => {
+    // 07 is open and non-HITL — an ordinary runnable issue, not a walkthrough.
+    const { items } = deriveAttention(input());
+    expect(itemsOfKind(items, 'hitl-ready')).toEqual([]);
+  });
+
+  it('does not derive while the HITL issue is still wip (that is a park, not ready)', () => {
+    const { items } = deriveAttention(input()); // 05 is HITL wip by default
+    expect(itemsOfKind(items, 'hitl-ready')).toEqual([]);
+  });
+
+  it('does not derive once the HITL issue is done', () => {
+    const { items } = deriveAttention(input({ backlog: fixtureBacklog({ '05': 'done' }) }));
+    expect(itemsOfKind(items, 'hitl-ready')).toEqual([]);
+  });
+
+  it('does not derive when a dependency is not yet done', () => {
+    // 05 HITL open, depends on 07 which is still open → not ready yet.
+    const backlog = buildBacklog(
+      [
+        issueFile('05-manual-check.md', 'open', { hitl: true }),
+        issueFile('07-dep.md', 'open'),
+      ].map((f) =>
+        f.name === '05-manual-check.md'
+          ? { name: f.name, content: f.content.replace('depends_on: []', 'depends_on: [7]') }
+          : f,
+      ),
+      null,
+    );
+    const { items } = deriveAttention(input({ backlog }));
+    expect(itemsOfKind(items, 'hitl-ready')).toEqual([]);
+  });
+
+  it('yields to a Receipt-derived item for the same issue (a park is more specific)', () => {
+    // An open HITL issue that somehow also has a blocked Receipt: the blocked-run
+    // item wins; the generic ready item is suppressed so it never shows twice.
+    const { items } = deriveAttention(
+      input({
+        backlog: fixtureBacklog({ '05': 'open' }),
+        receipts: [receipt(5, 'manual-check', 'blocked')],
+      }),
+    );
+    expect(itemsOfKind(items, 'hitl-ready')).toEqual([]);
+    expect(itemsOfKind(items, 'blocked-run')).toHaveLength(1);
+  });
+
+  it('counts toward needs-you and labels as HITL', () => {
+    const { items } = deriveAttention(input({ backlog: fixtureBacklog({ '05': 'open' }) }));
+    expect(needsYouCount(items)).toBeGreaterThanOrEqual(1);
+    expect(kindLabel('hitl-ready')).toBe('HITL');
+  });
+});
+
 describe('curator-proposal', () => {
   it('derives when CORE.proposed.md is present, with the file reference', () => {
     const { items } = deriveAttention(input({ coreProposedPresent: true }));

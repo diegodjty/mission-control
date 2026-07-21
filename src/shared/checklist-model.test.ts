@@ -115,14 +115,19 @@ describe('markVerifiedDoneText', () => {
     expect(result).toMatch(/Verified and marked done by human sign-off on 2026-07-18\./);
   });
 
+  it('flips status: open to status: done as well (issue 195 — close a HITL walkthrough by hand)', () => {
+    const openIssue = WIP_ISSUE_FILE.replace('status: wip', 'status: open');
+    const result = markVerifiedDoneText(openIssue, '2026-07-18');
+    expect(result).toMatch(/^---\nstatus: done\ndepends_on: \[152\]\n---/);
+    expect(result).toMatch(/Verified and marked done by human sign-off on 2026-07-18\./);
+  });
+
   it('returns null when there is no closed frontmatter fence', () => {
     expect(markVerifiedDoneText('no frontmatter here', '2026-07-18')).toBeNull();
   });
 
-  it('returns null when the status is not wip (already done, or open)', () => {
+  it('returns null when the status is already done (nothing to flip)', () => {
     const doneAlready = WIP_ISSUE_FILE.replace('status: wip', 'status: done');
     expect(markVerifiedDoneText(doneAlready, '2026-07-18')).toBeNull();
-    const openIssue = WIP_ISSUE_FILE.replace('status: wip', 'status: open');
-    expect(markVerifiedDoneText(openIssue, '2026-07-18')).toBeNull();
   });
 });

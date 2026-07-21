@@ -578,7 +578,7 @@ export function Map({
       const dateIso = new Date().toISOString().slice(0, 10);
       const updated = markVerifiedDoneText(read.content, dateIso);
       if (updated === null) {
-        setMarkDoneError('This issue is no longer wip — nothing to flip.');
+        setMarkDoneError('This issue is already done — nothing to flip.');
         return;
       }
       const res = await window.mc.editIssueFile({
@@ -837,7 +837,7 @@ export function Map({
                     ⏰ Drain scheduled for {formatFireTime(schedule.fireAt)}
                     {schedule.selectedIds !== undefined && (
                       <span
-                        className="map__schedule-scope"
+                        className="map__schedule-scope-note"
                         title={`Scoped to issue(s) ${schedule.selectedIds.join(', ')}`}
                       >
                         {' '}
@@ -853,68 +853,123 @@ export function Map({
                     </button>
                   </span>
                 ) : (
-                  <label className="map__schedule map__schedule--idle">
-                    <input
-                      className="map__schedule-time"
-                      type="time"
-                      value={scheduleTimeInput}
-                      onChange={(e) => setScheduleTimeInput(e.target.value)}
-                      title="Time of day to start a drain over the selected eligible issues"
-                    />
-                    {/* Per-issue scope (issue 192, ADR-0024): defaults to every
-                        eligible issue selected — identical to 190's
-                        whole-backlog behavior — until the human unchecks one. */}
-                    {scheduleEligibleIds.length > 0 && (
-                      <details className="map__schedule-scope-picker">
-                        <summary>
-                          {scheduleEligibleIds.length - scheduleExcludedIds.size} of{' '}
-                          {scheduleEligibleIds.length} eligible selected
-                        </summary>
-                        <ul className="map__schedule-scope-list">
-                          {scheduleEligibleIds.map((id) => (
-                            <li key={id}>
-                              <label>
-                                <input
-                                  type="checkbox"
-                                  checked={!scheduleExcludedIds.has(id)}
-                                  onChange={(e) =>
-                                    setScheduleExcludedIds((prev) => {
-                                      const next = new Set(prev);
-                                      if (e.target.checked) next.delete(id);
-                                      else next.add(id);
-                                      return next;
-                                    })
-                                  }
-                                />{' '}
-                                #{String(id).padStart(2, '0')}
-                              </label>
-                            </li>
-                          ))}
-                        </ul>
-                      </details>
-                    )}
-                    <button
-                      className="map__schedule-arm"
-                      disabled={
-                        nextOccurrenceOfTimeOfDay(scheduleTimeInput, Date.now()) === null ||
-                        (scheduleEligibleIds.length > 0 &&
-                          scheduleExcludedIds.size === scheduleEligibleIds.length)
-                      }
-                      onClick={() => {
-                        const fireAt = nextOccurrenceOfTimeOfDay(scheduleTimeInput, Date.now());
-                        if (fireAt === null) return;
-                        const selectedIds =
-                          scheduleExcludedIds.size === 0
-                            ? undefined
-                            : scheduleEligibleIds.filter((id) => !scheduleExcludedIds.has(id));
-                        onScheduleDrain(fireAt, cap ?? 2, selectedIds);
-                        setScheduleExcludedIds(new Set());
-                      }}
-                      title="Schedule a drain to start at this time (today, or tomorrow if it's already passed)"
+                  // Schedule popover (issue 195): a self-contained panel opened
+                  // by a clock button, so scheduling no longer competes for room
+                  // in the run toolbar. Built on a native <details> — no extra
+                  // open/close state, and arming replaces this whole node with
+                  // the pending pill above, which closes it.
+                  <details className="map__schedule-popover">
+                    <summary
+                      className="map__schedule-trigger"
+                      title="Schedule a drain to start later"
                     >
-                      Schedule drain
-                    </button>
-                  </label>
+                      ⏰ Schedule
+                    </summary>
+                    <div className="map__schedule-panel">
+                      <div className="map__schedule-panel-title">Schedule a drain</div>
+                      <label className="map__schedule-field">
+                        <span className="map__schedule-field-label">Fire at</span>
+                        <input
+                          className="map__schedule-time"
+                          type="time"
+                          value={scheduleTimeInput}
+                          onChange={(e) => setScheduleTimeInput(e.target.value)}
+                          title="Time of day to start a drain (today, or tomorrow if it's already passed)"
+                        />
+                      </label>
+                      {onCapChange && (
+                        <label className="map__schedule-field">
+                          <span className="map__schedule-field-label">Max concurrent</span>
+                          <input
+                            className="map__cap-input"
+                            type="number"
+                            min={1}
+                            step={1}
+                            value={cap ?? 2}
+                            onChange={(e) =>
+                              onCapChange(Math.max(1, Math.floor(Number(e.target.value) || 1)))
+                            }
+                          />
+                        </label>
+                      )}
+                      {/* Per-issue scope (issue 192, ADR-0024): defaults to every
+                          eligible issue selected until the human unchecks one. */}
+                      {scheduleEligibleIds.length > 0 && (
+                        <div className="map__schedule-field">
+                          <span className="map__schedule-field-label">
+                            Scope · {scheduleEligibleIds.length - scheduleExcludedIds.size} of{' '}
+                            {scheduleEligibleIds.length} eligible
+                          </span>
+                          <ul className="map__schedule-scope-list">
+                            {scheduleEligibleIds.map((id) => (
+                              <li key={id}>
+                                <label className="map__schedule-scope-item">
+                                  <input
+                                    type="checkbox"
+                                    checked={!scheduleExcludedIds.has(id)}
+                                    onChange={(e) =>
+                                      setScheduleExcludedIds((prev) => {
+                                        const next = new Set(prev);
+                                        if (e.target.checked) next.delete(id);
+                                        else next.add(id);
+                                        return next;
+                                      })
+                                    }
+                                  />
+                                  #{String(id).padStart(2, '0')}
+                                </label>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {/* Arm-time branch warning (issue 195): the same protected-
+                          branch/detached-HEAD guard the manual Drain shows,
+                          surfaced now so you can create a branch before the timer
+                          fires. Pressing Schedule drain on a protected branch
+                          routes through the Create/Switch/Schedule-anyway dialog. */}
+                      {branchStatus &&
+                        (branchStatus.detached || branchStatus.protectedBranch) && (
+                          <p className="map__schedule-warn">
+                            {branchStatus.detached ? (
+                              <>
+                                ⚠ HEAD is detached. Scheduling will offer to create a branch first —
+                                otherwise the drain is skipped at fire time.
+                              </>
+                            ) : (
+                              <>
+                                ⚠ You're on <strong>{branchStatus.branch}</strong> — a protected
+                                branch. Scheduling will offer to create a branch first — otherwise
+                                the drain is skipped at fire time.
+                              </>
+                            )}
+                          </p>
+                        )}
+                      <div className="map__schedule-actions">
+                        <button
+                          className="map__schedule-arm"
+                          disabled={
+                            nextOccurrenceOfTimeOfDay(scheduleTimeInput, Date.now()) === null ||
+                            (scheduleEligibleIds.length > 0 &&
+                              scheduleExcludedIds.size === scheduleEligibleIds.length)
+                          }
+                          onClick={() => {
+                            const fireAt = nextOccurrenceOfTimeOfDay(scheduleTimeInput, Date.now());
+                            if (fireAt === null) return;
+                            const selectedIds =
+                              scheduleExcludedIds.size === 0
+                                ? undefined
+                                : scheduleEligibleIds.filter((id) => !scheduleExcludedIds.has(id));
+                            onScheduleDrain(fireAt, cap ?? 2, selectedIds);
+                            setScheduleExcludedIds(new Set());
+                          }}
+                          title="Schedule a drain to start at this time (today, or tomorrow if it's already passed)"
+                        >
+                          Schedule drain
+                        </button>
+                      </div>
+                    </div>
+                  </details>
                 ))}
               {/* Merge exceptions entry (issue 148, ADR-0021): everyday merging
                   belongs to the always-on lane, so this only surfaces a paused
@@ -1230,7 +1285,11 @@ export function Map({
                 />
 
                 {/* Interactive HITL checklist (issue 156): only HITL issues
-                    render one — a normal issue shows nothing here. */}
+                    render one — a normal issue shows nothing here. The human
+                    can close a HITL issue by hand from ANY non-done status
+                    (issue 195): a walkthrough never has to be drained/parked
+                    into `wip` first — `canMarkDone` enables straight from
+                    `open`, and the button shows even when there is no checklist. */}
                 {issue.hitl && (
                   <ChecklistSection
                     items={checklistItems}
@@ -1239,7 +1298,7 @@ export function Map({
                     busy={checklistBusy}
                     error={checklistError}
                     onToggle={(index) => void handleToggleChecklistItem(index)}
-                    canMarkDone={issue.status === 'wip'}
+                    canMarkDone={issue.status !== 'done'}
                     onMarkDone={() => void markChecklistVerifiedDone()}
                     markDoneBusy={markDoneBusy}
                     markDoneError={markDoneError}
@@ -1723,8 +1782,15 @@ function DependencySection({
 /**
  * The interactive HITL checklist (issue 156): the parked issue's steps as
  * real tickable checkboxes, in order. Renders an empty state — never an
- * error — when the Receipt/body carries no checklist. All-checked surfaces
- * "Mark verified & done"; a partially-checked list offers no such flip.
+ * error — when the Receipt/body carries no checklist.
+ *
+ * Closing a HITL issue is a first-class HUMAN action (issue 195): the human
+ * can mark it `done` straight from the panel without draining/parking it first
+ * (`canMarkDone` — true for any non-`done` status). When the issue HAS a
+ * checklist, the flip stays gated behind all-checked ("Mark verified & done") —
+ * the sign-off still means "I walked the steps". When it has NO checklist (a
+ * never-drained walkthrough, or one whose steps live only in prose), there is
+ * nothing to tick, so a plain "Mark done" button is offered directly.
  */
 function ChecklistSection({
   items,
@@ -1749,17 +1815,39 @@ function ChecklistSection({
   markDoneBusy: boolean;
   markDoneError: string | null;
 }): JSX.Element {
-  if (items.length === 0) {
+  const hasItems = items.length > 0;
+  const allDone = loaded && allChecked(checked, items.length);
+  // With a checklist, verification means all-checked; with none, there is
+  // nothing to verify, so the human may close it directly.
+  const offerMarkDone = canMarkDone && (!hasItems || allDone);
+
+  const markDoneButton = offerMarkDone ? (
+    <div className="map__checklist-done">
+      <button
+        className="map__issue-op map__issue-op--save"
+        onClick={onMarkDone}
+        disabled={markDoneBusy}
+      >
+        {markDoneBusy
+          ? 'Marking done…'
+          : hasItems
+            ? '✓ Mark verified & done'
+            : '✓ Mark done'}
+      </button>
+    </div>
+  ) : null;
+
+  if (!hasItems) {
     return (
       <div className="map__checklist">
         <div className="map__checklist-empty">
           No checklist steps found in this issue's Receipt or body.
         </div>
+        {markDoneButton}
+        {markDoneError && <div className="map__checklist-error">{markDoneError}</div>}
       </div>
     );
   }
-
-  const allDone = loaded && allChecked(checked, items.length);
 
   return (
     <div className="map__checklist">
@@ -1780,17 +1868,7 @@ function ChecklistSection({
         ))}
       </ul>
       {error && <div className="map__checklist-error">{error}</div>}
-      {allDone && canMarkDone && (
-        <div className="map__checklist-done">
-          <button
-            className="map__issue-op map__issue-op--save"
-            onClick={onMarkDone}
-            disabled={markDoneBusy}
-          >
-            {markDoneBusy ? 'Marking verified & done…' : '✓ Mark verified & done'}
-          </button>
-        </div>
-      )}
+      {markDoneButton}
       {markDoneError && <div className="map__checklist-error">{markDoneError}</div>}
     </div>
   );

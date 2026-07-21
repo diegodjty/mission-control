@@ -150,6 +150,66 @@ describe('commitFinishedWorktree — auto-commit on the done transition', () => 
     const status = await git(wt, 'status', '--porcelain');
     expect(status).toContain('node_modules');
   });
+
+  it('REFUSES to commit a tree that deletes a tracked file the worker did not create (issue 153)', async () => {
+    // A pre-existing tracked file the Worker did NOT author — a stand-in for the
+    // core files (CONTEXT.md, electron.vite.config.ts, …) the 2026-07-21
+    // walkthrough-183 drain ghost-deleted.
+    await writeFile(join(repo, 'CONTEXT.md'), 'core doc\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-m', 'add CONTEXT.md');
+
+    const wt = await createWorktree(repo, SLUG, branchFor(SLUG));
+    const before = await commitCount(SLUG);
+    // The Worker finishes (flips done, writes its feature file) but its worktree
+    // is MISSING CONTEXT.md — the exact ghost-deletion signature.
+    await simulateAgent(wt, 'done');
+    await rm(join(wt, 'CONTEXT.md'));
+
+    const outcome = await commitFinishedWorktree(repo, SLUG);
+    expect(outcome.committed).toBe(false);
+    expect(outcome.error).toMatch(/ghost-deletion|did not create/i);
+    expect(outcome.error).toContain('CONTEXT.md');
+
+    // Nothing landed on the branch — the work is left uncommitted for the human,
+    // and the committed issue is still wip (the done flip never made it in).
+    expect(await commitCount(SLUG)).toBe(before);
+    expect(await readCommittedIssueStatus(repo, SLUG)).toBe('wip');
+  });
+
+  it('ALLOWS a commit that only ADDS and EDITS (no tracked deletion)', async () => {
+    // The normal finished shape — a created feature file + the done flip — is
+    // unaffected by the guard.
+    const wt = await createWorktree(repo, SLUG, branchFor(SLUG));
+    await simulateAgent(wt, 'done');
+    const outcome = await commitFinishedWorktree(repo, SLUG);
+    expect(outcome.committed).toBe(true);
+    expect(outcome.error).toBeNull();
+    expect(await commitCount(SLUG)).toBe(2);
+  });
+
+  it('ALLOWS a rename of a pre-existing tracked file — a move is not a ghost deletion (issue 153)', async () => {
+    // A tracked file the Worker did not author, that it MOVES rather than
+    // deletes. `git add -A` + forced rename detection reads this as `R`, so the
+    // guard must let it through.
+    await mkdir(join(repo, 'src'), { recursive: true });
+    await writeFile(join(repo, 'src', 'moveme.ts'), 'export const moveme = 1;\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-m', 'add moveme.ts');
+
+    const wt = await createWorktree(repo, SLUG, branchFor(SLUG));
+    await simulateAgent(wt, 'done');
+    // Move it (identical content) so git detects a rename, not a delete+add.
+    await rm(join(wt, 'src', 'moveme.ts'));
+    await writeFile(join(wt, 'src', 'moved.ts'), 'export const moveme = 1;\n');
+
+    const outcome = await commitFinishedWorktree(repo, SLUG);
+    expect(outcome.committed).toBe(true);
+    expect(outcome.error).toBeNull();
+    const tracked = await git(wt, 'ls-files');
+    expect(tracked).toContain('src/moved.ts');
+    expect(tracked).not.toContain('src/moveme.ts');
+  });
 });
 
 describe('finished reflects the committed branch state (issue 15)', () => {

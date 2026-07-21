@@ -535,6 +535,63 @@ describe('planDrain — a parked HITL Run does not halt the drain (issue 64)', (
   });
 });
 
+describe('planDrain — a HITL issue is never startable by a drain (issue 195)', () => {
+  it('never starts an eligible HITL issue — no worker, no worktree', () => {
+    // 5 is HITL and eligible (open, no deps), but human-only: the drain must
+    // leave it entirely alone rather than spawning a worker / cutting a
+    // worktree for it. It is neither startable nor queued.
+    const issues = [mk(5, 'open', [], true)];
+    const plan = planDrain({ issues, maxConcurrent: 3, activeRuns: [] });
+    expect(plan.startable).toEqual([]);
+    expect(plan.queued).toEqual([]);
+    // Nothing else eligible and nothing running ⇒ the drain finishes cleanly.
+    expect(plan.drain.stop).toBe(true);
+    expect(plan.drain.reason).toBe('no-eligible');
+  });
+
+  it('drains the non-HITL issues and skips the HITL one in a mix', () => {
+    const issues = [mk(4, 'open'), mk(5, 'open', [], true), mk(6, 'open')];
+    const plan = planDrain({ issues, maxConcurrent: 3, activeRuns: [] });
+    expect(plan.startable).toEqual([4, 6]);
+    expect(plan.queued).toEqual([]);
+    expect(plan.startable).not.toContain(5);
+    expect(plan.drain.stop).toBe(false);
+  });
+
+  it('a HITL issue is never queued even when the cap is full', () => {
+    // cap 1, one non-HITL issue running: the HITL issue must not even queue.
+    const issues = [mk(4, 'wip'), mk(5, 'open', [], true), mk(6, 'open')];
+    const plan = planDrain({ issues, maxConcurrent: 1, activeRuns: [running(4)] });
+    expect(plan.startable).toEqual([]);
+    expect(plan.queued).toEqual([6]);
+    expect(plan.queued).not.toContain(5);
+  });
+
+  it('a non-HITL issue depending on a HITL issue stays blocked until the human closes it', () => {
+    // 6 depends on the HITL 5; the drain can neither start 5 nor unblock 6.
+    // 6 only becomes eligible once a human marks 5 done.
+    const blocked = planDrain({
+      issues: [mk(5, 'open', [], true), mk(6, 'open', [5])],
+      maxConcurrent: 3,
+      activeRuns: [],
+    });
+    expect(blocked.startable).toEqual([]);
+    const unblocked = planDrain({
+      issues: [mk(5, 'done', [], true), mk(6, 'open', [5])],
+      maxConcurrent: 3,
+      activeRuns: [],
+    });
+    expect(unblocked.startable).toEqual([6]);
+  });
+
+  it('detects HITL via the frontmatter flag regardless of dependency shape', () => {
+    // Even with all deps done, an HITL issue is not startable.
+    const issues = [mk(4, 'done'), mk(5, 'open', [4], true)];
+    const plan = planDrain({ issues, maxConcurrent: 3, activeRuns: [] });
+    expect(plan.startable).toEqual([]);
+  });
+});
+
 describe('isBlockedPark — declared-blocked parks vs the genuinely-unknown halt (issue 137)', () => {
   it('a non-leftover blocked Run whose Receipt declares blocked is a park', () => {
     expect(isBlockedPark({ status: 'blocked', receiptOutcome: 'blocked' })).toBe(true);
@@ -924,6 +981,41 @@ describe('drainAvailability — the Drain control is honest about the backlog (i
     expect(gate).toEqual({
       available: false,
       reason: 'nothing eligible — 1 wip awaiting you, 1 running, 1 blocked',
+    });
+  });
+
+  it('is UNAVAILABLE when the only eligible issue is HITL (human-only, issue 195)', () => {
+    // A HITL issue is never drain-startable, so a backlog of only an eligible
+    // HITL issue offers the drain no work — the control must not read available
+    // and then start a no-op drain. It reads as awaiting the human instead.
+    const gate = drainAvailability([mk(1, 'open', [], true)]);
+    expect(gate).toEqual({
+      available: false,
+      reason: 'nothing eligible — 1 HITL awaiting you',
+    });
+  });
+
+  it('a HITL issue does not make a chain of blocked dependents look available', () => {
+    // 2 depends on the HITL 1; the drain can start neither, so unavailable.
+    const gate = drainAvailability([mk(1, 'open', [], true), mk(2, 'open', [1])]);
+    expect(gate).toEqual({
+      available: false,
+      reason: 'nothing eligible — 1 HITL awaiting you, 1 blocked',
+    });
+  });
+
+  it('still available when a non-HITL issue is startable alongside a HITL one', () => {
+    const gate = drainAvailability([mk(1, 'open'), mk(2, 'open', [], true)]);
+    expect(gate.available).toBe(true);
+    expect(gate.reason).toBeNull();
+  });
+
+  it('counts a HITL issue with an unmet dependency as blocked, not HITL-awaiting', () => {
+    // 2 is HITL but blocked behind the missing 99 — not ready for the human yet.
+    const gate = drainAvailability([mk(2, 'open', [99], true)]);
+    expect(gate).toEqual({
+      available: false,
+      reason: 'nothing eligible — 1 blocked',
     });
   });
 });
