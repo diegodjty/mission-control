@@ -13,12 +13,17 @@ const POLL_MS = 1_000;
 export interface ScheduledDrainHook {
   /** The current pending schedule, or idle. */
   schedule: ScheduledDrainState;
+<<<<<<< HEAD
   /**
    * Arm a drain to fire at `fireAt` (epoch ms) with the given cap and,
    * optionally, an in-scope issue selection (issue 192) — omitted/undefined
    * means every eligible issue is in scope at fire time, same as today.
    */
   scheduleDrainAt: (fireAt: number, cap: number, selectedIds?: readonly number[]) => void;
+=======
+  /** Arm a drain to fire at `fireAt` (epoch ms) with the given cap. */
+  scheduleDrainAt: (fireAt: number, cap: number) => void;
+>>>>>>> afk/193-scheduled-drain-power-save-blocker
   /** Disarm the pending schedule before it fires. */
   cancelScheduledDrain: () => void;
   /** Clears any pending schedule on a Project switch — never carries across Projects. */
@@ -36,9 +41,13 @@ export interface ScheduledDrainHook {
  * Project's Window (which unmounts this hook, or drops the whole renderer)
  * drops it with nothing left behind — no re-arm-on-relaunch, no disk trace.
  */
+<<<<<<< HEAD
 export function useScheduledDrain(
   onFire: (cap: number, selectedIds?: readonly number[]) => void,
 ): ScheduledDrainHook {
+=======
+export function useScheduledDrain(onFire: (cap: number) => void): ScheduledDrainHook {
+>>>>>>> afk/193-scheduled-drain-power-save-blocker
   const [schedule, setSchedule] = useState<ScheduledDrainState>(IDLE_SCHEDULE);
 
   // Read through refs inside the timer so its identity doesn't need to depend
@@ -48,12 +57,18 @@ export function useScheduledDrain(
   const scheduleRef = useRef(schedule);
   scheduleRef.current = schedule;
 
+<<<<<<< HEAD
   const scheduleDrainAt = useCallback(
     (fireAt: number, cap: number, selectedIds?: readonly number[]): void => {
       setSchedule(scheduleDrain(fireAt, cap, selectedIds));
     },
     [],
   );
+=======
+  const scheduleDrainAt = useCallback((fireAt: number, cap: number): void => {
+    setSchedule(scheduleDrain(fireAt, cap));
+  }, []);
+>>>>>>> afk/193-scheduled-drain-power-save-blocker
 
   const cancelScheduledDrain = useCallback((): void => {
     setSchedule(cancelSchedule());
@@ -71,6 +86,7 @@ export function useScheduledDrain(
       // Disarm BEFORE firing — a one-shot schedule must never re-fire on the
       // next poll tick while the drain it just started is still spinning up.
       setSchedule(IDLE_SCHEDULE);
+<<<<<<< HEAD
       // Only pass a second argument when a scope was actually set — an
       // explicit `undefined` still shows up as an extra call argument to a
       // mock/spy, which would read as a changed call shape to a caller
@@ -80,6 +96,9 @@ export function useScheduledDrain(
       } else {
         onFireRef.current(current.cap, current.selectedIds);
       }
+=======
+      onFireRef.current(current.cap);
+>>>>>>> afk/193-scheduled-drain-power-save-blocker
     }, POLL_MS);
     return () => clearInterval(timer);
   }, [schedule]);

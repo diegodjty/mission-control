@@ -132,6 +132,7 @@ interface MapProps {
   schedule?: ScheduledDrainState;
   /**
    * Arm a scheduled drain: `fireAt` is the chosen time as epoch ms, `cap` the
+<<<<<<< HEAD
    * concurrency cap it starts with (same meaning as the manual Drain's cap),
    * and `selectedIds` the in-scope issue selection (issue 192, ADR-0024) —
    * omitted/undefined means every eligible issue is in scope, identical to
@@ -139,6 +140,12 @@ interface MapProps {
    * start path as pressing Drain now, filtered to this selection.
    */
   onScheduleDrain?: (fireAt: number, cap: number, selectedIds?: readonly number[]) => void;
+=======
+   * concurrency cap it starts with (same meaning as the manual Drain's cap).
+   * At `fireAt` the schedule fires the SAME start path as pressing Drain now.
+   */
+  onScheduleDrain?: (fireAt: number, cap: number) => void;
+>>>>>>> afk/193-scheduled-drain-power-save-blocker
   /** Cancel the pending schedule before it fires. */
   onCancelScheduledDrain?: () => void;
   /**
@@ -368,12 +375,15 @@ export function Map({
   // armed schedule itself lives in the parent (`schedule` prop), same split as
   // `cap`/`onCapChange` above.
   const [scheduleTimeInput, setScheduleTimeInput] = useState('');
+<<<<<<< HEAD
   // Scoped selection for the drain being scheduled (issue 192, ADR-0024): the
   // eligible issues UNCHECKED by the human, empty by default so "everything
   // eligible" (today's whole-backlog default, matching 190 exactly) needs no
   // interaction — the checklist starts fully checked. Reset whenever the
   // schedule panel goes back to idle (a fresh schedule starts fresh).
   const [scheduleExcludedIds, setScheduleExcludedIds] = useState<Set<number>>(new Set());
+=======
+>>>>>>> afk/193-scheduled-drain-power-save-blocker
 
   // Issue-file Edit / Delete (issue 89): the Map's one write exception. The
   // editor seeds from a FRESH disk read (never a possibly-stale push), saves
@@ -835,6 +845,7 @@ export function Map({
                 (schedule && schedule.kind === 'pending' ? (
                   <span className="map__schedule map__schedule--pending">
                     ⏰ Drain scheduled for {formatFireTime(schedule.fireAt)}
+<<<<<<< HEAD
                     {schedule.selectedIds !== undefined && (
                       <span
                         className="map__schedule-scope"
@@ -844,6 +855,8 @@ export function Map({
                         · {schedule.selectedIds.length} selected
                       </span>
                     )}
+=======
+>>>>>>> afk/193-scheduled-drain-power-save-blocker
                     <button
                       className="map__schedule-cancel"
                       onClick={() => onCancelScheduledDrain?.()}
@@ -859,6 +872,7 @@ export function Map({
                       type="time"
                       value={scheduleTimeInput}
                       onChange={(e) => setScheduleTimeInput(e.target.value)}
+<<<<<<< HEAD
                       title="Time of day to start a drain over the selected eligible issues"
                     />
                     {/* Per-issue scope (issue 192, ADR-0024): defaults to every
@@ -909,6 +923,17 @@ export function Map({
                             : scheduleEligibleIds.filter((id) => !scheduleExcludedIds.has(id));
                         onScheduleDrain(fireAt, cap ?? 2, selectedIds);
                         setScheduleExcludedIds(new Set());
+=======
+                      title="Time of day to start a drain over the whole eligible backlog"
+                    />
+                    <button
+                      className="map__schedule-arm"
+                      disabled={nextOccurrenceOfTimeOfDay(scheduleTimeInput, Date.now()) === null}
+                      onClick={() => {
+                        const fireAt = nextOccurrenceOfTimeOfDay(scheduleTimeInput, Date.now());
+                        if (fireAt === null) return;
+                        onScheduleDrain(fireAt, cap ?? 2);
+>>>>>>> afk/193-scheduled-drain-power-save-blocker
                       }}
                       title="Schedule a drain to start at this time (today, or tomorrow if it's already passed)"
                     >

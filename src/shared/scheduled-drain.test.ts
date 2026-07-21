@@ -5,6 +5,7 @@ import {
   isDueToFire,
   scheduleDrain,
 <<<<<<< HEAD
+<<<<<<< HEAD
   scheduledDrainSkipMessage,
   scheduledDrainSkipReason,
   type ScheduledDrainGateInput,
@@ -15,6 +16,10 @@ import type { GitBranchStatusResult } from './ipc-contract';
   type ScheduledDrainState,
 } from './scheduled-drain';
 >>>>>>> afk/192-scope-scheduled-drain-by-selection
+=======
+  type ScheduledDrainState,
+} from './scheduled-drain';
+>>>>>>> afk/193-scheduled-drain-power-save-blocker
 
 describe('scheduled-drain', () => {
   it('IDLE_SCHEDULE starts idle and is never due', () => {
@@ -50,6 +55,7 @@ describe('scheduled-drain', () => {
   it('isDueToFire is false for an idle state at any time', () => {
     expect(isDueToFire(IDLE_SCHEDULE, Number.MAX_SAFE_INTEGER)).toBe(false);
   });
+<<<<<<< HEAD
 
   it('scheduleDrain carries an optional selection scope through to the pending state (issue 192)', () => {
     const state = scheduleDrain(1_000, 3, [2, 4]);
@@ -190,3 +196,6 @@ describe('scheduledDrainSkipMessage', () => {
 });
 =======
 >>>>>>> afk/192-scope-scheduled-drain-by-selection
+=======
+});
+>>>>>>> afk/193-scheduled-drain-power-save-blocker

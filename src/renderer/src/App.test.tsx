@@ -259,6 +259,7 @@ describe('App.tsx state-seam harness', () => {
   }, 10000);
 
 <<<<<<< HEAD
+<<<<<<< HEAD
   it('scheduled drain (issue 191): a protected branch skips instead of prompting, and notifies the reason', async () => {
     const projectPath = '/repo/scheduled-drain-skip-project';
     (bridge.listProjects as any).mockResolvedValue({
@@ -366,6 +367,8 @@ describe('App.tsx state-seam harness', () => {
     expect(mapPropsRef.current.schedule).toEqual({ kind: 'idle' });
   }, 10000);
 
+=======
+>>>>>>> afk/193-scheduled-drain-power-save-blocker
   it('scheduled drain (issue 190): a Project switch drops the pending schedule — it never fires into the new Project, nothing persists', async () => {
     const projectA = '/repo/schedule-switch-a';
     const projectB = '/repo/schedule-switch-b';

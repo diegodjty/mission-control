@@ -126,7 +126,11 @@ import {
 } from './app/appHelpers';
 import { newRun, type InboxFocus, type TrackedRun } from './app/appTypes';
 import { useMergeLane, type ProtectedMergeLandTarget } from './app/useMergeLane';
+<<<<<<< HEAD
 import { useDrain, type DrainBranchPromptTarget } from './app/useDrain';
+=======
+import { useDrain } from './app/useDrain';
+>>>>>>> afk/193-scheduled-drain-power-save-blocker
 import { useScheduledDrain } from './app/useScheduledDrain';
 import { useLauncher } from './app/useLauncher';
 import { RunTile } from './RunTile';
@@ -2185,6 +2189,7 @@ export function App(): JSX.Element {
 
   // --- Scheduled drain (issue 190, ADR-0024) --------------------------------
 <<<<<<< HEAD
+<<<<<<< HEAD
   // A deferred press of the Drain control: firing calls `drain.scheduledFire`
   // (issue 191) — every gate the manual Drain button's `guardedStartDrain`
   // would check (branch guard, mid-merge, eligibility, git-init) still
@@ -2197,6 +2202,8 @@ export function App(): JSX.Element {
   // nothing left behind.
   const scheduledDrain = useScheduledDrain(drain.scheduledFire);
 =======
+=======
+>>>>>>> afk/193-scheduled-drain-power-save-blocker
   // A deferred press of the Drain control: firing calls the SAME
   // `guardedStartDrain` the button's onClick does (branch guard, git-init
   // gate, eligibility gate — every refusal the manual path has still applies
@@ -2205,7 +2212,10 @@ export function App(): JSX.Element {
   // lives only in this hook's `useState`, so quitting MC or closing this
   // Project's Window drops it with nothing left behind.
   const scheduledDrain = useScheduledDrain(drain.guardedStartDrain);
+<<<<<<< HEAD
 >>>>>>> afk/192-scope-scheduled-drain-by-selection
+=======
+>>>>>>> afk/193-scheduled-drain-power-save-blocker
   scheduledDrainResetRef.current = scheduledDrain.reset;
 
   // Resume whichever Run/drain the branch prompt is holding, bypassing the

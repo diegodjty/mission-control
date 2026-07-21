@@ -70,6 +70,7 @@ describe('useScheduledDrain', () => {
     expect(onFire).toHaveBeenCalledTimes(1);
   });
 
+<<<<<<< HEAD
   it('fires onFire with the scheduled selection scope (issue 192) when one was armed', () => {
     const onFire = vi.fn();
     const { result } = renderHook(() => useScheduledDrain(onFire));
@@ -86,6 +87,8 @@ describe('useScheduledDrain', () => {
     expect(onFire).toHaveBeenCalledWith(2, [1, 3]);
   });
 
+=======
+>>>>>>> afk/193-scheduled-drain-power-save-blocker
   it('reset() clears a pending schedule (the Project-switch teardown) and it never fires', () => {
     const onFire = vi.fn();
     const { result } = renderHook(() => useScheduledDrain(onFire));

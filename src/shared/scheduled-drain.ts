@@ -15,9 +15,12 @@
  * drops this state, so a schedule that hasn't fired yet never fires at all.
  */
 <<<<<<< HEAD
+<<<<<<< HEAD
 import type { GitBranchStatusResult } from './ipc-contract';
 =======
 >>>>>>> afk/192-scope-scheduled-drain-by-selection
+=======
+>>>>>>> afk/193-scheduled-drain-power-save-blocker
 
 /** No drain is armed. */
 export interface IdleSchedule {
@@ -31,6 +34,7 @@ export interface PendingSchedule {
   fireAt: number;
   /** The concurrency cap the deferred drain start applies — same meaning as a manual Drain's cap. */
   cap: number;
+<<<<<<< HEAD
   /**
    * The in-scope issue ids chosen at schedule time (issue 192, ADR-0024), or
    * `undefined` for "all eligible" — the same "absent ⇒ no filter" convention
@@ -39,6 +43,8 @@ export interface PendingSchedule {
    * `cap`: selection is which issues at all, cap is how many at once.
    */
   selectedIds?: readonly number[];
+=======
+>>>>>>> afk/193-scheduled-drain-power-save-blocker
 }
 
 export type ScheduledDrainState = IdleSchedule | PendingSchedule;
@@ -46,6 +52,7 @@ export type ScheduledDrainState = IdleSchedule | PendingSchedule;
 /** The state before anything is ever scheduled, or after a cancel/fire/reset. */
 export const IDLE_SCHEDULE: ScheduledDrainState = { kind: 'idle' };
 
+<<<<<<< HEAD
 /**
  * Arm a schedule for `fireAt`, replacing any existing pending one.
  * `selectedIds` omitted/undefined ⇒ every eligible issue is in scope at fire
@@ -62,6 +69,11 @@ export function scheduleDrain(
     cap: Math.max(1, Math.floor(cap) || 1),
     ...(selectedIds === undefined ? {} : { selectedIds }),
   };
+=======
+/** Arm a schedule for `fireAt`, replacing any existing pending one. */
+export function scheduleDrain(fireAt: number, cap: number): ScheduledDrainState {
+  return { kind: 'pending', fireAt, cap: Math.max(1, Math.floor(cap) || 1) };
+>>>>>>> afk/193-scheduled-drain-power-save-blocker
 }
 
 /** Disarm a pending schedule before it fires. */
@@ -73,6 +85,7 @@ export function cancelSchedule(): ScheduledDrainState {
 export function isDueToFire(state: ScheduledDrainState, now: number): boolean {
   return state.kind === 'pending' && now >= state.fireAt;
 }
+<<<<<<< HEAD
 <<<<<<< HEAD
 
 /**
@@ -172,3 +185,5 @@ export function scheduledDrainSkipMessage(reason: ScheduledDrainSkipReason): str
 }
 =======
 >>>>>>> afk/192-scope-scheduled-drain-by-selection
+=======
+>>>>>>> afk/193-scheduled-drain-power-save-blocker
