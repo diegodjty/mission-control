@@ -65,6 +65,11 @@ export interface ProjectIdentity {
   /** Where this Project's Receipts land. */
   completionsRoot: string;
   /**
+   * Where this Project's durable per-pass Guided QA Receipts land (issue 198)
+   * — sibling to `issuesRoot`/`completionsRoot`, one file per QA pass.
+   */
+  qaRoot: string;
+  /**
    * The repo a Run WITHOUT a `repo:` key targets (issue 72 makes Runs
    * repo-targeted per issue): the workbench CONFIG's default repo
    * (tilde-expanded), or — legacy — the repo itself. For a **repo-less**
@@ -181,6 +186,7 @@ export function projectIdentityFor(
       label: basename(root),
       issuesRoot: `${root}/issues`,
       completionsRoot: `${root}/issues/completions`,
+      qaRoot: `${root}/issues/qa`,
       defaultRepoPath: root,
       workspaceRoot: null,
       repoPaths: [root],
@@ -204,6 +210,7 @@ export function projectIdentityFor(
     label: located.project ?? basename(root),
     issuesRoot: `${root}/issues`,
     completionsRoot: `${root}/completions`,
+    qaRoot: `${root}/qa`,
     // Repo-less (no usable default repo) degrades to the workspace root — where
     // a scaffold Run creates code — not to `root` (the shared artifacts repo).
     defaultRepoPath: defaultRepo.ok

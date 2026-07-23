@@ -137,6 +137,7 @@ describe('projectIdentityFor', () => {
       label: 'repo-a',
       issuesRoot: '/repos/repo-a/issues',
       completionsRoot: '/repos/repo-a/issues/completions',
+      qaRoot: '/repos/repo-a/issues/qa',
       defaultRepoPath: '/repos/repo-a',
       workspaceRoot: null, // legacy projects declare no workspace root (ADR-0017)
       repoPaths: ['/repos/repo-a'],
@@ -156,6 +157,7 @@ describe('projectIdentityFor', () => {
       label: 'billing',
       issuesRoot: `${WB}/billing/issues`,
       completionsRoot: `${WB}/billing/completions`,
+      qaRoot: `${WB}/billing/qa`,
       defaultRepoPath: '/Users/dev/code/api', // tilde-expanded
       workspaceRoot: null, // this CONFIG declares no workspace_root (pre-0017 shape)
       repoPaths: ['/Users/dev/code/api', '/Users/dev/code/web'],
