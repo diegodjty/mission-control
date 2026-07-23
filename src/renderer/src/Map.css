@@ -1129,6 +1129,66 @@
   padding-top: 4px;
 }
 
+/* ---- Guided QA structured steps (issue 196) — display + copy only, no run. */
+.map__qa-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--teal-border);
+  border-radius: 8px;
+  background: var(--teal-bg);
+}
+
+.map__qa-steps-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--teal);
+}
+
+.map__qa-steps-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.map__qa-step {
+  font-size: 13px;
+}
+
+.map__qa-step-action {
+  font-weight: 500;
+}
+
+.map__qa-step-expected {
+  color: var(--fg-soft);
+}
+
+.map__qa-step-command {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--bg-inset, rgba(0, 0, 0, 0.15));
+}
+
+.map__qa-step-command code {
+  flex: 1;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.map__qa-step-copy {
+  font-size: 11px;
+  padding: 2px 8px;
+}
+
 /* ---- Issue-file Edit / Delete (issue 89): the Map's one write exception. */
 .map__issue-ops {
   display: flex;
