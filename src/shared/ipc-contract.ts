@@ -558,6 +558,15 @@ export interface RunTarget {
    */
   projectPath: string;
   /**
+   * The Project repo path (`main` checkout) this Run's worktree was cut from
+   * (issue 202): absent/equal to `projectPath` for a solo Run running directly
+   * on main; distinct from `projectPath` (the worktree cwd) once isolated. Set
+   * by the drain so main can tell a worktree apart from its repo root at
+   * session-exit time — e.g. to auto-discard a worktree a Worker exited from
+   * having claimed nothing (no status flip, no commits past its fork point).
+   */
+  repoPath?: string;
+  /**
    * Present exactly for a workbench Project's Run (issue 72, ADR-0015): the
    * explicit workbench paths the spawn prompt must carry — the issues root
    * (where the Worker finds/flips its issue and reads CONFIG.md beside it)
