@@ -35,6 +35,7 @@ import {
   type ChecklistItem,
 } from '../../shared/checklist-model';
 import { allChecked } from '../../shared/checklist-state-model';
+import { resolveQaSteps, type QaStepsParseResult } from '../../shared/qa-steps-model';
 
 /**
  * Turn an `<input type="time">` value ("HH:MM") into the next epoch-ms
@@ -504,6 +505,14 @@ export function Map({
     ? parseChecklist(checklistSourceText(selectedReceipt?.detail ?? null, selected.body))
     : [];
   const checklistItemCount = checklistItems.length;
+
+  // Guided QA (issue 196): a `## QA Steps` block, Receipt-else-body (mirrors
+  // the checklist precedence above), takes over the HITL detail slot from the
+  // bare 156 checklist when present. `null` means no block anywhere — the 156
+  // checklist above renders unchanged, unaffected by Guided QA's existence.
+  const qaSteps: QaStepsParseResult = selected
+    ? resolveQaSteps(selectedReceipt?.detail ?? null, selected.body)
+    : null;
 
   // Load the persisted checked flags whenever the selection (or its item
   // count) changes — a fresh read, same pattern as the issue-file editor's
@@ -1284,13 +1293,21 @@ export function Map({
                   finishedUnmergedIds={finishedUnmergedIds ?? []}
                 />
 
-                {/* Interactive HITL checklist (issue 156): only HITL issues
-                    render one — a normal issue shows nothing here. The human
-                    can close a HITL issue by hand from ANY non-done status
-                    (issue 195): a walkthrough never has to be drained/parked
-                    into `wip` first — `canMarkDone` enables straight from
-                    `open`, and the button shows even when there is no checklist. */}
-                {issue.hitl && (
+                {/* Guided QA (issue 196) vs. the plain issue-156 checklist:
+                    only HITL issues render either — a normal issue shows
+                    nothing here. A `## QA Steps` block (Receipt-else-body)
+                    takes over with the structured render; its absence (`null`)
+                    falls through to the 156 checklist exactly as before —
+                    Guided QA is purely additive, never a replacement for an
+                    issue that doesn't use the new block. The human can still
+                    close a HITL issue by hand from ANY non-done status (issue
+                    195): a walkthrough never has to be drained/parked into
+                    `wip` first — `canMarkDone` enables straight from `open`,
+                    and the button shows even when there is no checklist. */}
+                {issue.hitl && qaSteps !== null && (
+                  <QaStepsSection result={qaSteps} />
+                )}
+                {issue.hitl && qaSteps === null && (
                   <ChecklistSection
                     items={checklistItems}
                     checked={checklistChecked}
@@ -1775,6 +1792,67 @@ function DependencySection({
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Guided QA structured render (issue 196): a `## QA Steps` block's steps as
+ * read-only action / expected / copy-to-clipboard-command rows. Display +
+ * copy only — MC executes nothing during QA (ADR-0025 boundary), so a
+ * command never gets a "run" affordance, only "copy". A malformed block
+ * surfaces its parse error here rather than falling back to the legacy
+ * checklist, so a broken block is never mistaken for "no block at all".
+ * No verdict/pass-fail interaction yet (issue 198) and no done-flip wiring
+ * yet (issue 199) — this is display only.
+ */
+function QaStepsSection({ result }: { result: QaStepsParseResult }): JSX.Element | null {
+  if (result === null) return null;
+
+  if (result.kind === 'error') {
+    return (
+      <div className="map__qa-steps">
+        <span className="map__qa-steps-label">Guided QA</span>
+        <div className="map__checklist-error">{result.message}</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="map__qa-steps">
+      <span className="map__qa-steps-label">Guided QA</span>
+      <ol className="map__qa-steps-list">
+        {result.steps.map((step, index) => (
+          <li key={index} className="map__qa-step">
+            <div className="map__qa-step-action">{step.action}</div>
+            <div className="map__qa-step-expected">
+              <strong>Expected:</strong> {step.expected}
+            </div>
+            {step.command !== null && <QaStepCommand command={step.command} />}
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+/** One QA step's command: read-only, copy-to-clipboard only — never a run affordance. */
+function QaStepCommand({ command }: { command: string }): JSX.Element {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="map__qa-step-command">
+      <code>{command}</code>
+      <button
+        type="button"
+        className="map__qa-step-copy"
+        onClick={() => {
+          void navigator.clipboard.writeText(command);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        }}
+      >
+        {copied ? 'Copied' : 'Copy'}
+      </button>
     </div>
   );
 }
