@@ -57,6 +57,7 @@ import { scanReposWithPreviews } from './merge-preview-scan';
 import { GIT_FLOOR_NOTE } from '../shared/git-version';
 import { RunLogStore } from './run-log-store';
 import { ChecklistStateStore } from './checklist-state-store';
+import { loadQaSession, recordQaStepVerdict, startNewQaPass as startNewQaPassOnDisk } from './qa-session-store';
 import { ReceiptWatcher } from './receipt-watcher';
 import { PlanningWatcher } from './planning-watcher';
 import { DocsWatcher } from './docs-watcher';
@@ -131,6 +132,10 @@ import {
   type ChecklistStateGetRequest,
   type ChecklistStateToggleRequest,
   type ChecklistStateResult,
+  type QaSessionGetRequest,
+  type QaSessionSetStepVerdictRequest,
+  type QaSessionStartNewPassRequest,
+  type QaSessionResult,
   type IssueStatusObserveRequest,
   type IssueStatusObserveResult,
   type LauncherListResult,
@@ -258,6 +263,11 @@ function identityFor(projectKey: string): ProjectIdentity | null {
 /** The resolved issues root for a project key (legacy shape when unknown). */
 function issuesRootFor(projectKey: string): string {
   return identityFor(projectKey)?.issuesRoot ?? join(normalizeProjectKey(projectKey), 'issues');
+}
+
+/** The resolved Guided QA `qa/` root for a project key (issue 198). */
+function qaRootFor(projectKey: string): string {
+  return identityFor(projectKey)?.qaRoot ?? join(normalizeProjectKey(projectKey), 'issues', 'qa');
 }
 
 /**
@@ -979,6 +989,47 @@ function registerIpc(): void {
         req?.itemCount ?? 0,
       );
       return { checked };
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannel.QaSessionGet,
+    async (_event, req: QaSessionGetRequest): Promise<QaSessionResult> => {
+      const pass = await loadQaSession(
+        qaRootFor(req.projectPath),
+        req?.fileName ?? '',
+        req?.stepCount ?? 0,
+        new Date().toISOString(),
+      );
+      return { pass: pass.pass, started: pass.started, finished: pass.finished, results: pass.results, verdict: pass.verdict };
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannel.QaSessionSetStepVerdict,
+    async (_event, req: QaSessionSetStepVerdictRequest): Promise<QaSessionResult> => {
+      const pass = await recordQaStepVerdict(
+        qaRootFor(req.projectPath),
+        req?.fileName ?? '',
+        req?.stepCount ?? 0,
+        req?.index ?? -1,
+        { verdict: req?.verdict, note: req?.note },
+        new Date().toISOString(),
+      );
+      return { pass: pass.pass, started: pass.started, finished: pass.finished, results: pass.results, verdict: pass.verdict };
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannel.QaSessionStartNewPass,
+    async (_event, req: QaSessionStartNewPassRequest): Promise<QaSessionResult> => {
+      const pass = await startNewQaPassOnDisk(
+        qaRootFor(req.projectPath),
+        req?.fileName ?? '',
+        req?.stepCount ?? 0,
+        new Date().toISOString(),
+      );
+      return { pass: pass.pass, started: pass.started, finished: pass.finished, results: pass.results, verdict: pass.verdict };
     },
   );
 

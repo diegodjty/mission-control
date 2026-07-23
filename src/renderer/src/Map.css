@@ -1148,6 +1148,56 @@
   color: var(--teal);
 }
 
+.map__qa-steps-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.map__qa-steps-pass {
+  font-size: 11px;
+  color: var(--fg-soft);
+}
+
+.map__qa-step-verdict {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.map__qa-verdict-btn {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--teal-border);
+  background: transparent;
+  color: var(--fg-soft);
+  cursor: pointer;
+}
+
+.map__qa-verdict-btn--pass.map__qa-verdict-btn--active {
+  background: var(--green-bg, rgba(34, 197, 94, 0.15));
+  color: var(--green, #22c55e);
+  border-color: var(--green, #22c55e);
+}
+
+.map__qa-verdict-btn--fail.map__qa-verdict-btn--active {
+  background: var(--red-bg, rgba(239, 68, 68, 0.15));
+  color: var(--red, #ef4444);
+  border-color: var(--red, #ef4444);
+}
+
+.map__qa-step-note {
+  flex: 1;
+  font-size: 12px;
+  padding: 3px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--teal-border);
+  background: var(--bg-inset, rgba(0, 0, 0, 0.15));
+  color: inherit;
+}
+
 .map__qa-steps-list {
   margin: 0;
   padding-left: 18px;

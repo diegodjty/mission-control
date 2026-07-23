@@ -36,6 +36,7 @@ import {
 } from '../../shared/checklist-model';
 import { allChecked } from '../../shared/checklist-state-model';
 import { resolveQaSteps, type QaStepsParseResult } from '../../shared/qa-steps-model';
+import type { QaSessionResult } from '../../shared/ipc-contract';
 
 /**
  * Turn an `<input type="time">` value ("HH:MM") into the next epoch-ms
@@ -417,6 +418,23 @@ export function Map({
     setMarkDoneError(null);
   }, [selectedId]);
 
+  // Guided QA session (issue 198): the interactive pass/fail + note session
+  // for a structured `## QA Steps` issue. The durable `qa/` pass file on disk
+  // is the ONLY store — this state is just a view of the latest read/write,
+  // reloaded fresh whenever the selection changes (same pattern as the 156
+  // checklist state above).
+  const [qaSession, setQaSession] = useState<QaSessionResult | null>(null);
+  const [qaSessionLoaded, setQaSessionLoaded] = useState(false);
+  const [qaSessionBusy, setQaSessionBusy] = useState(false);
+  const [qaSessionError, setQaSessionError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setQaSession(null);
+    setQaSessionLoaded(false);
+    setQaSessionBusy(false);
+    setQaSessionError(null);
+  }, [selectedId]);
+
   // An Inbox click-through focuses its referenced issue (issue 80): select it
   // so the detail panel opens on it. Keyed on the bump too, so clicking the
   // same item again re-focuses even after the user selected something else.
@@ -564,6 +582,98 @@ export function Map({
       setChecklistError(err instanceof Error ? err.message : String(err));
     } finally {
       setChecklistBusy(false);
+    }
+  }
+
+  // Guided QA (issue 198): the step count the current structured render has —
+  // 0 when there is no `## QA Steps` block (a legacy checklist issue, or a
+  // parse error), so the session load below never fires for those.
+  const qaStepCount = qaSteps !== null && qaSteps.kind === 'steps' ? qaSteps.steps.length : 0;
+
+  // Load (or resume) the session from disk fresh whenever the selection or
+  // its step count changes — the qa/ pass file is the session's only store,
+  // so this is the same "seed from disk, never a stale push" pattern the
+  // checklist state above and the issue-file editor already use.
+  useEffect(() => {
+    if (!selected || !selected.hitl || resolvedPath === null || qaStepCount === 0) return;
+    let cancelled = false;
+    setQaSessionLoaded(false);
+    window.mc
+      .getQaSession({ projectPath: resolvedPath, fileName: selected.fileName, stepCount: qaStepCount })
+      .then((res) => {
+        if (cancelled) return;
+        setQaSession(res);
+        setQaSessionLoaded(true);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setQaSessionError(err instanceof Error ? err.message : String(err));
+        setQaSessionLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId, resolvedPath, qaStepCount]);
+
+  async function handleSetQaStepVerdict(
+    index: number,
+    verdict: 'unset' | 'pass' | 'fail',
+  ): Promise<void> {
+    if (!selected || resolvedPath === null) return;
+    setQaSessionBusy(true);
+    setQaSessionError(null);
+    try {
+      const res = await window.mc.setQaStepVerdict({
+        projectPath: resolvedPath,
+        fileName: selected.fileName,
+        stepCount: qaStepCount,
+        index,
+        verdict,
+      });
+      setQaSession(res);
+    } catch (err) {
+      setQaSessionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setQaSessionBusy(false);
+    }
+  }
+
+  async function handleSetQaStepNote(index: number, note: string): Promise<void> {
+    if (!selected || resolvedPath === null) return;
+    setQaSessionBusy(true);
+    setQaSessionError(null);
+    try {
+      const res = await window.mc.setQaStepVerdict({
+        projectPath: resolvedPath,
+        fileName: selected.fileName,
+        stepCount: qaStepCount,
+        index,
+        note: note.length > 0 ? note : null,
+      });
+      setQaSession(res);
+    } catch (err) {
+      setQaSessionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setQaSessionBusy(false);
+    }
+  }
+
+  async function handleStartNewQaPass(): Promise<void> {
+    if (!selected || resolvedPath === null) return;
+    setQaSessionBusy(true);
+    setQaSessionError(null);
+    try {
+      const res = await window.mc.startNewQaPass({
+        projectPath: resolvedPath,
+        fileName: selected.fileName,
+        stepCount: qaStepCount,
+      });
+      setQaSession(res);
+    } catch (err) {
+      setQaSessionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setQaSessionBusy(false);
     }
   }
 
@@ -1305,7 +1415,16 @@ export function Map({
                     `wip` first — `canMarkDone` enables straight from `open`,
                     and the button shows even when there is no checklist. */}
                 {issue.hitl && qaSteps !== null && (
-                  <QaStepsSection result={qaSteps} />
+                  <QaStepsSection
+                    result={qaSteps}
+                    session={qaSession}
+                    sessionLoaded={qaSessionLoaded}
+                    busy={qaSessionBusy}
+                    error={qaSessionError}
+                    onSetVerdict={(index, verdict) => void handleSetQaStepVerdict(index, verdict)}
+                    onSetNote={(index, note) => void handleSetQaStepNote(index, note)}
+                    onStartReQa={() => void handleStartNewQaPass()}
+                  />
                 )}
                 {issue.hitl && qaSteps === null && (
                   <ChecklistSection
@@ -1792,6 +1911,178 @@ function DependencySection({
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/** Session-verdict badge tone (issue 198): green/red/amber, mirroring the row's dot tones. */
+const QA_VERDICT_TONE: Record<QaSessionResult['verdict'], BadgeTone> = {
+  green: 'green',
+  failed: 'red',
+  'in-progress': 'amber',
+};
+const QA_VERDICT_LABEL: Record<QaSessionResult['verdict'], string> = {
+  green: 'Passed',
+  failed: 'Failed',
+  'in-progress': 'In progress',
+};
+
+/**
+ * Guided QA structured render (issue 198): a `## QA Steps` block's steps as
+ * action / expected / copy-to-clipboard-command rows, now interactive — each
+ * step takes a pass/fail verdict and an optional note, persisted immediately
+ * to the durable per-pass `qa/` Receipt (issue 198's own store; issue 196
+ * only rendered these read-only). Display + copy for the command stays exactly
+ * as before — MC still executes nothing during QA (ADR-0025 boundary). A
+ * malformed block still surfaces its parse error here rather than falling
+ * back to the legacy checklist.
+ */
+function QaStepsSection({
+  result,
+  session,
+  sessionLoaded,
+  busy,
+  error,
+  onSetVerdict,
+  onSetNote,
+  onStartReQa,
+}: {
+  result: QaStepsParseResult;
+  session: QaSessionResult | null;
+  sessionLoaded: boolean;
+  busy: boolean;
+  error: string | null;
+  onSetVerdict: (index: number, verdict: 'unset' | 'pass' | 'fail') => void;
+  onSetNote: (index: number, note: string) => void;
+  onStartReQa: () => void;
+}): JSX.Element | null {
+  if (result === null) return null;
+
+  if (result.kind === 'error') {
+    return (
+      <div className="map__qa-steps">
+        <span className="map__qa-steps-label">Guided QA</span>
+        <div className="map__checklist-error">{result.message}</div>
+      </div>
+    );
+  }
+
+  const decided = session !== null && session.verdict !== 'in-progress';
+
+  return (
+    <div className="map__qa-steps">
+      <div className="map__qa-steps-header">
+        <span className="map__qa-steps-label">Guided QA</span>
+        {session !== null && sessionLoaded && (
+          <>
+            <Badge tone={QA_VERDICT_TONE[session.verdict]}>
+              {QA_VERDICT_LABEL[session.verdict]}
+            </Badge>
+            <span className="map__qa-steps-pass">Pass {session.pass}</span>
+          </>
+        )}
+      </div>
+      <ol className="map__qa-steps-list">
+        {result.steps.map((step, index) => (
+          <li key={index} className="map__qa-step">
+            <div className="map__qa-step-action">{step.action}</div>
+            <div className="map__qa-step-expected">
+              <strong>Expected:</strong> {step.expected}
+            </div>
+            {step.command !== null && <QaStepCommand command={step.command} />}
+            {session !== null && sessionLoaded && (
+              <QaStepVerdictControl
+                stepResult={session.results[index] ?? { verdict: 'unset', note: null }}
+                disabled={busy || decided}
+                onSetVerdict={(verdict) => onSetVerdict(index, verdict)}
+                onSetNote={(note) => onSetNote(index, note)}
+              />
+            )}
+          </li>
+        ))}
+      </ol>
+      {error && <div className="map__checklist-error">{error}</div>}
+      {decided && (
+        <div className="map__checklist-done">
+          <button className="map__issue-op map__issue-op--save" onClick={onStartReQa} disabled={busy}>
+            {busy ? 'Starting…' : '↻ Start re-QA'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** One step's pass/fail toggle + note field (issue 198). Disabled once the
+ * session is decided — re-QA (a fresh pass) is the way to record another
+ * round, never editing a decided pass in place. */
+function QaStepVerdictControl({
+  stepResult,
+  disabled,
+  onSetVerdict,
+  onSetNote,
+}: {
+  stepResult: { verdict: 'unset' | 'pass' | 'fail'; note: string | null };
+  disabled: boolean;
+  onSetVerdict: (verdict: 'unset' | 'pass' | 'fail') => void;
+  onSetNote: (note: string) => void;
+}): JSX.Element {
+  const [note, setNote] = useState(stepResult.note ?? '');
+  useEffect(() => {
+    setNote(stepResult.note ?? '');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stepResult.note]);
+
+  return (
+    <div className="map__qa-step-verdict">
+      <button
+        type="button"
+        className={`map__qa-verdict-btn map__qa-verdict-btn--pass${stepResult.verdict === 'pass' ? ' map__qa-verdict-btn--active' : ''}`}
+        disabled={disabled}
+        onClick={() => onSetVerdict(stepResult.verdict === 'pass' ? 'unset' : 'pass')}
+      >
+        ✓ Pass
+      </button>
+      <button
+        type="button"
+        className={`map__qa-verdict-btn map__qa-verdict-btn--fail${stepResult.verdict === 'fail' ? ' map__qa-verdict-btn--active' : ''}`}
+        disabled={disabled}
+        onClick={() => onSetVerdict(stepResult.verdict === 'fail' ? 'unset' : 'fail')}
+      >
+        ✗ Fail
+      </button>
+      {stepResult.verdict === 'fail' && (
+        <input
+          type="text"
+          className="map__qa-step-note"
+          placeholder="What did you actually see?"
+          value={note}
+          disabled={disabled}
+          onChange={(e) => setNote(e.target.value)}
+          onBlur={() => onSetNote(note)}
+        />
+      )}
+    </div>
+  );
+}
+
+/** One QA step's command: read-only, copy-to-clipboard only — never a run affordance. */
+function QaStepCommand({ command }: { command: string }): JSX.Element {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="map__qa-step-command">
+      <code>{command}</code>
+      <button
+        type="button"
+        className="map__qa-step-copy"
+        onClick={() => {
+          void navigator.clipboard.writeText(command);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        }}
+      >
+        {copied ? 'Copied' : 'Copy'}
+      </button>
     </div>
   );
 }
