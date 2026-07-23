@@ -61,6 +61,8 @@ function baseDeps(overrides: Partial<DrainDeps> = {}): DrainDeps {
     runLogRef: { current: [] },
     activityNotesRef: { current: [] },
     projectPathRef: { current: '/repo' },
+    backlogRef: { current: overrides.backlog ?? backlogWith([]) },
+    finishedUnmergedIdsRef: { current: overrides.finishedUnmergedIds ?? [] },
     runStatusOf: () => 'finished',
     isIsolated: () => false,
     needsIsolation: () => false,
@@ -92,6 +94,7 @@ describe('useDrain', () => {
       }),
       writeDrainJournal: vi.fn().mockResolvedValue({ offerDebrief: false }),
       notifyScheduledDrainSkipped: vi.fn().mockResolvedValue({ notified: false }),
+      discardAfkRun: vi.fn().mockResolvedValue({ ok: true, error: null }),
     };
   });
 
@@ -359,6 +362,66 @@ describe('useDrain', () => {
 
     expect(result.current.draining).toBe(false);
     expect(result.current.drainMessage).toMatch(/no eligible issue remains/i);
+  });
+
+  it('issue 202: a slot-fill re-validates eligibility against the freshest backlog before spawning, and discards a worktree already cut for a now-ineligible issue', async () => {
+    // Issue 2 depends on issue 1. At decision time issue 1 reads `done`, so
+    // issue 2 is startable and `applyIsolation` gets called for it — but
+    // `applyIsolation` is real, async git I/O (issue 202): a worktree isn't
+    // actually cut until it resolves. We hold that resolution open, let the
+    // on-disk truth move (issue 1 reverts to `wip` — the dependency was never
+    // really done), then resolve it. The Worker must never spawn for issue 2,
+    // and the worktree/branch `applyIsolation` already cut for it must be
+    // discarded immediately rather than left stranded.
+    const backlogWithDependencyDone = backlogWith([
+      issue({ id: 1, status: 'done' }),
+      issue({ id: 2, fileName: '02-dependent.md', dependsOn: [1] }),
+    ]);
+    const backlogWithDependencyStillWip = backlogWith([
+      issue({ id: 1, status: 'wip' }),
+      issue({ id: 2, fileName: '02-dependent.md', dependsOn: [1] }),
+    ]);
+
+    let resolveApply!: (v: unknown) => void;
+    (window.mc.applyIsolation as any).mockReturnValue(
+      new Promise((resolve) => {
+        resolveApply = resolve;
+      }),
+    );
+
+    const setRuns = vi.fn();
+    const deps = baseDeps({ backlog: backlogWithDependencyDone, setRuns });
+    const { result, rerender } = renderHook((d: DrainDeps) => useDrain(d), { initialProps: deps });
+
+    act(() => {
+      result.current.guardedStartDrain(1);
+    });
+    rerender(deps);
+
+    await waitFor(() => expect(window.mc.applyIsolation).toHaveBeenCalled());
+
+    // The freshest on-disk state moves on while provisioning is in flight —
+    // the SAME ref object the hook reads, mutated directly (exactly what a
+    // live-mirror ref is for).
+    deps.backlogRef.current = backlogWithDependencyStillWip;
+
+    resolveApply({
+      placements: [{ issueId: 2, slug: '02-dependent', cwd: '/repo/.afk-worktrees/02-dependent', branch: 'afk/02-dependent' }],
+      queuedIssueIds: [],
+      nonGitRoots: [],
+    });
+
+    await waitFor(() =>
+      expect((window.mc as any).discardAfkRun).toHaveBeenCalledWith({
+        projectPath: '/repo',
+        slug: '02-dependent',
+      }),
+    );
+
+    const spawnedIssue2 = setRuns.mock.calls.some(([updater]) =>
+      (updater as (prev: TrackedRun[]) => TrackedRun[])([]).some((r) => r.target.issueId === 2),
+    );
+    expect(spawnedIssue2).toBe(false);
   });
 
   it('reset(): clears draining/message/debrief together', () => {

@@ -347,6 +347,21 @@ export const IpcChannel = {
    */
   QaSessionStartNewPass: 'qa-session:start-new-pass',
   /**
+   * renderer → main (invoke): file a failed step's prefilled draft as the
+   * next-numbered open issue (issue 199) — the same numbering/atomic-write
+   * path Quick fix (issue 81) uses. Records the filed issue's number against
+   * the failed step on the current QA pass. Resolves to a
+   * QaDraftIssueCreateResult.
+   */
+  QaDraftIssueCreate: 'qa-session:file-draft-issue',
+  /**
+   * renderer → main (invoke): record that the green one-click done-flip
+   * (issue 199) happened for the current QA pass — bookkeeping only, called
+   * after the source issue's frontmatter is already flipped via
+   * `IssueFileEdit`. Resolves to a QaSessionMarkDoneFlipResult.
+   */
+  QaSessionMarkDoneFlip: 'qa-session:mark-done-flip',
+  /**
    * renderer → main (send): watch a project's planning roots (issue 83,
    * ADR-0016) — the workbench project dir (top-level PRDs + `issues/`) and
    * the repo's `CONTEXT.md` + `docs/adr/` — for the Planning view's live
@@ -542,6 +557,15 @@ export interface RunTarget {
    * default repo — or a worktree of it under same-repo concurrency.
    */
   projectPath: string;
+  /**
+   * The Project repo path (`main` checkout) this Run's worktree was cut from
+   * (issue 202): absent/equal to `projectPath` for a solo Run running directly
+   * on main; distinct from `projectPath` (the worktree cwd) once isolated. Set
+   * by the drain so main can tell a worktree apart from its repo root at
+   * session-exit time — e.g. to auto-discard a worktree a Worker exited from
+   * having claimed nothing (no status flip, no commits past its fork point).
+   */
+  repoPath?: string;
   /**
    * Present exactly for a workbench Project's Run (issue 72, ADR-0015): the
    * explicit workbench paths the spawn prompt must carry — the issues root
@@ -1662,6 +1686,8 @@ export interface ChecklistStateResult {
 export interface QaStepResultDto {
   verdict: 'unset' | 'pass' | 'fail';
   note: string | null;
+  /** The issue number filed against this failed step (issue 199), or null. */
+  filedIssue: number | null;
 }
 
 /** A Guided QA session's shape as sent over IPC (issue 198). */
@@ -1671,6 +1697,8 @@ export interface QaSessionResult {
   finished: string | null;
   results: QaStepResultDto[];
   verdict: 'green' | 'failed' | 'in-progress';
+  /** Whether the green done-flip (issue 199) already happened for this pass. */
+  doneFlipped: boolean;
 }
 
 export interface QaSessionGetRequest {
@@ -1690,6 +1718,53 @@ export interface QaSessionSetStepVerdictRequest extends QaSessionGetRequest {
 }
 
 export type QaSessionStartNewPassRequest = QaSessionGetRequest;
+
+/** File a failed step's prefilled draft as a new standalone issue (issue 199). */
+export interface QaDraftIssueCreateRequest {
+  /** The Project key whose workbench backlog the draft is filed into. */
+  projectPath: string;
+  /** The source issue's plain `NN-slug.md` file name (the QA session's issue). */
+  fileName: string;
+  /** The failed step's index — the QA pass records the filed issue against it. */
+  stepIndex: number;
+  /** How many steps the current `## QA Steps` parse has (for alignment). */
+  stepCount: number;
+  /** The draft's title (human-edited or as-prefilled). */
+  title: string;
+  /** The draft's body (human-edited or as-prefilled). */
+  body: string;
+}
+
+export interface QaDraftIssueCreateResult {
+  /** True when the draft issue landed in the workbench backlog. */
+  ok: boolean;
+  /** A user-facing reason when `ok` is false; null on success. */
+  error: string | null;
+  /** The created draft issue's number, on success. */
+  issueId: number | null;
+  /** The created draft issue's `NN-slug.md` file name, on success. */
+  fileName: string | null;
+  /** The updated QA session (filedIssue recorded), on success. */
+  session: QaSessionResult | null;
+}
+
+/** Record that the green done-flip (issue 199) happened for the current QA pass. */
+export interface QaSessionMarkDoneFlipRequest {
+  /** The Project key the QA session is scoped under. */
+  projectPath: string;
+  /** The plain `NN-slug.md` file name whose QA session this is. */
+  fileName: string;
+  /** How many steps the current `## QA Steps` parse has (for alignment). */
+  stepCount: number;
+}
+
+export interface QaSessionMarkDoneFlipResult {
+  /** True when the QA pass recorded the flip. */
+  ok: boolean;
+  /** A user-facing reason when `ok` is false; null on success. */
+  error: string | null;
+  session: QaSessionResult | null;
+}
 
 /**
  * Watch (or, with an empty `workbenchDir`, stop watching) a project's planning
@@ -2064,6 +2139,23 @@ export interface MissionControlApi {
   setQaStepVerdict(req: QaSessionSetStepVerdictRequest): Promise<QaSessionResult>;
   /** Start a fresh pass (re-QA) on a decided session (issue 198). */
   startNewQaPass(req: QaSessionStartNewPassRequest): Promise<QaSessionResult>;
+  /**
+   * File a failed step's prefilled draft as the next-numbered open issue
+   * (issue 199) — the same next-free-number, atomic-write path Quick fix
+   * uses, workbench auto-committed. Records the new issue's number against
+   * the failed step on the current QA pass. Nothing is written until the
+   * human explicitly confirms (the never-silent Inbox rule).
+   */
+  fileQaDraftIssue(req: QaDraftIssueCreateRequest): Promise<QaDraftIssueCreateResult>;
+  /**
+   * Record that the green one-click done-flip (issue 199) happened on the
+   * current QA pass. Call only AFTER the source issue's frontmatter has
+   * actually been flipped through `editIssueFile` — this is bookkeeping, not
+   * the flip itself.
+   */
+  markQaSessionDoneFlipped(
+    req: QaSessionMarkDoneFlipRequest,
+  ): Promise<QaSessionMarkDoneFlipResult>;
   /**
    * Start (or, with an empty `workbenchDir`, stop) the Planning view's live
    * doc watch over the project's planning roots (issue 83).

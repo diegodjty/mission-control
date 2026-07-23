@@ -36,6 +36,8 @@ import {
 } from '../../shared/checklist-model';
 import { allChecked } from '../../shared/checklist-state-model';
 import { resolveQaSteps, type QaStepsParseResult } from '../../shared/qa-steps-model';
+import { qaPassFileName } from '../../shared/qa-session-model';
+import { qaDraftBody, qaDraftTitle } from '../../shared/qa-followup-model';
 import type { QaSessionResult } from '../../shared/ipc-contract';
 
 /**
@@ -428,11 +430,28 @@ export function Map({
   const [qaSessionBusy, setQaSessionBusy] = useState(false);
   const [qaSessionError, setQaSessionError] = useState<string | null>(null);
 
+  // Session-end actions (issue 199): fail → prefilled draft, green →
+  // one-click done-flip. Both sit behind an explicit confirm (the Inbox's
+  // never-silent rule) — nothing is written until the human confirms. Reset
+  // whenever the selection changes, same as the rest of the QA session state.
+  const [draftForStep, setDraftForStep] = useState<number | null>(null);
+  const [draftTitle, setDraftTitle] = useState('');
+  const [draftBody, setDraftBody] = useState('');
+  const [draftBusy, setDraftBusy] = useState(false);
+  const [draftError, setDraftError] = useState<string | null>(null);
+  const [confirmingQaFlip, setConfirmingQaFlip] = useState(false);
+
   useEffect(() => {
     setQaSession(null);
     setQaSessionLoaded(false);
     setQaSessionBusy(false);
     setQaSessionError(null);
+    setDraftForStep(null);
+    setDraftTitle('');
+    setDraftBody('');
+    setDraftBusy(false);
+    setDraftError(null);
+    setConfirmingQaFlip(false);
   }, [selectedId]);
 
   // An Inbox click-through focuses its referenced issue (issue 80): select it
@@ -674,6 +693,108 @@ export function Map({
       setQaSessionError(err instanceof Error ? err.message : String(err));
     } finally {
       setQaSessionBusy(false);
+    }
+  }
+
+  // Fail → prefilled draft (issue 199): open the draft editor for a failed
+  // step, seeded from the step's action/expected, the human's fail note, and
+  // provenance (QA pass file, source issue, completion Receipt when one
+  // exists) — all editable before the human confirms filing.
+  function openDraftForStep(index: number): void {
+    if (!selected || qaSteps === null || qaSteps.kind !== 'steps' || qaSession === null) return;
+    const step = qaSteps.steps[index];
+    if (!step) return;
+    setDraftError(null);
+    setDraftForStep(index);
+    setDraftTitle(qaDraftTitle(step));
+    setDraftBody(
+      qaDraftBody({
+        step,
+        note: qaSession.results[index]?.note ?? null,
+        sourceIssueFileName: selected.fileName,
+        qaPassFileName: qaPassFileName(selected.fileName, qaSession.pass),
+        receiptFileName: selectedReceipt !== null ? selected.fileName : null,
+      }),
+    );
+  }
+
+  function cancelDraft(): void {
+    setDraftForStep(null);
+    setDraftError(null);
+  }
+
+  async function confirmFileDraft(): Promise<void> {
+    if (!selected || resolvedPath === null || draftForStep === null) return;
+    setDraftBusy(true);
+    setDraftError(null);
+    try {
+      const res = await window.mc.fileQaDraftIssue({
+        projectPath: resolvedPath,
+        fileName: selected.fileName,
+        stepIndex: draftForStep,
+        stepCount: qaStepCount,
+        title: draftTitle,
+        body: draftBody,
+      });
+      if (!res.ok || res.session === null) {
+        setDraftError(res.error ?? 'Filing the draft failed.');
+        return;
+      }
+      setQaSession(res.session);
+      setDraftForStep(null);
+    } catch (err) {
+      setDraftError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDraftBusy(false);
+    }
+  }
+
+  // Green → one-click done-flip (issue 199): the SAME flip transform + write
+  // path as `markChecklistVerifiedDone` below (issue 156/89) — this is a
+  // distinct trigger (an all-pass Guided QA session), not a different flip.
+  // Bookkeeping the flip on the QA pass is a second, best-effort call: the
+  // issue is already done by the time it runs, so a failure there is
+  // reported but never rolled back.
+  async function markQaVerdictDone(): Promise<void> {
+    if (!selected || resolvedPath === null || qaSession === null) return;
+    setMarkDoneBusy(true);
+    setMarkDoneError(null);
+    try {
+      const read = await window.mc.readIssueFile({
+        projectPath: resolvedPath,
+        fileName: selected.fileName,
+      });
+      if (read.content === null) {
+        setMarkDoneError(read.error ?? 'Could not read the issue file.');
+        return;
+      }
+      const dateIso = new Date().toISOString().slice(0, 10);
+      const updated = markVerifiedDoneText(read.content, dateIso);
+      if (updated === null) {
+        setMarkDoneError('This issue is already done — nothing to flip.');
+        return;
+      }
+      const res = await window.mc.editIssueFile({
+        projectPath: resolvedPath,
+        fileName: selected.fileName,
+        content: updated,
+      });
+      if (!res.ok) {
+        setMarkDoneError(res.error ?? 'Save failed.');
+        return;
+      }
+      const flipped = await window.mc.markQaSessionDoneFlipped({
+        projectPath: resolvedPath,
+        fileName: selected.fileName,
+        stepCount: qaStepCount,
+      });
+      if (flipped.session !== null) setQaSession(flipped.session);
+      setConfirmingQaFlip(false);
+      // The reparsed backlog arrives via the live watch push — nothing to do.
+    } catch (err) {
+      setMarkDoneError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setMarkDoneBusy(false);
     }
   }
 
@@ -1424,6 +1545,23 @@ export function Map({
                     onSetVerdict={(index, verdict) => void handleSetQaStepVerdict(index, verdict)}
                     onSetNote={(index, note) => void handleSetQaStepNote(index, note)}
                     onStartReQa={() => void handleStartNewQaPass()}
+                    canMarkDone={issue.status !== 'done'}
+                    draftForStep={draftForStep}
+                    draftTitle={draftTitle}
+                    draftBody={draftBody}
+                    draftBusy={draftBusy}
+                    draftError={draftError}
+                    onOpenDraft={openDraftForStep}
+                    onCancelDraft={cancelDraft}
+                    onDraftTitleChange={setDraftTitle}
+                    onDraftBodyChange={setDraftBody}
+                    onConfirmDraft={() => void confirmFileDraft()}
+                    confirmingFlip={confirmingQaFlip}
+                    onRequestFlip={() => setConfirmingQaFlip(true)}
+                    onCancelFlip={() => setConfirmingQaFlip(false)}
+                    onConfirmFlip={() => void markQaVerdictDone()}
+                    markDoneBusy={markDoneBusy}
+                    markDoneError={markDoneError}
                   />
                 )}
                 {issue.hitl && qaSteps === null && (
@@ -1946,6 +2084,23 @@ function QaStepsSection({
   onSetVerdict,
   onSetNote,
   onStartReQa,
+  canMarkDone,
+  draftForStep,
+  draftTitle,
+  draftBody,
+  draftBusy,
+  draftError,
+  onOpenDraft,
+  onCancelDraft,
+  onDraftTitleChange,
+  onDraftBodyChange,
+  onConfirmDraft,
+  confirmingFlip,
+  onRequestFlip,
+  onCancelFlip,
+  onConfirmFlip,
+  markDoneBusy,
+  markDoneError,
 }: {
   result: QaStepsParseResult;
   session: QaSessionResult | null;
@@ -1955,6 +2110,24 @@ function QaStepsSection({
   onSetVerdict: (index: number, verdict: 'unset' | 'pass' | 'fail') => void;
   onSetNote: (index: number, note: string) => void;
   onStartReQa: () => void;
+  /** Whether the source issue may still be flipped (issue 195: any non-done status). */
+  canMarkDone: boolean;
+  draftForStep: number | null;
+  draftTitle: string;
+  draftBody: string;
+  draftBusy: boolean;
+  draftError: string | null;
+  onOpenDraft: (index: number) => void;
+  onCancelDraft: () => void;
+  onDraftTitleChange: (title: string) => void;
+  onDraftBodyChange: (body: string) => void;
+  onConfirmDraft: () => void;
+  confirmingFlip: boolean;
+  onRequestFlip: () => void;
+  onCancelFlip: () => void;
+  onConfirmFlip: () => void;
+  markDoneBusy: boolean;
+  markDoneError: string | null;
 }): JSX.Element | null {
   if (result === null) return null;
 
@@ -1968,6 +2141,10 @@ function QaStepsSection({
   }
 
   const decided = session !== null && session.verdict !== 'in-progress';
+  // Session-end actions (issue 199): a fail offers a per-step draft; an
+  // all-pass session offers the one-click done-flip. Never both — a session
+  // with any failed step must never offer the flip.
+  const offerFlip = canMarkDone && session !== null && session.verdict === 'green';
 
   return (
     <div className="map__qa-steps">
@@ -1983,23 +2160,73 @@ function QaStepsSection({
         )}
       </div>
       <ol className="map__qa-steps-list">
-        {result.steps.map((step, index) => (
-          <li key={index} className="map__qa-step">
-            <div className="map__qa-step-action">{step.action}</div>
-            <div className="map__qa-step-expected">
-              <strong>Expected:</strong> {step.expected}
-            </div>
-            {step.command !== null && <QaStepCommand command={step.command} />}
-            {session !== null && sessionLoaded && (
-              <QaStepVerdictControl
-                stepResult={session.results[index] ?? { verdict: 'unset', note: null }}
-                disabled={busy || decided}
-                onSetVerdict={(verdict) => onSetVerdict(index, verdict)}
-                onSetNote={(note) => onSetNote(index, note)}
-              />
-            )}
-          </li>
-        ))}
+        {result.steps.map((step, index) => {
+          const stepResult = session?.results[index] ?? {
+            verdict: 'unset' as const,
+            note: null,
+            filedIssue: null,
+          };
+          return (
+            <li key={index} className="map__qa-step">
+              <div className="map__qa-step-action">{step.action}</div>
+              <div className="map__qa-step-expected">
+                <strong>Expected:</strong> {step.expected}
+              </div>
+              {step.command !== null && <QaStepCommand command={step.command} />}
+              {session !== null && sessionLoaded && (
+                <QaStepVerdictControl
+                  stepResult={stepResult}
+                  disabled={busy || decided}
+                  onSetVerdict={(verdict) => onSetVerdict(index, verdict)}
+                  onSetNote={(note) => onSetNote(index, note)}
+                />
+              )}
+              {stepResult.verdict === 'fail' &&
+                (stepResult.filedIssue !== null ? (
+                  <div className="map__qa-step-filed">
+                    Filed as issue {String(stepResult.filedIssue).padStart(2, '0')}
+                  </div>
+                ) : draftForStep === index ? (
+                  <div className="map__qa-draft">
+                    <input
+                      type="text"
+                      className="map__qa-draft-title"
+                      value={draftTitle}
+                      disabled={draftBusy}
+                      onChange={(e) => onDraftTitleChange(e.target.value)}
+                    />
+                    <textarea
+                      className="map__qa-draft-body"
+                      value={draftBody}
+                      disabled={draftBusy}
+                      rows={8}
+                      onChange={(e) => onDraftBodyChange(e.target.value)}
+                    />
+                    <div className="map__qa-draft-actions">
+                      <button
+                        className="map__issue-op map__issue-op--save"
+                        onClick={onConfirmDraft}
+                        disabled={draftBusy}
+                      >
+                        {draftBusy ? 'Filing…' : 'File issue'}
+                      </button>
+                      <button className="map__issue-op" onClick={onCancelDraft} disabled={draftBusy}>
+                        Cancel
+                      </button>
+                    </div>
+                    {draftError && <div className="map__checklist-error">{draftError}</div>}
+                  </div>
+                ) : (
+                  <button
+                    className="map__issue-op"
+                    onClick={() => onOpenDraft(index)}
+                  >
+                    ✎ File issue
+                  </button>
+                ))}
+            </li>
+          );
+        })}
       </ol>
       {error && <div className="map__checklist-error">{error}</div>}
       {decided && (
@@ -2007,8 +2234,31 @@ function QaStepsSection({
           <button className="map__issue-op map__issue-op--save" onClick={onStartReQa} disabled={busy}>
             {busy ? 'Starting…' : '↻ Start re-QA'}
           </button>
+          {offerFlip &&
+            (session?.doneFlipped ? (
+              <span className="map__qa-step-filed">✓ Marked done</span>
+            ) : confirmingFlip ? (
+              <span className="map__qa-flip-confirm">
+                All passed — mark this issue done?
+                <button
+                  className="map__issue-op map__issue-op--save"
+                  onClick={onConfirmFlip}
+                  disabled={markDoneBusy}
+                >
+                  {markDoneBusy ? 'Marking done…' : 'Confirm'}
+                </button>
+                <button className="map__issue-op" onClick={onCancelFlip} disabled={markDoneBusy}>
+                  Cancel
+                </button>
+              </span>
+            ) : (
+              <button className="map__issue-op map__issue-op--save" onClick={onRequestFlip}>
+                ✓ All passed — mark done
+              </button>
+            ))}
         </div>
       )}
+      {markDoneError && <div className="map__checklist-error">{markDoneError}</div>}
     </div>
   );
 }

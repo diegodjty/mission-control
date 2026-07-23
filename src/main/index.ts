@@ -36,6 +36,7 @@ import {
   scanAfkBranches,
   switchBranch as switchGitBranchOp,
   worktreePathFor,
+  workerClaimedNothing,
 } from './git-worktree-adapter';
 import { isProtectedBranch } from '../shared/action-authority';
 import {
@@ -57,7 +58,14 @@ import { scanReposWithPreviews } from './merge-preview-scan';
 import { GIT_FLOOR_NOTE } from '../shared/git-version';
 import { RunLogStore } from './run-log-store';
 import { ChecklistStateStore } from './checklist-state-store';
-import { loadQaSession, recordQaStepVerdict, startNewQaPass as startNewQaPassOnDisk } from './qa-session-store';
+import {
+  loadQaSession,
+  recordDoneFlip,
+  recordFiledIssue,
+  recordQaStepVerdict,
+  startNewQaPass as startNewQaPassOnDisk,
+} from './qa-session-store';
+import { buildQaDraftIssue } from '../shared/qa-followup-model';
 import { ReceiptWatcher } from './receipt-watcher';
 import { PlanningWatcher } from './planning-watcher';
 import { DocsWatcher } from './docs-watcher';
@@ -136,6 +144,10 @@ import {
   type QaSessionSetStepVerdictRequest,
   type QaSessionStartNewPassRequest,
   type QaSessionResult,
+  type QaDraftIssueCreateRequest,
+  type QaDraftIssueCreateResult,
+  type QaSessionMarkDoneFlipRequest,
+  type QaSessionMarkDoneFlipResult,
   type IssueStatusObserveRequest,
   type IssueStatusObserveResult,
   type LauncherListResult,
@@ -618,6 +630,12 @@ function liveRunsByProject(): Map<string, number> {
 // plain-shell spawns never carry an issueId and so never contribute telemetry.
 interface RunSpawnMeta {
   projectPath: string;
+  /**
+   * The repo this Run's worktree was cut from (issue 202), distinct from
+   * `projectPath` once isolated. Absent/equal to `projectPath` for a solo Run
+   * on main — no worktree to auto-discard in that case.
+   */
+  repoPath: string | null;
   issueId: number;
   startedAt: number;
   headless: boolean;
@@ -681,6 +699,36 @@ const ptyManager = new PtySessionManager({
   },
 });
 
+/**
+ * Second line of defense against the stale-eligibility slot-fill race (issue
+ * 202): a drain Worker can always independently decide there's no eligible
+ * work — per its own skill-level pick logic — regardless of what the
+ * coordinator predicted when it cut this worktree. When that happens, the
+ * Worker exits having claimed NOTHING at all: no status flip, no commits.
+ * Recognize that shape and clean up the worktree/branch immediately instead
+ * of leaving it stranded for a human to notice — it never gets a chance to
+ * render as a "stranded" dot on the Map. A genuine crash/interruption
+ * mid-work always leaves at least a flip or a commit behind, so it still
+ * falls through to the ordinary stranded-recovery path (issue 22).
+ */
+async function autoDiscardIfUnclaimed(meta: RunSpawnMeta): Promise<void> {
+  if (!meta.repoPath || meta.repoPath === meta.projectPath) return;
+  const slug = slugFromFileName(meta.issueFileName);
+  try {
+    const unclaimed = await workerClaimedNothing(
+      meta.repoPath,
+      slug,
+      meta.workbench?.issuesRoot ?? null,
+    );
+    if (!unclaimed) return;
+    await discardWorktree(meta.repoPath, slug);
+    broadcastRegistryChanged();
+  } catch {
+    // Best-effort — a failed check/discard leaves the worktree for the
+    // ordinary stranded-recovery path to pick up on the next scan instead.
+  }
+}
+
 // The headless counterpart (issue 139, ADR-0001 amendment): drain Runs spawn a
 // plain `claude -p --output-format stream-json` child process here instead of an
 // interactive pty. Exit shares the PtyExit channel (so the Feed and the live-Run
@@ -708,6 +756,12 @@ const headlessManager = new HeadlessSessionManager({
           timedOutAt: new Date().toISOString(),
         });
       }
+    } else {
+      // Not a timeout kill — check whether this Worker claimed nothing at all
+      // (issue 202) before the meta is gone. A timeout kill is excluded: it
+      // ran out of time, which is a different story than never starting.
+      const meta = runSpawnMeta.get(msg.sessionId);
+      if (meta) void autoDiscardIfUnclaimed(meta);
     }
     finishRunSpawn(msg.sessionId);
   },
@@ -1001,7 +1055,7 @@ function registerIpc(): void {
         req?.stepCount ?? 0,
         new Date().toISOString(),
       );
-      return { pass: pass.pass, started: pass.started, finished: pass.finished, results: pass.results, verdict: pass.verdict };
+      return { pass: pass.pass, started: pass.started, finished: pass.finished, results: pass.results, verdict: pass.verdict, doneFlipped: pass.doneFlipped };
     },
   );
 
@@ -1016,7 +1070,7 @@ function registerIpc(): void {
         { verdict: req?.verdict, note: req?.note },
         new Date().toISOString(),
       );
-      return { pass: pass.pass, started: pass.started, finished: pass.finished, results: pass.results, verdict: pass.verdict };
+      return { pass: pass.pass, started: pass.started, finished: pass.finished, results: pass.results, verdict: pass.verdict, doneFlipped: pass.doneFlipped };
     },
   );
 
@@ -1029,7 +1083,111 @@ function registerIpc(): void {
         req?.stepCount ?? 0,
         new Date().toISOString(),
       );
-      return { pass: pass.pass, started: pass.started, finished: pass.finished, results: pass.results, verdict: pass.verdict };
+      return { pass: pass.pass, started: pass.started, finished: pass.finished, results: pass.results, verdict: pass.verdict, doneFlipped: pass.doneFlipped };
+    },
+  );
+
+  // --- Session-end actions (issue 199) ---------------------------------
+  // Fail → prefilled draft: the same next-free-number, atomic (`wx`) write
+  // Quick fix (issue 81) uses, into a STANDALONE issue (no `## Parent`), then
+  // records the filed issue's number against the failed step on the QA pass.
+  // Not ownership-gated, for the same reason QuickFixCreate isn't: writing an
+  // `open` issue to the workbench backlog is exactly what a human hand-add
+  // would be.
+  ipcMain.handle(
+    IpcChannel.QaDraftIssueCreate,
+    async (_event, req: QaDraftIssueCreateRequest): Promise<QaDraftIssueCreateResult> => {
+      const fail = (error: string): QaDraftIssueCreateResult => ({
+        ok: false,
+        error,
+        issueId: null,
+        fileName: null,
+        session: null,
+      });
+      const title = (req?.title ?? '').replace(/\s+/g, ' ').trim();
+      if (title.length === 0) return fail('The draft needs a title.');
+      try {
+        const identity = await resolveProjectIdentity(normalizeProjectKey(req.projectPath));
+        if (identity.kind !== 'workbench') {
+          return fail(
+            'Filing an issue writes to a workbench backlog — this project has none (ADR-0015).',
+          );
+        }
+        await mkdir(identity.issuesRoot, { recursive: true });
+        for (let attempt = 0; attempt < 5; attempt++) {
+          const existing = await readdir(identity.issuesRoot);
+          const id = nextIssueNumber(existing);
+          const fileName = quickFixFileName(id, title);
+          const content = buildQaDraftIssue({ id, title, body: req?.body ?? '' });
+          try {
+            await writeFile(join(identity.issuesRoot, fileName), content, {
+              encoding: 'utf8',
+              flag: 'wx',
+            });
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code === 'EEXIST') continue;
+            throw err;
+          }
+          const num = padIssueNumber(id);
+          void repoSerializer
+            .run(normalizeProjectKey(identity.key), () =>
+              commitWorkbenchProject(identity.key, `${identity.label}: issue ${num} filed from QA fail`),
+            )
+            .catch(() => {});
+          const pass = await recordFiledIssue(
+            qaRootFor(req.projectPath),
+            req?.fileName ?? '',
+            req?.stepCount ?? 0,
+            req?.stepIndex ?? -1,
+            id,
+            new Date().toISOString(),
+          );
+          return {
+            ok: true,
+            error: null,
+            issueId: id,
+            fileName,
+            session: {
+              pass: pass.pass,
+              started: pass.started,
+              finished: pass.finished,
+              results: pass.results,
+              verdict: pass.verdict,
+              doneFlipped: pass.doneFlipped,
+            },
+          };
+        }
+        return fail('Could not find a free issue number (concurrent writers?) — try again.');
+      } catch (err) {
+        return fail(err instanceof Error ? err.message : String(err));
+      }
+    },
+  );
+
+  // Green → done-flip bookkeeping: the flip itself already landed through
+  // `IssueFileEdit` (the same validated write path issue 89's editor uses) by
+  // the time the renderer calls this — this only records it on the QA pass.
+  ipcMain.handle(
+    IpcChannel.QaSessionMarkDoneFlip,
+    async (_event, req: QaSessionMarkDoneFlipRequest): Promise<QaSessionMarkDoneFlipResult> => {
+      const pass = await recordDoneFlip(
+        qaRootFor(req.projectPath),
+        req?.fileName ?? '',
+        req?.stepCount ?? 0,
+        new Date().toISOString(),
+      );
+      return {
+        ok: true,
+        error: null,
+        session: {
+          pass: pass.pass,
+          started: pass.started,
+          finished: pass.finished,
+          results: pass.results,
+          verdict: pass.verdict,
+          doneFlipped: pass.doneFlipped,
+        },
+      };
     },
   );
 
@@ -1356,6 +1514,7 @@ function registerIpc(): void {
     if (req.run) {
       runSpawnMeta.set(result.sessionId, {
         projectPath: req.run.projectPath,
+        repoPath: req.run.repoPath ?? null,
         issueId: req.run.issueId,
         startedAt: Date.now(),
         headless: req.run.headless === true,

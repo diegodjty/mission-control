@@ -97,9 +97,12 @@ export class PtySessionManager {
           },
           // Model + effort tiering (issues 154/155) fires only when the caller
           // declared them. This interactive Pane path is manual Runs (headless
-          // drain Runs route to the Headless Session Manager), so `req.run.model`
-          // / `req.run.effort` are unset here and the command stays un-tiered — a
-          // manual Run keeps the interactive default model and effort.
+          // drain Runs route to the Headless Session Manager). `req.run.effort` is
+          // always unset here (effort stays drain-only), and `req.run.model` is
+          // unset UNLESS the human picked a non-default tier in the manual-Run
+          // model picker (issue 203, the one interactive exception): the picker's
+          // default carries no model, so a plain click-through stays byte-identical
+          // to the un-tiered interactive default; a chosen tier injects `--model`.
           { model: req.run.model ?? null, effort: req.run.effort ?? null })
       : req.dispatcher
         ? resolveDispatcherCommand(process.env, {
