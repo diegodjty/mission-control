@@ -6,6 +6,7 @@ import {
   branchGuardDecision,
   type ActiveRun,
 } from '../../../shared/run-coordinator';
+import { eligibleForRun } from '../../../shared/run-eligibility';
 import { scheduledDrainSkipReason, scheduledDrainSkipMessage } from '../../../shared/scheduled-drain';
 import { overlapSerializationNote } from '../../../shared/file-overlap';
 import {
@@ -19,7 +20,13 @@ import { isNotableDrainActivity } from '../../../shared/workbench-memory';
 import { latestReceiptOutcomeFor } from '../../../shared/receipt-audit';
 import { resolveWorkerEffort, resolveWorkerModel } from '../../../shared/worker-model';
 import { resolveRunTimeoutMinutesFrom } from '../../../shared/run-timeout';
-import type { RunLogRecord, RunTarget, GitBranchStatusResult, ProjectView } from '../../../shared/ipc-contract';
+import type {
+  RunLogRecord,
+  RunTarget,
+  GitBranchStatusResult,
+  ProjectView,
+  ResolvedPlacement,
+} from '../../../shared/ipc-contract';
 import type { RunStatus } from '../../../shared/run-state';
 import type { ShellEvent } from '../../../shared/shell-model';
 import type { DispatcherAction } from '../../../shared/action-authority';
@@ -66,6 +73,16 @@ export interface DrainDeps {
   activityNotesRef: { current: { id: string; label: string }[] };
   /** Live mirror of `projectPath`, so a timer firing after a switch can skip. */
   projectPathRef: { current: string | null };
+  /**
+   * Live mirror of `backlog` (issue 202): a worktree isn't cut until
+   * `applyIsolation` (real git I/O) resolves, so the re-plan effect's snapshot
+   * of `backlog` at decision time can go stale by the time provisioning
+   * actually completes. Re-checking against this ref right before a Worker
+   * spawns catches an issue whose eligibility changed during that gap.
+   */
+  backlogRef: { current: Backlog | null };
+  /** Live mirror of `finishedUnmergedIds`, read for the same stale-snapshot reason. */
+  finishedUnmergedIdsRef: { current: number[] };
   runStatusOf: (run: TrackedRun) => RunStatus;
   isIsolated: (run: TrackedRun) => boolean;
   needsIsolation: (run: TrackedRun) => boolean;
@@ -147,6 +164,8 @@ export function useDrain(deps: DrainDeps): Drain {
     runLogRef,
     activityNotesRef,
     projectPathRef,
+    backlogRef,
+    finishedUnmergedIdsRef,
     runStatusOf,
     isIsolated,
     needsIsolation,
@@ -540,6 +559,10 @@ export function useDrain(deps: DrainDeps): Drain {
             issueFileName: issue.fileName,
             issueTitle: issue.title,
             projectPath: cwdOf(issue.id),
+            // The repo this Run's worktree was cut from (issue 202), distinct
+            // from `projectPath` once isolated — main uses it at session-exit
+            // to tell a worktree apart from its repo root.
+            repoPath: repoForIssueId(issue.id),
             // Workbench Runs carry the explicit workbench paths in the spawn
             // prompt (issue 72); null for a legacy Project.
             workbench: workbenchPathsForRun,
@@ -588,13 +611,54 @@ export function useDrain(deps: DrainDeps): Drain {
       setFocusedId((cur) => cur ?? additions[0]?.target.issueId ?? cur);
     };
 
+    // The eligibility snapshot above is only as fresh as THIS render — but a
+    // worktree isn't actually cut until `applyIsolation` (real git I/O, issue
+    // 202) resolves, and that can take real wall-clock time. Re-validate each
+    // about-to-spawn issue against the FRESHEST backlog available (the live
+    // mirrors, not this effect's closed-over `backlog`) right before a Worker
+    // spawns — closing the gap where a freed slot got filled against a plan
+    // computed earlier instead of the on-disk state at the moment of
+    // provisioning. An issue that already got a worktree/branch cut before
+    // going stale is discarded immediately rather than left stranded.
+    const dropNoLongerEligible = (
+      issues: typeof startableIssues,
+      placementBySlug: Map<string, ResolvedPlacement> | null,
+    ): typeof startableIssues => {
+      const freshIssues = backlogRef.current?.issues ?? [];
+      const freshFinishedUnmergedIds = finishedUnmergedIdsRef.current;
+      const kept: typeof startableIssues = [];
+      for (const issue of issues) {
+        if (eligibleForRun(issue, freshIssues, freshFinishedUnmergedIds)) {
+          kept.push(issue);
+          continue;
+        }
+        logNote(
+          `stale-eligibility:${drainSeq.current}:${issue.id}`,
+          'relay',
+          `Issue ${issue.id} was no longer eligible by the time its slot came up — skipped, not started.`,
+        );
+        const placement = placementBySlug?.get(slugOf(issue.fileName));
+        if (placement?.branch) {
+          void window.mc.discardAfkRun({
+            projectPath: repoForIssueId(issue.id),
+            slug: slugOf(issue.fileName),
+          });
+        }
+      }
+      return kept;
+    };
+
     void window.mc
       .applyIsolation({ projectPath, runs: isolationRuns })
       .then((result) => {
         if (cancelled) return;
         // (`Map` the identifier is the Map view component here, so use a record.)
         const cwdById: Record<number, string> = {};
-        for (const p of result.placements) cwdById[p.issueId] = p.cwd;
+        const placementBySlug = new Map<string, ResolvedPlacement>();
+        for (const p of result.placements) {
+          cwdById[p.issueId] = p.cwd;
+          placementBySlug.set(p.slug, p);
+        }
         // A non-isolatable target's concurrency clamp (issue 157, ADR-0017):
         // 2+ Runs contending for one un-worktree-able tree get only ONE live
         // placement back; the rest come back in `queuedIssueIds` with no cwd
@@ -602,7 +666,10 @@ export function useDrain(deps: DrainDeps): Drain {
         // `runs` keeps them eligible, so the next re-plan (the live Run
         // finishing frees the slot) picks them up naturally, one at a time.
         const queued = new Set(result.queuedIssueIds);
-        const toStart = startableIssues.filter((issue) => !queued.has(issue.id));
+        const toStart = dropNoLongerEligible(
+          startableIssues.filter((issue) => !queued.has(issue.id)),
+          placementBySlug,
+        );
         // Surface the "not a git repository" attention item once per path
         // (issue 157) instead of silently serializing the queue unexplained.
         for (const path of result.nonGitRoots) {
@@ -638,7 +705,7 @@ export function useDrain(deps: DrainDeps): Drain {
         }
         const safe = [...liveOnCheckout.values()].every((count) => canFallBackToMain(count));
         if (safe) {
-          addRuns((id) => repoForIssueId(id));
+          addRuns((id) => repoForIssueId(id), dropNoLongerEligible(startableIssues, null));
         } else {
           setDraining(false);
           const message =

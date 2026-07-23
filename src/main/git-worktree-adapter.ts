@@ -645,6 +645,56 @@ export async function discardWorktree(projectPath: string, slug: string): Promis
   }
 }
 
+/**
+ * Does the `afk/<slug>` branch carry ANY commit past its fork point from
+ * `defaultBranch` (issue 202)? False for a freshly-cut worktree branch a
+ * Worker never touched. Errs conservative — `true` on any git failure (an
+ * unreadable branch is never treated as "definitely empty").
+ */
+export async function hasCommitsSinceFork(
+  projectPath: string,
+  slug: string,
+  defaultBranch: string,
+): Promise<boolean> {
+  try {
+    const mergeBase = (
+      await git(projectPath, ['merge-base', defaultBranch, branchFor(slug)])
+    ).trim();
+    const count = (
+      await git(projectPath, ['rev-list', '--count', `${mergeBase}..${branchFor(slug)}`])
+    ).trim();
+    return Number(count) > 0;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * True when a Worker that opened in `slug`'s worktree exited having claimed
+ * NOTHING at all (issue 202): the issue's status was never flipped off `open`
+ * AND its branch carries no commit past its fork point. This is the "the
+ * Worker correctly found no eligible work and exited immediately" case (its
+ * own skill-level pick logic, independent of whatever the coordinator
+ * predicted) — distinct from a genuine crash/interruption mid-work (issue
+ * 22's stranded case), which always leaves at least a status flip or a
+ * commit behind. Errs conservative: any read failure returns `false` (never
+ * auto-discard on uncertainty).
+ */
+export async function workerClaimedNothing(
+  projectPath: string,
+  slug: string,
+  workbenchIssuesRoot: string | null = null,
+): Promise<boolean> {
+  const defaultBranch = await detectDefaultBranch(projectPath);
+  const [neverFlipped, noCommits] = await Promise.all([
+    workbenchIssuesRoot !== null
+      ? readIssueStatusAt(workbenchIssuesRoot, slug).then((status) => status === 'open')
+      : readCommittedIssueStatus(projectPath, slug).then((status) => status === 'open'),
+    hasCommitsSinceFork(projectPath, slug, defaultBranch).then((has) => !has),
+  ]);
+  return neverFlipped && noCommits;
+}
+
 /** Execute a list of Isolation Policy commands against real git, in order. */
 export async function applyCommands(
   projectPath: string,

@@ -36,6 +36,7 @@ import {
   scanAfkBranches,
   switchBranch as switchGitBranchOp,
   worktreePathFor,
+  workerClaimedNothing,
 } from './git-worktree-adapter';
 import { isProtectedBranch } from '../shared/action-authority';
 import {
@@ -618,6 +619,12 @@ function liveRunsByProject(): Map<string, number> {
 // plain-shell spawns never carry an issueId and so never contribute telemetry.
 interface RunSpawnMeta {
   projectPath: string;
+  /**
+   * The repo this Run's worktree was cut from (issue 202), distinct from
+   * `projectPath` once isolated. Absent/equal to `projectPath` for a solo Run
+   * on main — no worktree to auto-discard in that case.
+   */
+  repoPath: string | null;
   issueId: number;
   startedAt: number;
   headless: boolean;
@@ -681,6 +688,36 @@ const ptyManager = new PtySessionManager({
   },
 });
 
+/**
+ * Second line of defense against the stale-eligibility slot-fill race (issue
+ * 202): a drain Worker can always independently decide there's no eligible
+ * work — per its own skill-level pick logic — regardless of what the
+ * coordinator predicted when it cut this worktree. When that happens, the
+ * Worker exits having claimed NOTHING at all: no status flip, no commits.
+ * Recognize that shape and clean up the worktree/branch immediately instead
+ * of leaving it stranded for a human to notice — it never gets a chance to
+ * render as a "stranded" dot on the Map. A genuine crash/interruption
+ * mid-work always leaves at least a flip or a commit behind, so it still
+ * falls through to the ordinary stranded-recovery path (issue 22).
+ */
+async function autoDiscardIfUnclaimed(meta: RunSpawnMeta): Promise<void> {
+  if (!meta.repoPath || meta.repoPath === meta.projectPath) return;
+  const slug = slugFromFileName(meta.issueFileName);
+  try {
+    const unclaimed = await workerClaimedNothing(
+      meta.repoPath,
+      slug,
+      meta.workbench?.issuesRoot ?? null,
+    );
+    if (!unclaimed) return;
+    await discardWorktree(meta.repoPath, slug);
+    broadcastRegistryChanged();
+  } catch {
+    // Best-effort — a failed check/discard leaves the worktree for the
+    // ordinary stranded-recovery path to pick up on the next scan instead.
+  }
+}
+
 // The headless counterpart (issue 139, ADR-0001 amendment): drain Runs spawn a
 // plain `claude -p --output-format stream-json` child process here instead of an
 // interactive pty. Exit shares the PtyExit channel (so the Feed and the live-Run
@@ -708,6 +745,12 @@ const headlessManager = new HeadlessSessionManager({
           timedOutAt: new Date().toISOString(),
         });
       }
+    } else {
+      // Not a timeout kill — check whether this Worker claimed nothing at all
+      // (issue 202) before the meta is gone. A timeout kill is excluded: it
+      // ran out of time, which is a different story than never starting.
+      const meta = runSpawnMeta.get(msg.sessionId);
+      if (meta) void autoDiscardIfUnclaimed(meta);
     }
     finishRunSpawn(msg.sessionId);
   },
@@ -1356,6 +1399,7 @@ function registerIpc(): void {
     if (req.run) {
       runSpawnMeta.set(result.sessionId, {
         projectPath: req.run.projectPath,
+        repoPath: req.run.repoPath ?? null,
         issueId: req.run.issueId,
         startedAt: Date.now(),
         headless: req.run.headless === true,

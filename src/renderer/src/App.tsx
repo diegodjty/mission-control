@@ -225,6 +225,14 @@ export function App(): JSX.Element {
   // Coordinator can plan against them.
   const [backlog, setBacklog] = useState<Backlog | null>(null);
   const [projectPath, setProjectPath] = useState<string | null>(null);
+  // Live mirror of `backlog` (issue 202): read by the drain's re-plan effect
+  // right before a Worker spawns, so a worktree cut during a stale plan's
+  // async gap gets caught against the freshest on-disk state rather than the
+  // snapshot from when the plan was computed.
+  const backlogRef = useRef<Backlog | null>(null);
+  useEffect(() => {
+    backlogRef.current = backlog;
+  }, [backlog]);
 
   // --- Project Registry state (issue 09, ADR-0004; identity per issue 71) ---
   // This Window shows one Project; the single backend arbitrates ownership so
@@ -1364,6 +1372,11 @@ export function App(): JSX.Element {
     () => worktreeRunStates.filter((s) => s.kind === 'finished-unmerged').map((s) => s.issueId),
     [worktreeRunStates],
   );
+  // Live mirror of `finishedUnmergedIds` (issue 202), read alongside `backlogRef`.
+  const finishedUnmergedIdsRef = useRef<number[]>([]);
+  useEffect(() => {
+    finishedUnmergedIdsRef.current = finishedUnmergedIds;
+  }, [finishedUnmergedIds]);
   const strandedIds = useMemo(
     () => worktreeRunStates.filter((s) => s.kind === 'stranded').map((s) => s.issueId),
     [worktreeRunStates],
@@ -2211,6 +2224,8 @@ export function App(): JSX.Element {
     runLogRef,
     activityNotesRef,
     projectPathRef,
+    backlogRef,
+    finishedUnmergedIdsRef,
     runStatusOf,
     isIsolated,
     needsIsolation,

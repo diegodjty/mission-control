@@ -26,6 +26,8 @@ import {
   isParallel,
   worktreePathFor,
   worktreeBase,
+  hasCommitsSinceFork,
+  workerClaimedNothing,
 } from './git-worktree-adapter';
 import {
   branchFor,
@@ -199,6 +201,61 @@ describe('discardWorktree — recover a stranded Run (issue 22, real git)', () =
     await discardWorktree(repo, slug);
     await expect(discardWorktree(repo, slug)).resolves.toBeUndefined();
     expect(await listWorktreeSlugs(repo)).not.toContain(slug);
+  });
+});
+
+describe('workerClaimedNothing / hasCommitsSinceFork — a Worker that never claimed anything (issue 202, real git)', () => {
+  const slug = '07-claimed-nothing';
+
+  async function writeIssueFile(atPath: string, status: string): Promise<void> {
+    await mkdir(join(atPath, 'issues'), { recursive: true });
+    await writeFile(
+      join(atPath, 'issues', `${slug}.md`),
+      `---\nstatus: ${status}\ndepends_on: []\n---\n\n# ${slug}\n`,
+    );
+  }
+
+  it('reads true for a fresh worktree branch a Worker never touched — no flip, no commits', async () => {
+    await writeIssueFile(repo, 'open');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-m', 'seed issue file');
+
+    await createWorktree(repo, slug, branchFor(slug));
+
+    expect(await hasCommitsSinceFork(repo, slug, 'main')).toBe(false);
+    expect(await workerClaimedNothing(repo, slug)).toBe(true);
+
+    await removeWorktree(repo, slug);
+  });
+
+  it('reads false once the Worker commits its wip flip — a real claim, never auto-discardable', async () => {
+    await writeIssueFile(repo, 'open');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-m', 'seed issue file');
+
+    const path = await createWorktree(repo, slug, branchFor(slug));
+    await writeIssueFile(path, 'wip');
+    await git(path, 'add', '.');
+    await git(path, 'commit', '-m', 'claim');
+
+    expect(await hasCommitsSinceFork(repo, slug, 'main')).toBe(true);
+    expect(await workerClaimedNothing(repo, slug)).toBe(false);
+
+    await removeWorktree(repo, slug);
+  });
+
+  it('reads true from a workbench issues root when the workbench status is still open', async () => {
+    const workbenchIssuesRoot = join(scratch, 'workbench-issues');
+    await mkdir(workbenchIssuesRoot, { recursive: true });
+    await writeFile(
+      join(workbenchIssuesRoot, `${slug}.md`),
+      `---\nstatus: open\ndepends_on: []\n---\n\n# ${slug}\n`,
+    );
+    await createWorktree(repo, slug, branchFor(slug));
+
+    expect(await workerClaimedNothing(repo, slug, workbenchIssuesRoot)).toBe(true);
+
+    await removeWorktree(repo, slug);
   });
 });
 
