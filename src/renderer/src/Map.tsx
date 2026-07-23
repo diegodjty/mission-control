@@ -2088,67 +2088,6 @@ function QaStepCommand({ command }: { command: string }): JSX.Element {
 }
 
 /**
- * Guided QA structured render (issue 196): a `## QA Steps` block's steps as
- * read-only action / expected / copy-to-clipboard-command rows. Display +
- * copy only — MC executes nothing during QA (ADR-0025 boundary), so a
- * command never gets a "run" affordance, only "copy". A malformed block
- * surfaces its parse error here rather than falling back to the legacy
- * checklist, so a broken block is never mistaken for "no block at all".
- * No verdict/pass-fail interaction yet (issue 198) and no done-flip wiring
- * yet (issue 199) — this is display only.
- */
-function QaStepsSection({ result }: { result: QaStepsParseResult }): JSX.Element | null {
-  if (result === null) return null;
-
-  if (result.kind === 'error') {
-    return (
-      <div className="map__qa-steps">
-        <span className="map__qa-steps-label">Guided QA</span>
-        <div className="map__checklist-error">{result.message}</div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="map__qa-steps">
-      <span className="map__qa-steps-label">Guided QA</span>
-      <ol className="map__qa-steps-list">
-        {result.steps.map((step, index) => (
-          <li key={index} className="map__qa-step">
-            <div className="map__qa-step-action">{step.action}</div>
-            <div className="map__qa-step-expected">
-              <strong>Expected:</strong> {step.expected}
-            </div>
-            {step.command !== null && <QaStepCommand command={step.command} />}
-          </li>
-        ))}
-      </ol>
-    </div>
-  );
-}
-
-/** One QA step's command: read-only, copy-to-clipboard only — never a run affordance. */
-function QaStepCommand({ command }: { command: string }): JSX.Element {
-  const [copied, setCopied] = useState(false);
-  return (
-    <div className="map__qa-step-command">
-      <code>{command}</code>
-      <button
-        type="button"
-        className="map__qa-step-copy"
-        onClick={() => {
-          void navigator.clipboard.writeText(command);
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1500);
-        }}
-      >
-        {copied ? 'Copied' : 'Copy'}
-      </button>
-    </div>
-  );
-}
-
-/**
  * The interactive HITL checklist (issue 156): the parked issue's steps as
  * real tickable checkboxes, in order. Renders an empty state — never an
  * error — when the Receipt/body carries no checklist.
