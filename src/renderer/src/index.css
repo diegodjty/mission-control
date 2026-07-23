@@ -208,6 +208,40 @@ body {
   font-size: 12px;
 }
 
+/* Manual single-issue Run model picker (issue 203) — the radio list of
+   interactive-default + haiku/sonnet/opus/fable tiers, in the same dialog
+   chrome the branch/git prompts use. */
+.model-picker__options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 12px 0;
+  padding: 0;
+  border: 0;
+}
+.model-picker__option {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border, #2a2f3a);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.model-picker__option:hover {
+  background: var(--bg1, rgba(255, 255, 255, 0.03));
+}
+.model-picker__name {
+  font-weight: 600;
+}
+.model-picker__hint {
+  margin-left: auto;
+  color: var(--text-dim, #9aa4b2);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+}
+
 /* Live sanitize preview under the create-branch input (issue 174): a typed
    name that needed correcting shows what will actually be created, without
    blocking submission the way `.app__gitinit-error` does. */

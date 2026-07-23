@@ -48,6 +48,7 @@ vi.mock('./AppDialogs', () => ({
   BranchPromptDialog: () => null,
   OpenChoiceDialog: () => null,
   InterruptDialog: () => null,
+  ModelPickerDialog: () => null,
 }));
 vi.mock('./AppShell', () => ({
   AppShell: (props: any) => <div data-testid="shell-stub">{props.children}</div>,

@@ -15,7 +15,12 @@ import {
   BranchPromptDialog,
   OpenChoiceDialog,
   InterruptDialog,
+  ModelPickerDialog,
 } from './AppDialogs';
+import {
+  MANUAL_RUN_DEFAULT_CHOICE,
+  type ManualRunModelChoice,
+} from '../../shared/manual-run-model';
 import {
   workbenchProjectPath,
   needsYouCount,
@@ -260,6 +265,12 @@ export function App(): JSX.Element {
   const [branchPromptSelected, setBranchPromptSelected] = useState('');
   const [branchPromptBusy, setBranchPromptBusy] = useState(false);
   const [branchPromptError, setBranchPromptError] = useState<string | null>(null);
+  // The manual single-issue Run model picker (issue 203): a fresh "▶ Run" from
+  // the Map holds its target here while the human picks a model; null when the
+  // picker is closed. `modelChoice` is the pre-selected default (untiered) until
+  // they change it. Dismissing (null-ing `modelPrompt`) starts nothing.
+  const [modelPrompt, setModelPrompt] = useState<{ target: RunTarget } | null>(null);
+  const [modelChoice, setModelChoice] = useState<ManualRunModelChoice>(MANUAL_RUN_DEFAULT_CHOICE);
   // Mirrors `activeProjectKey` for the callbacks/effects that need the CURRENT
   // active Project without re-subscribing (issue 26): they compare it against
   // an incoming key via `isProjectSwitch` to decide whether to reset
@@ -1605,6 +1616,37 @@ export function App(): JSX.Element {
     [runs, branchStatus, startRun],
   );
 
+  // The Map's "▶ Run" entry point (issue 203): before a genuinely FRESH manual
+  // Run spawns its Pane, ask which model to use — the ONE interactive exception
+  // to "interactive entry points are never tiered." The chosen tier rides on the
+  // target's `model` field (confirmed default = null = today's untiered command)
+  // through the branch guard into the spawn edge. An already-tracked Run just
+  // re-surfaces its Pane (no fresh spawn, so no model to pick) — straight through
+  // the guard, exactly as `guardedStartRun` handles that case itself.
+  const handleMapRun = useCallback(
+    (target: RunTarget): void => {
+      const tracked = runs.some((r) => r.target.issueId === target.issueId);
+      if (tracked) {
+        guardedStartRun(target);
+        return;
+      }
+      setModelChoice(MANUAL_RUN_DEFAULT_CHOICE);
+      setModelPrompt({ target });
+    },
+    [runs, guardedStartRun],
+  );
+
+  // Confirm the model picker: start the held Run with the chosen tier on its
+  // target (null ⇒ no --model, byte-identical to before). Routed through the
+  // branch guard so the protected-branch/detached-HEAD prompt still fires — the
+  // model rides along on `branchPrompt.target` if that gate opens.
+  const confirmModelPrompt = useCallback((): void => {
+    if (modelPrompt === null) return;
+    const target: RunTarget = { ...modelPrompt.target, model: modelChoice };
+    setModelPrompt(null);
+    guardedStartRun(target);
+  }, [modelPrompt, modelChoice, guardedStartRun]);
+
   // The Launcher actions (issue 81, ADR-0016) — `startPlanning`,
   // `landOnNewProject`, the Just-talk handlers, `debriefDrain`,
   // `runQuickFixNow` — all live in `./app/useLauncher` now; `startRun` is fed
@@ -2644,6 +2686,16 @@ export function App(): JSX.Element {
     />
   );
 
+  const modelPickerDialog = (
+    <ModelPickerDialog
+      prompt={modelPrompt ? { issueTitle: modelPrompt.target.issueTitle } : null}
+      choice={modelChoice}
+      onChoiceChange={setModelChoice}
+      onConfirm={confirmModelPrompt}
+      onClose={() => setModelPrompt(null)}
+    />
+  );
+
   const openChoiceDialog = (
     <OpenChoiceDialog
       activeProjectLabel={projects.find((p) => p.key === activeProjectKey)?.label ?? null}
@@ -2722,6 +2774,7 @@ export function App(): JSX.Element {
           {openChoiceDialog}
           {gitInitDialog}
           {branchPromptDialog}
+          {modelPickerDialog}
           <CommandPalette
             open={paletteOpen}
             onOpenChange={setPaletteOpen}
@@ -2780,7 +2833,7 @@ export function App(): JSX.Element {
           )}
           <Map
             projectPath={activeProjectKey}
-            onRun={guardedStartRun}
+            onRun={handleMapRun}
             onBacklogLoaded={handleBacklogLoaded}
             runLog={runLog}
             activeRunIssueIds={activeRunIssueIds}

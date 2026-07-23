@@ -15,7 +15,8 @@ import {
   CORE_MEMORY_LABEL,
   CORE_TRUNCATION_MARKER,
 } from '../shared/workbench-memory';
-import { modelIdForTier } from '../shared/worker-model';
+import { modelIdForTier, type WorkerModelTier } from '../shared/worker-model';
+import { MANUAL_RUN_DEFAULT_CHOICE } from '../shared/manual-run-model';
 
 const ISSUE = {
   id: 3,
@@ -259,6 +260,32 @@ describe('drain-worker effort tiering (issue 155)', () => {
       effort: 'max',
     });
     expect(pty.args).not.toContain('--effort');
+  });
+});
+
+describe('manual single-issue Run model picker (issue 203)', () => {
+  // The manual "▶ Run" now flows the picker's choice into resolveRunCommand's
+  // `options.model` (the interactive Pane path). These assert the two spawn-edge
+  // behaviors the acceptance criteria pin down, tied to the picker's own default.
+
+  it('confirming the picker DEFAULT reproduces today\'s exact spawn command (no --model)', () => {
+    // AC #2: the pre-selected default is the interactive default (null tier), so
+    // the resolved command is byte-identical to the pre-203 un-tiered command.
+    const withDefault = resolveRunCommand({}, ISSUE, { model: MANUAL_RUN_DEFAULT_CHOICE });
+    expect(withDefault).toEqual(resolveRunCommand({}, ISSUE));
+    expect(withDefault).toEqual({ file: 'claude', args: [buildRunPrompt(ISSUE)] });
+    expect(withDefault.args).not.toContain('--model');
+  });
+
+  it('picking a non-default tier injects the matching --model <id> via modelIdForTier', () => {
+    // AC #3: a chosen tier reaches options.model and produces the SAME flag the
+    // drain side emits — one shared model-id mapping, never a second one.
+    for (const tier of ['haiku', 'sonnet', 'opus', 'fable'] as const satisfies readonly WorkerModelTier[]) {
+      const cmd = resolveRunCommand({}, ISSUE, { model: tier });
+      expect(cmd.args[0]).toBe('--model');
+      expect(cmd.args[1]).toBe(modelIdForTier(tier));
+      expect(cmd.args[cmd.args.length - 1]).toBe(buildRunPrompt(ISSUE));
+    }
   });
 });
 

@@ -1,5 +1,11 @@
 import { Button, Dialog, DialogActions, DialogContent, DialogDescription, DialogTitle } from './components';
 import type { GitBranchStatusResult } from '../../shared/ipc-contract';
+import {
+  MANUAL_RUN_MODEL_OPTIONS,
+  manualRunModelKey,
+  type ManualRunModelChoice,
+} from '../../shared/manual-run-model';
+import { modelIdForTier } from '../../shared/worker-model';
 
 export interface GitInitDialogProps {
   projectLabel: string | null;
@@ -345,6 +351,84 @@ export function BranchPromptDialog({
               </DialogActions>
             </>
           )}
+        </DialogContent>
+      )}
+    </Dialog>
+  );
+}
+
+export interface ModelPickerDialogProps {
+  /** The issue title the Run will scope to, or null when the picker is closed. */
+  prompt: { issueTitle: string } | null;
+  /** The currently-selected choice (`null` = the interactive default). */
+  choice: ManualRunModelChoice;
+  onChoiceChange: (choice: ManualRunModelChoice) => void;
+  /** Confirm — start the Run with the chosen model. */
+  onConfirm: () => void;
+  /** Dismiss (Escape / backdrop / Cancel) — starts nothing. */
+  onClose: () => void;
+}
+
+/**
+ * Manual single-issue Run model picker (issue 203): clicking "▶ Run" on one
+ * issue from the Map asks which Claude model to use BEFORE the Pane spawns —
+ * the ONE interactive exception to "interactive entry points are never tiered."
+ * Pre-selects the interactive default (confirming it reproduces today's exact
+ * spawn command, no `--model`); picking a tier flows it through `RunTarget.model`
+ * into `resolveRunCommand`'s `options.model` (the issue-154 plumbing). Dismissing
+ * starts nothing — no Run, no Pane — mirroring the app's other confirm-before-
+ * acting affordances (issue-delete, the branch prompt).
+ */
+export function ModelPickerDialog({
+  prompt,
+  choice,
+  onChoiceChange,
+  onConfirm,
+  onClose,
+}: ModelPickerDialogProps): JSX.Element {
+  const selectedKey = manualRunModelKey(choice);
+  return (
+    <Dialog
+      open={prompt !== null}
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
+    >
+      {prompt !== null && (
+        <DialogContent>
+          <DialogTitle>Choose a model for this Run</DialogTitle>
+          <DialogDescription>
+            Which Claude model should work <strong>{prompt.issueTitle}</strong>? The interactive
+            default is pre-selected — confirm it to run exactly as before, or pick a tier for just
+            this Run.
+          </DialogDescription>
+          <fieldset className="model-picker__options">
+            {MANUAL_RUN_MODEL_OPTIONS.map((opt) => (
+              <label key={opt.key} className="model-picker__option">
+                <input
+                  type="radio"
+                  name="manual-run-model"
+                  value={opt.key}
+                  checked={selectedKey === opt.key}
+                  onChange={() => onChoiceChange(opt.value)}
+                />
+                <span className="model-picker__name">
+                  {opt.value === null ? 'Interactive default' : opt.value}
+                </span>
+                <span className="model-picker__hint">
+                  {opt.value === null ? 'inherit — no --model flag' : modelIdForTier(opt.value)}
+                </span>
+              </label>
+            ))}
+          </fieldset>
+          <DialogActions>
+            <Button variant="primary" onClick={onConfirm}>
+              Run
+            </Button>
+            <Button variant="ghost" className="ui-btn--end" onClick={onClose}>
+              Cancel
+            </Button>
+          </DialogActions>
         </DialogContent>
       )}
     </Dialog>
