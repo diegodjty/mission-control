@@ -1239,6 +1239,57 @@
   padding: 2px 8px;
 }
 
+/* ---- Session-end actions (issue 199): fail → draft, green → done-flip. */
+.map__qa-step-filed {
+  font-size: 12px;
+  color: var(--green, #22c55e);
+  margin-top: 4px;
+}
+
+.map__qa-draft {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 8px;
+  border: 1px solid var(--red-border);
+  border-radius: 8px;
+  background: var(--red-bg);
+}
+
+.map__qa-draft-title {
+  font-size: 12px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--red-border);
+  background: var(--bg-inset, rgba(0, 0, 0, 0.15));
+  color: inherit;
+}
+
+.map__qa-draft-body {
+  font-size: 12px;
+  font-family: inherit;
+  padding: 6px;
+  border-radius: 6px;
+  border: 1px solid var(--red-border);
+  background: var(--bg-inset, rgba(0, 0, 0, 0.15));
+  color: inherit;
+  resize: vertical;
+}
+
+.map__qa-draft-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.map__qa-flip-confirm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--fg-soft);
+}
+
 /* ---- Issue-file Edit / Delete (issue 89): the Map's one write exception. */
 .map__issue-ops {
   display: flex;

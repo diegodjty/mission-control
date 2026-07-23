@@ -23,6 +23,12 @@ export interface QaStepResult {
   verdict: QaStepVerdict;
   /** Free-text note (e.g. "what I actually saw" on a fail), or null. */
   note: string | null;
+  /**
+   * The issue number filed against this step's fail (issue 199), or null when
+   * no draft has been filed yet. Recorded once — the Inbox rule is never-
+   * silent, so this is set only after the human explicitly confirms filing.
+   */
+  filedIssue: number | null;
 }
 
 /** The session-level verdict, derived from its steps. */
@@ -47,6 +53,7 @@ export function freshResults(stepCount: number): QaStepResult[] {
   return Array.from({ length: Math.max(0, stepCount) }, () => ({
     verdict: 'unset' as const,
     note: null,
+    filedIssue: null,
   }));
 }
 
@@ -60,7 +67,10 @@ export function alignResults(
   results: readonly QaStepResult[],
   stepCount: number,
 ): QaStepResult[] {
-  return Array.from({ length: Math.max(0, stepCount) }, (_, i) => results[i] ?? { verdict: 'unset', note: null });
+  return Array.from(
+    { length: Math.max(0, stepCount) },
+    (_, i) => results[i] ?? { verdict: 'unset', note: null, filedIssue: null },
+  );
 }
 
 /**
@@ -70,7 +80,7 @@ export function alignResults(
 export function setStepResult(
   results: readonly QaStepResult[],
   index: number,
-  update: { verdict?: QaStepVerdict; note?: string | null },
+  update: { verdict?: QaStepVerdict; note?: string | null; filedIssue?: number | null },
 ): QaStepResult[] {
   if (index < 0 || index >= results.length) return [...results];
   const next = results.slice();
@@ -78,6 +88,7 @@ export function setStepResult(
   next[index] = {
     verdict: update.verdict ?? current.verdict,
     note: update.note !== undefined ? update.note : current.note,
+    filedIssue: update.filedIssue !== undefined ? update.filedIssue : current.filedIssue,
   };
   return next;
 }
@@ -99,6 +110,12 @@ export interface QaPass {
   finished: string | null;
   results: QaStepResult[];
   verdict: QaSessionVerdict;
+  /**
+   * Whether the green one-click done-flip (issue 199) has already happened
+   * for this pass — recorded once the human confirms it, never inferred from
+   * `verdict` (a fail can never set it; a green session may still decline).
+   */
+  doneFlipped: boolean;
 }
 
 /**
@@ -134,6 +151,7 @@ export function resumeOrStartSession(
     finished: null,
     results: freshResults(stepCount),
     verdict: 'in-progress',
+    doneFlipped: false,
   };
 }
 
@@ -147,7 +165,7 @@ export function resumeOrStartSession(
 export function applyStepUpdate(
   pass: QaPass,
   index: number,
-  update: { verdict?: QaStepVerdict; note?: string | null },
+  update: { verdict?: QaStepVerdict; note?: string | null; filedIssue?: number | null },
   nowIso: string,
 ): QaPass {
   const results = setStepResult(pass.results, index, update);
@@ -160,6 +178,25 @@ export function applyStepUpdate(
   };
 }
 
+/**
+ * Record a filed issue's number against one failed step (issue 199's fail →
+ * draft action). Pure — the caller persists the returned pass. Does not touch
+ * verdict/`finished`: filing a draft is bookkeeping, never a verdict change.
+ */
+export function recordFiledIssue(pass: QaPass, index: number, issueId: number): QaPass {
+  return { ...pass, results: setStepResult(pass.results, index, { filedIssue: issueId }) };
+}
+
+/**
+ * Record that the green one-click done-flip (issue 199) happened for this
+ * pass. Pure — the caller persists the returned pass and is responsible for
+ * only calling this once the source issue's frontmatter has actually been
+ * flipped through the validated issue-file write path.
+ */
+export function markDoneFlipped(pass: QaPass): QaPass {
+  return { ...pass, doneFlipped: true };
+}
+
 // ---------------------------------------------------------------------------
 // Durable markdown artifact — the qa/ pass file's on-disk shape
 // ---------------------------------------------------------------------------
@@ -169,7 +206,7 @@ const STEP_HEADING = /(?:^|\n)##\s*Step\s+(\d+)\s*\n/g;
 // `[ \t]*` (not `\s*`) around the label/colon, for the same reason as
 // `frontmatterValue`: an empty field's `\s*` would swallow the newline and
 // keep matching into the next step's heading/field.
-const FIELD = /^[ \t]*-[ \t]*(verdict|note)[ \t]*:[ \t]*(.*)$/im;
+const FIELD = /^[ \t]*-[ \t]*(verdict|note|filedIssue)[ \t]*:[ \t]*(.*)$/im;
 
 function frontmatterValue(frontmatter: string, key: string): string | null {
   // `[ \t]*` (not `\s*`) after the colon: `\s` matches `\n`, which would let
@@ -203,12 +240,14 @@ export function serializeQaPass(pass: QaPass): string {
     `started: ${pass.started}`,
     `finished: ${pass.finished ?? ''}`,
     `verdict: ${pass.verdict}`,
+    `doneFlipped: ${pass.doneFlipped}`,
   ].join('\n');
 
   const steps = pass.results
     .map((r, i) => {
       const note = (r.note ?? '').replace(/\r?\n/g, ' ').trim();
-      return `## Step ${i + 1}\n- verdict: ${r.verdict}\n- note: ${note}`;
+      const filedIssue = r.filedIssue ?? '';
+      return `## Step ${i + 1}\n- verdict: ${r.verdict}\n- note: ${note}\n- filedIssue: ${filedIssue}`;
     })
     .join('\n\n');
 
@@ -238,6 +277,7 @@ export function parseQaPass(content: unknown): QaPass | null {
 
   const finishedRaw = frontmatterValue(frontmatter, 'finished');
   const verdictRaw = frontmatterValue(frontmatter, 'verdict');
+  const doneFlippedRaw = frontmatterValue(frontmatter, 'doneFlipped');
 
   const body = content.slice(fence[0].length);
   const starts: number[] = [];
@@ -250,18 +290,23 @@ export function parseQaPass(content: unknown): QaPass | null {
     const lines = chunk.split('\n');
     let verdict: QaStepVerdict = 'unset';
     let note: string | null = null;
+    let filedIssue: number | null = null;
     for (const line of lines) {
       const field = FIELD.exec(line);
       if (!field) continue;
-      if (field[1].toLowerCase() === 'verdict') {
+      const key = field[1].toLowerCase();
+      if (key === 'verdict') {
         const v = field[2].trim();
         if (isVerdict(v)) verdict = v;
-      } else {
+      } else if (key === 'note') {
         const n = field[2].trim();
         note = n.length > 0 ? n : null;
+      } else {
+        const n = Number(field[2].trim());
+        filedIssue = Number.isFinite(n) && n > 0 ? n : null;
       }
     }
-    return { verdict, note };
+    return { verdict, note, filedIssue };
   });
 
   return {
@@ -269,6 +314,7 @@ export function parseQaPass(content: unknown): QaPass | null {
     pass,
     started,
     finished: finishedRaw,
+    doneFlipped: doneFlippedRaw === 'true',
     results,
     verdict: isSessionVerdict(verdictRaw) ? verdictRaw : deriveSessionVerdict(results),
   };

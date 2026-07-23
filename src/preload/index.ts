@@ -76,6 +76,10 @@ import {
   type QaSessionSetStepVerdictRequest,
   type QaSessionStartNewPassRequest,
   type QaSessionResult,
+  type QaDraftIssueCreateRequest,
+  type QaDraftIssueCreateResult,
+  type QaSessionMarkDoneFlipRequest,
+  type QaSessionMarkDoneFlipResult,
   type IssueStatusObserveRequest,
   type IssueStatusObserveResult,
   type MainCommitRequest,
@@ -300,6 +304,14 @@ const api: MissionControlApi = {
 
   startNewQaPass: (req: QaSessionStartNewPassRequest): Promise<QaSessionResult> =>
     ipcRenderer.invoke(IpcChannel.QaSessionStartNewPass, req),
+
+  fileQaDraftIssue: (req: QaDraftIssueCreateRequest): Promise<QaDraftIssueCreateResult> =>
+    ipcRenderer.invoke(IpcChannel.QaDraftIssueCreate, req),
+
+  markQaSessionDoneFlipped: (
+    req: QaSessionMarkDoneFlipRequest,
+  ): Promise<QaSessionMarkDoneFlipResult> =>
+    ipcRenderer.invoke(IpcChannel.QaSessionMarkDoneFlip, req),
 
   watchPlanning: (req: PlanningWatchRequest): void => {
     ipcRenderer.send(IpcChannel.PlanningWatch, req);

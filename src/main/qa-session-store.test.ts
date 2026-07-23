@@ -35,8 +35,8 @@ describe('loadQaSession', () => {
     const session = await loadQaSession(qaRoot, ISSUE, 2, '2026-07-23T00:00:00.000Z');
     expect(session.pass).toBe(1);
     expect(session.results).toEqual([
-      { verdict: 'unset', note: null },
-      { verdict: 'unset', note: null },
+      { verdict: 'unset', note: null, filedIssue: null },
+      { verdict: 'unset', note: null, filedIssue: null },
     ]);
   });
 
@@ -69,8 +69,8 @@ describe('recordQaStepVerdict', () => {
     // Simulate quitting and relaunching: a fresh call reads only the disk file.
     const resumed = await loadQaSession(qaRoot, ISSUE, 2, '2026-07-23T01:00:00.000Z');
     expect(resumed.pass).toBe(1);
-    expect(resumed.results[0]).toEqual({ verdict: 'pass', note: null });
-    expect(resumed.results[1]).toEqual({ verdict: 'unset', note: null });
+    expect(resumed.results[0]).toEqual({ verdict: 'pass', note: null, filedIssue: null });
+    expect(resumed.results[1]).toEqual({ verdict: 'unset', note: null, filedIssue: null });
   });
 
   it('records a note alongside a fail verdict', async () => {
@@ -86,6 +86,7 @@ describe('recordQaStepVerdict', () => {
     expect(updated.results[0]).toEqual({
       verdict: 'fail',
       note: 'expected header missing, saw blank panel',
+      filedIssue: null,
     });
     expect(updated.verdict).toBe('failed');
     expect(updated.finished).toBe('2026-07-23T00:00:00.000Z');
@@ -118,7 +119,7 @@ describe('re-QA (starting a new pass on a decided session)', () => {
 
     const reQa = await startNewQaPass(qaRoot, ISSUE, 1, '2026-07-23T02:00:00.000Z');
     expect(reQa.pass).toBe(2);
-    expect(reQa.results).toEqual([{ verdict: 'unset', note: null }]);
+    expect(reQa.results).toEqual([{ verdict: 'unset', note: null, filedIssue: null }]);
 
     const allPasses = await listQaPasses(qaRoot, ISSUE);
     expect(allPasses).toHaveLength(2);

@@ -57,7 +57,14 @@ import { scanReposWithPreviews } from './merge-preview-scan';
 import { GIT_FLOOR_NOTE } from '../shared/git-version';
 import { RunLogStore } from './run-log-store';
 import { ChecklistStateStore } from './checklist-state-store';
-import { loadQaSession, recordQaStepVerdict, startNewQaPass as startNewQaPassOnDisk } from './qa-session-store';
+import {
+  loadQaSession,
+  recordDoneFlip,
+  recordFiledIssue,
+  recordQaStepVerdict,
+  startNewQaPass as startNewQaPassOnDisk,
+} from './qa-session-store';
+import { buildQaDraftIssue } from '../shared/qa-followup-model';
 import { ReceiptWatcher } from './receipt-watcher';
 import { PlanningWatcher } from './planning-watcher';
 import { DocsWatcher } from './docs-watcher';
@@ -136,6 +143,10 @@ import {
   type QaSessionSetStepVerdictRequest,
   type QaSessionStartNewPassRequest,
   type QaSessionResult,
+  type QaDraftIssueCreateRequest,
+  type QaDraftIssueCreateResult,
+  type QaSessionMarkDoneFlipRequest,
+  type QaSessionMarkDoneFlipResult,
   type IssueStatusObserveRequest,
   type IssueStatusObserveResult,
   type LauncherListResult,
@@ -1001,7 +1012,7 @@ function registerIpc(): void {
         req?.stepCount ?? 0,
         new Date().toISOString(),
       );
-      return { pass: pass.pass, started: pass.started, finished: pass.finished, results: pass.results, verdict: pass.verdict };
+      return { pass: pass.pass, started: pass.started, finished: pass.finished, results: pass.results, verdict: pass.verdict, doneFlipped: pass.doneFlipped };
     },
   );
 
@@ -1016,7 +1027,7 @@ function registerIpc(): void {
         { verdict: req?.verdict, note: req?.note },
         new Date().toISOString(),
       );
-      return { pass: pass.pass, started: pass.started, finished: pass.finished, results: pass.results, verdict: pass.verdict };
+      return { pass: pass.pass, started: pass.started, finished: pass.finished, results: pass.results, verdict: pass.verdict, doneFlipped: pass.doneFlipped };
     },
   );
 
@@ -1029,7 +1040,111 @@ function registerIpc(): void {
         req?.stepCount ?? 0,
         new Date().toISOString(),
       );
-      return { pass: pass.pass, started: pass.started, finished: pass.finished, results: pass.results, verdict: pass.verdict };
+      return { pass: pass.pass, started: pass.started, finished: pass.finished, results: pass.results, verdict: pass.verdict, doneFlipped: pass.doneFlipped };
+    },
+  );
+
+  // --- Session-end actions (issue 199) ---------------------------------
+  // Fail → prefilled draft: the same next-free-number, atomic (`wx`) write
+  // Quick fix (issue 81) uses, into a STANDALONE issue (no `## Parent`), then
+  // records the filed issue's number against the failed step on the QA pass.
+  // Not ownership-gated, for the same reason QuickFixCreate isn't: writing an
+  // `open` issue to the workbench backlog is exactly what a human hand-add
+  // would be.
+  ipcMain.handle(
+    IpcChannel.QaDraftIssueCreate,
+    async (_event, req: QaDraftIssueCreateRequest): Promise<QaDraftIssueCreateResult> => {
+      const fail = (error: string): QaDraftIssueCreateResult => ({
+        ok: false,
+        error,
+        issueId: null,
+        fileName: null,
+        session: null,
+      });
+      const title = (req?.title ?? '').replace(/\s+/g, ' ').trim();
+      if (title.length === 0) return fail('The draft needs a title.');
+      try {
+        const identity = await resolveProjectIdentity(normalizeProjectKey(req.projectPath));
+        if (identity.kind !== 'workbench') {
+          return fail(
+            'Filing an issue writes to a workbench backlog — this project has none (ADR-0015).',
+          );
+        }
+        await mkdir(identity.issuesRoot, { recursive: true });
+        for (let attempt = 0; attempt < 5; attempt++) {
+          const existing = await readdir(identity.issuesRoot);
+          const id = nextIssueNumber(existing);
+          const fileName = quickFixFileName(id, title);
+          const content = buildQaDraftIssue({ id, title, body: req?.body ?? '' });
+          try {
+            await writeFile(join(identity.issuesRoot, fileName), content, {
+              encoding: 'utf8',
+              flag: 'wx',
+            });
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code === 'EEXIST') continue;
+            throw err;
+          }
+          const num = padIssueNumber(id);
+          void repoSerializer
+            .run(normalizeProjectKey(identity.key), () =>
+              commitWorkbenchProject(identity.key, `${identity.label}: issue ${num} filed from QA fail`),
+            )
+            .catch(() => {});
+          const pass = await recordFiledIssue(
+            qaRootFor(req.projectPath),
+            req?.fileName ?? '',
+            req?.stepCount ?? 0,
+            req?.stepIndex ?? -1,
+            id,
+            new Date().toISOString(),
+          );
+          return {
+            ok: true,
+            error: null,
+            issueId: id,
+            fileName,
+            session: {
+              pass: pass.pass,
+              started: pass.started,
+              finished: pass.finished,
+              results: pass.results,
+              verdict: pass.verdict,
+              doneFlipped: pass.doneFlipped,
+            },
+          };
+        }
+        return fail('Could not find a free issue number (concurrent writers?) — try again.');
+      } catch (err) {
+        return fail(err instanceof Error ? err.message : String(err));
+      }
+    },
+  );
+
+  // Green → done-flip bookkeeping: the flip itself already landed through
+  // `IssueFileEdit` (the same validated write path issue 89's editor uses) by
+  // the time the renderer calls this — this only records it on the QA pass.
+  ipcMain.handle(
+    IpcChannel.QaSessionMarkDoneFlip,
+    async (_event, req: QaSessionMarkDoneFlipRequest): Promise<QaSessionMarkDoneFlipResult> => {
+      const pass = await recordDoneFlip(
+        qaRootFor(req.projectPath),
+        req?.fileName ?? '',
+        req?.stepCount ?? 0,
+        new Date().toISOString(),
+      );
+      return {
+        ok: true,
+        error: null,
+        session: {
+          pass: pass.pass,
+          started: pass.started,
+          finished: pass.finished,
+          results: pass.results,
+          verdict: pass.verdict,
+          doneFlipped: pass.doneFlipped,
+        },
+      };
     },
   );
 

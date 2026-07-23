@@ -13,9 +13,11 @@ import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   applyStepUpdate,
+  markDoneFlipped,
   parseQaPass,
   qaPassFileName,
   qaPassFilePrefix,
+  recordFiledIssue as recordFiledIssueOnPass,
   resumeOrStartSession,
   serializeQaPass,
   type QaPass,
@@ -94,6 +96,15 @@ export async function recordQaStepVerdict(
   return updated;
 }
 
+/** The highest-numbered pass on disk, or null when none exists yet. */
+async function latestPass(qaRoot: string, issueFileName: string): Promise<QaPass | null> {
+  const existing = await listQaPasses(qaRoot, issueFileName);
+  return existing.reduce<QaPass | null>(
+    (acc, p) => (acc === null || p.pass > acc.pass ? p : acc),
+    null,
+  );
+}
+
 /**
  * Start a fresh pass explicitly (re-QA on a decided session) even when the
  * latest pass is still in progress — used by an explicit "start re-QA"
@@ -109,11 +120,7 @@ export async function startNewQaPass(
   stepCount: number,
   nowIso: string,
 ): Promise<QaPass> {
-  const existing = await listQaPasses(qaRoot, issueFileName);
-  const highest = existing.reduce<QaPass | null>(
-    (acc, p) => (acc === null || p.pass > acc.pass ? p : acc),
-    null,
-  );
+  const highest = await latestPass(qaRoot, issueFileName);
   const nextPass = (highest?.pass ?? 0) + 1;
   const fresh: QaPass = {
     issue: issueFileName,
@@ -122,7 +129,49 @@ export async function startNewQaPass(
     finished: null,
     results: resumeOrStartSession([], issueFileName, stepCount, nowIso).results,
     verdict: 'in-progress',
+    doneFlipped: false,
   };
   await writePass(qaRoot, fresh);
   return fresh;
+}
+
+/**
+ * Record a filed issue's number against one failed step (issue 199), on the
+ * LATEST pass on disk — never `loadQaSession`'s resume-or-start, which would
+ * mistake a just-decided (failed) pass for one to roll past into a fresh
+ * pass N+1. Falls back to a fresh pass only when none exists yet (should not
+ * happen in practice — filing follows a recorded fail verdict).
+ */
+export async function recordFiledIssue(
+  qaRoot: string,
+  issueFileName: string,
+  stepCount: number,
+  index: number,
+  issueId: number,
+  nowIso: string,
+): Promise<QaPass> {
+  const session = (await latestPass(qaRoot, issueFileName)) ?? (await loadQaSession(qaRoot, issueFileName, stepCount, nowIso));
+  const updated = recordFiledIssueOnPass(session, index, issueId);
+  await writePass(qaRoot, updated);
+  return updated;
+}
+
+/**
+ * Record that the green one-click done-flip (issue 199) happened for the
+ * LATEST pass on disk — the same latest-pass shape as `recordFiledIssue`, for
+ * the same reason (the pass is already decided by the time this is called).
+ * The caller is responsible for only calling this once the source issue's
+ * frontmatter has actually been flipped through the validated issue-file
+ * write path.
+ */
+export async function recordDoneFlip(
+  qaRoot: string,
+  issueFileName: string,
+  stepCount: number,
+  nowIso: string,
+): Promise<QaPass> {
+  const session = (await latestPass(qaRoot, issueFileName)) ?? (await loadQaSession(qaRoot, issueFileName, stepCount, nowIso));
+  const updated = markDoneFlipped(session);
+  await writePass(qaRoot, updated);
+  return updated;
 }

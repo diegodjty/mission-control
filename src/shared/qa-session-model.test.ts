@@ -4,10 +4,12 @@ import {
   applyStepUpdate,
   deriveSessionVerdict,
   freshResults,
+  markDoneFlipped,
   nextPassNumber,
   parseQaPass,
   qaPassFileName,
   qaPassFilePrefix,
+  recordFiledIssue,
   resumeOrStartSession,
   serializeQaPass,
   setStepResult,
@@ -18,24 +20,24 @@ import {
 describe('deriveSessionVerdict', () => {
   it('all-pass → green', () => {
     const results: QaStepResult[] = [
-      { verdict: 'pass', note: null },
-      { verdict: 'pass', note: null },
+      { verdict: 'pass', note: null, filedIssue: null },
+      { verdict: 'pass', note: null, filedIssue: null },
     ];
     expect(deriveSessionVerdict(results)).toBe('green');
   });
 
   it('any fail → failed, even alongside passes', () => {
     const results: QaStepResult[] = [
-      { verdict: 'pass', note: null },
-      { verdict: 'fail', note: 'saw a blank panel' },
+      { verdict: 'pass', note: null, filedIssue: null },
+      { verdict: 'fail', note: 'saw a blank panel', filedIssue: null },
     ];
     expect(deriveSessionVerdict(results)).toBe('failed');
   });
 
   it('unvisited steps → in progress', () => {
     const results: QaStepResult[] = [
-      { verdict: 'pass', note: null },
-      { verdict: 'unset', note: null },
+      { verdict: 'pass', note: null, filedIssue: null },
+      { verdict: 'unset', note: null, filedIssue: null },
     ];
     expect(deriveSessionVerdict(results)).toBe('in-progress');
   });
@@ -46,8 +48,8 @@ describe('deriveSessionVerdict', () => {
 
   it('a fail outweighs an otherwise-complete pass set', () => {
     const results: QaStepResult[] = [
-      { verdict: 'fail', note: null },
-      { verdict: 'unset', note: null },
+      { verdict: 'fail', note: null, filedIssue: null },
+      { verdict: 'unset', note: null, filedIssue: null },
     ];
     expect(deriveSessionVerdict(results)).toBe('failed');
   });
@@ -56,37 +58,37 @@ describe('deriveSessionVerdict', () => {
 describe('freshResults / alignResults', () => {
   it('freshResults builds N unset entries', () => {
     expect(freshResults(3)).toEqual([
-      { verdict: 'unset', note: null },
-      { verdict: 'unset', note: null },
-      { verdict: 'unset', note: null },
+      { verdict: 'unset', note: null, filedIssue: null },
+      { verdict: 'unset', note: null, filedIssue: null },
+      { verdict: 'unset', note: null, filedIssue: null },
     ]);
   });
 
   it('alignResults pads a shorter array with unset entries', () => {
-    const results: QaStepResult[] = [{ verdict: 'pass', note: null }];
+    const results: QaStepResult[] = [{ verdict: 'pass', note: null, filedIssue: null }];
     expect(alignResults(results, 3)).toEqual([
-      { verdict: 'pass', note: null },
-      { verdict: 'unset', note: null },
-      { verdict: 'unset', note: null },
+      { verdict: 'pass', note: null, filedIssue: null },
+      { verdict: 'unset', note: null, filedIssue: null },
+      { verdict: 'unset', note: null, filedIssue: null },
     ]);
   });
 
   it('alignResults truncates a longer array', () => {
     const results: QaStepResult[] = [
-      { verdict: 'pass', note: null },
-      { verdict: 'fail', note: 'x' },
-      { verdict: 'pass', note: null },
+      { verdict: 'pass', note: null, filedIssue: null },
+      { verdict: 'fail', note: 'x', filedIssue: null },
+      { verdict: 'pass', note: null, filedIssue: null },
     ];
-    expect(alignResults(results, 1)).toEqual([{ verdict: 'pass', note: null }]);
+    expect(alignResults(results, 1)).toEqual([{ verdict: 'pass', note: null, filedIssue: null }]);
   });
 });
 
 describe('setStepResult', () => {
   it('updates one step verdict, leaving others untouched', () => {
     const results = freshResults(2);
-    const next = setStepResult(results, 1, { verdict: 'fail', note: 'expected header missing' });
-    expect(next[0]).toEqual({ verdict: 'unset', note: null });
-    expect(next[1]).toEqual({ verdict: 'fail', note: 'expected header missing' });
+    const next = setStepResult(results, 1, { verdict: 'fail', note: 'expected header missing', filedIssue: null });
+    expect(next[0]).toEqual({ verdict: 'unset', note: null, filedIssue: null });
+    expect(next[1]).toEqual({ verdict: 'fail', note: 'expected header missing', filedIssue: null });
   });
 
   it('is a no-op for an out-of-range index', () => {
@@ -95,9 +97,9 @@ describe('setStepResult', () => {
   });
 
   it('preserves the existing note when only the verdict is updated', () => {
-    const results: QaStepResult[] = [{ verdict: 'fail', note: 'saw nothing' }];
+    const results: QaStepResult[] = [{ verdict: 'fail', note: 'saw nothing', filedIssue: null }];
     const next = setStepResult(results, 0, { verdict: 'pass' });
-    expect(next[0]).toEqual({ verdict: 'pass', note: 'saw nothing' });
+    expect(next[0]).toEqual({ verdict: 'pass', note: 'saw nothing', filedIssue: null });
   });
 });
 
@@ -126,13 +128,14 @@ describe('resumeOrStartSession', () => {
       pass: 2,
       started: '2026-07-20T00:00:00.000Z',
       finished: null,
-      results: [{ verdict: 'pass', note: null }, { verdict: 'unset', note: null }],
+      results: [{ verdict: 'pass', note: null, filedIssue: null }, { verdict: 'unset', note: null, filedIssue: null }],
       verdict: 'in-progress',
+      doneFlipped: false,
     };
     const session = resumeOrStartSession([existing], '198-x.md', 2, '2026-07-23T00:00:00.000Z');
     expect(session.pass).toBe(2);
     expect(session.started).toBe('2026-07-20T00:00:00.000Z');
-    expect(session.results[0]).toEqual({ verdict: 'pass', note: null });
+    expect(session.results[0]).toEqual({ verdict: 'pass', note: null, filedIssue: null });
   });
 
   it('creates pass N+1 (never touching pass N) when the latest pass is decided', () => {
@@ -141,8 +144,9 @@ describe('resumeOrStartSession', () => {
       pass: 1,
       started: '2026-07-20T00:00:00.000Z',
       finished: '2026-07-20T01:00:00.000Z',
-      results: [{ verdict: 'pass', note: null }],
+      results: [{ verdict: 'pass', note: null, filedIssue: null }],
       verdict: 'green',
+      doneFlipped: false,
     };
     const session = resumeOrStartSession([decided], '198-x.md', 1, '2026-07-23T00:00:00.000Z');
     expect(session.pass).toBe(2);
@@ -159,12 +163,13 @@ describe('resumeOrStartSession', () => {
       pass: 1,
       started: '2026-07-20T00:00:00.000Z',
       finished: null,
-      results: [{ verdict: 'pass', note: null }],
+      results: [{ verdict: 'pass', note: null, filedIssue: null }],
       verdict: 'in-progress',
+      doneFlipped: false,
     };
     const session = resumeOrStartSession([existing], '198-x.md', 3, '2026-07-23T00:00:00.000Z');
     expect(session.results).toHaveLength(3);
-    expect(session.results[0]).toEqual({ verdict: 'pass', note: null });
+    expect(session.results[0]).toEqual({ verdict: 'pass', note: null, filedIssue: null });
   });
 });
 
@@ -176,6 +181,7 @@ describe('applyStepUpdate', () => {
     finished: null,
     results: freshResults(2),
     verdict: 'in-progress',
+    doneFlipped: false,
   };
 
   it('stamps finished the moment the session becomes decided', () => {
@@ -209,10 +215,11 @@ describe('serializeQaPass / parseQaPass round-trip', () => {
     started: '2026-07-23T18:00:00.000Z',
     finished: '2026-07-23T18:05:00.000Z',
     results: [
-      { verdict: 'pass', note: null },
-      { verdict: 'fail', note: 'expected header missing, saw blank panel' },
+      { verdict: 'pass', note: null, filedIssue: null },
+      { verdict: 'fail', note: 'expected header missing, saw blank panel', filedIssue: null },
     ],
     verdict: 'failed',
+    doneFlipped: false,
   };
 
   it('round-trips through serialize → parse unchanged', () => {
@@ -253,5 +260,49 @@ describe('qaPassFileName / qaPassFilePrefix', () => {
     const prefix = qaPassFilePrefix('198-x.md');
     expect(qaPassFileName('198-x.md', 1).startsWith(prefix)).toBe(true);
     expect(qaPassFileName('198-x.md', 12).startsWith(prefix)).toBe(true);
+  });
+});
+
+describe('recordFiledIssue / markDoneFlipped (issue 199)', () => {
+  const base: QaPass = {
+    issue: '198-x.md',
+    pass: 1,
+    started: '2026-07-20T00:00:00.000Z',
+    finished: '2026-07-20T01:00:00.000Z',
+    results: [
+      { verdict: 'pass', note: null, filedIssue: null },
+      { verdict: 'fail', note: 'blank panel', filedIssue: null },
+    ],
+    verdict: 'failed',
+    doneFlipped: false,
+  };
+
+  it('records a filed issue number against one step, leaving others untouched', () => {
+    const next = recordFiledIssue(base, 1, 42);
+    expect(next.results[1]).toEqual({ verdict: 'fail', note: 'blank panel', filedIssue: 42 });
+    expect(next.results[0]).toEqual(base.results[0]);
+  });
+
+  it('does not touch verdict/finished when recording a filed issue', () => {
+    const next = recordFiledIssue(base, 1, 42);
+    expect(next.verdict).toBe('failed');
+    expect(next.finished).toBe(base.finished);
+  });
+
+  it('is a no-op for an out-of-range index', () => {
+    expect(recordFiledIssue(base, 9, 42).results).toEqual(base.results);
+  });
+
+  it('marks doneFlipped without touching anything else', () => {
+    const green: QaPass = { ...base, verdict: 'green', results: [base.results[0]] };
+    const flipped = markDoneFlipped(green);
+    expect(flipped.doneFlipped).toBe(true);
+    expect(flipped.verdict).toBe('green');
+    expect(flipped.results).toEqual(green.results);
+  });
+
+  it('round-trips filedIssue/doneFlipped through serialize → parse', () => {
+    const withDraft = markDoneFlipped(recordFiledIssue(base, 1, 42));
+    expect(parseQaPass(serializeQaPass(withDraft))).toEqual(withDraft);
   });
 });
