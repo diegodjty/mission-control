@@ -80,6 +80,15 @@ export interface WorkerTask {
   /** The Receipt's `finished` stamp; injectable so re-runs are testable. */
   finished?: string;
   /**
+   * Issue 197: on a `needs-verification` exit, append a well-formed
+   * `## QA Steps` block (ADR-0025 syntax) to the Receipt's manual-verification
+   * body, alongside the existing freeform "Steps:" prose — exercising the
+   * emission side of issue 196's schema/parser end-to-end. Ignored for every
+   * other exit. Absent/false leaves the Receipt byte-identical to before this
+   * issue (the additive contract issue 197 requires).
+   */
+  qaSteps?: boolean;
+  /**
    * Linger (issue 65): write everything, then KEEP THE SESSION ALIVE — the way
    * a real claude Pane sits at its prompt after its final message instead of
    * exiting. The trace reports `sessionAlive: true` so the scenario feeds
@@ -123,8 +132,24 @@ export interface WorkerTrace {
   sessionAlive: boolean;
 }
 
+/**
+ * A well-formed `## QA Steps` block (ADR-0025 syntax) — human-judgment
+ * actions with expected outcomes, never machine-checkable assertions. Parses
+ * via `resolveQaSteps`/`parseQaSteps` (issue 196's `qa-steps-model.ts`).
+ */
+function qaStepsBlock(issue: SandboxIssue): string {
+  return (
+    `## QA Steps\n\n` +
+    `- Action: Open the surface issue ${issue.id} — ${issue.slug} changed.\n` +
+    `  Expected: The change described in the issue is visible.\n` +
+    `  Command: npm run dev\n\n` +
+    `- Action: Exercise the acceptance-criteria behavior by hand.\n` +
+    `  Expected: It behaves the way the issue describes.\n`
+  );
+}
+
 /** The Receipt body for each exit — the same block the Worker's final message is. */
-function receiptBody(issue: SandboxIssue, exit: WorkerExit): string {
+function receiptBody(issue: SandboxIssue, exit: WorkerExit, qaSteps: boolean): string {
   const label = `${String(issue.id).padStart(2, '0')} — ${issue.slug}`;
   switch (exit) {
     case 'completed':
@@ -142,7 +167,8 @@ function receiptBody(issue: SandboxIssue, exit: WorkerExit): string {
         `Steps:\n` +
         `1. Open the surface this issue changed.\n` +
         `2. Confirm the acceptance-criteria behavior by hand.\n\n` +
-        `The issue stays wip until you verify it and mark it done.\n`
+        `The issue stays wip until you verify it and mark it done.\n` +
+        (qaSteps ? `\n${qaStepsBlock(issue)}` : '')
       );
     case 'blocked':
       return (
@@ -154,7 +180,12 @@ function receiptBody(issue: SandboxIssue, exit: WorkerExit): string {
 }
 
 /** The full Receipt file text: declared frontmatter, then the block verbatim. */
-export function receiptText(issue: SandboxIssue, exit: WorkerExit, finished: string): string {
+export function receiptText(
+  issue: SandboxIssue,
+  exit: WorkerExit,
+  finished: string,
+  qaSteps = false,
+): string {
   const outcome =
     exit === 'completed' ? 'completed' : exit === 'needs-verification' ? 'needs-verification' : 'blocked';
   return (
@@ -164,7 +195,7 @@ export function receiptText(issue: SandboxIssue, exit: WorkerExit, finished: str
     `outcome: ${outcome}\n` +
     `finished: ${finished}\n` +
     `---\n` +
-    receiptBody(issue, exit)
+    receiptBody(issue, exit, qaSteps)
   );
 }
 
@@ -217,7 +248,7 @@ export async function runFakeWorker(task: WorkerTask): Promise<WorkerTrace> {
       : join(misbehavior === 'receipt-to-wrong-checkout' ? repo : root, 'issues', 'completions');
     receiptPath = join(completionsDir, `${issue.slug}.md`);
     await mkdir(completionsDir, { recursive: true });
-    await writeFile(receiptPath, receiptText(issue, exit, finished));
+    await writeFile(receiptPath, receiptText(issue, exit, finished, task.qaSteps ?? false));
   }
 
   // Parallel mode: a well-behaved Worker commits its work (deliverable + flip +
