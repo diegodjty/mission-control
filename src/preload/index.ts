@@ -72,6 +72,10 @@ import {
   type ChecklistStateGetRequest,
   type ChecklistStateToggleRequest,
   type ChecklistStateResult,
+  type QaSessionGetRequest,
+  type QaSessionSetStepVerdictRequest,
+  type QaSessionStartNewPassRequest,
+  type QaSessionResult,
   type IssueStatusObserveRequest,
   type IssueStatusObserveResult,
   type MainCommitRequest,
@@ -287,6 +291,15 @@ const api: MissionControlApi = {
 
   toggleChecklistItem: (req: ChecklistStateToggleRequest): Promise<ChecklistStateResult> =>
     ipcRenderer.invoke(IpcChannel.ChecklistStateToggle, req),
+
+  getQaSession: (req: QaSessionGetRequest): Promise<QaSessionResult> =>
+    ipcRenderer.invoke(IpcChannel.QaSessionGet, req),
+
+  setQaStepVerdict: (req: QaSessionSetStepVerdictRequest): Promise<QaSessionResult> =>
+    ipcRenderer.invoke(IpcChannel.QaSessionSetStepVerdict, req),
+
+  startNewQaPass: (req: QaSessionStartNewPassRequest): Promise<QaSessionResult> =>
+    ipcRenderer.invoke(IpcChannel.QaSessionStartNewPass, req),
 
   watchPlanning: (req: PlanningWatchRequest): void => {
     ipcRenderer.send(IpcChannel.PlanningWatch, req);

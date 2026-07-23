@@ -328,6 +328,25 @@ export const IpcChannel = {
    */
   ChecklistStateToggle: 'checklist:toggle-state',
   /**
+   * renderer → main (invoke): load the Guided QA session to show for a
+   * structured issue (issue 198) — resumes the latest in-progress pass from
+   * disk, or hands back a not-yet-written fresh pass. Resolves to a
+   * QaSessionResult.
+   */
+  QaSessionGet: 'qa-session:get',
+  /**
+   * renderer → main (invoke): record one step's verdict/note and persist it
+   * immediately to the current pass's durable file (issue 198). Resolves to
+   * the updated QaSessionResult.
+   */
+  QaSessionSetStepVerdict: 'qa-session:set-step-verdict',
+  /**
+   * renderer → main (invoke): start a fresh pass (re-QA) on a decided
+   * session (issue 198) — creates pass N+1, never touching pass N. Resolves
+   * to the new QaSessionResult.
+   */
+  QaSessionStartNewPass: 'qa-session:start-new-pass',
+  /**
    * renderer → main (send): watch a project's planning roots (issue 83,
    * ADR-0016) — the workbench project dir (top-level PRDs + `issues/`) and
    * the repo's `CONTEXT.md` + `docs/adr/` — for the Planning view's live
@@ -1639,6 +1658,39 @@ export interface ChecklistStateResult {
   checked: boolean[];
 }
 
+/** One QA step's recorded verdict/note, as sent over IPC (issue 198). */
+export interface QaStepResultDto {
+  verdict: 'unset' | 'pass' | 'fail';
+  note: string | null;
+}
+
+/** A Guided QA session's shape as sent over IPC (issue 198). */
+export interface QaSessionResult {
+  pass: number;
+  started: string;
+  finished: string | null;
+  results: QaStepResultDto[];
+  verdict: 'green' | 'failed' | 'in-progress';
+}
+
+export interface QaSessionGetRequest {
+  /** The Project key the QA session is scoped under. */
+  projectPath: string;
+  /** The plain `NN-slug.md` file name whose QA session this is. */
+  fileName: string;
+  /** How many steps the current `## QA Steps` parse has (for alignment). */
+  stepCount: number;
+}
+
+export interface QaSessionSetStepVerdictRequest extends QaSessionGetRequest {
+  /** The step index to update. */
+  index: number;
+  verdict?: 'unset' | 'pass' | 'fail';
+  note?: string | null;
+}
+
+export type QaSessionStartNewPassRequest = QaSessionGetRequest;
+
 /**
  * Watch (or, with an empty `workbenchDir`, stop watching) a project's planning
  * roots for the Planning view's live doc preview (issue 83, ADR-0016).
@@ -2002,6 +2054,16 @@ export interface MissionControlApi {
   getChecklistState(req: ChecklistStateGetRequest): Promise<ChecklistStateResult>;
   /** Toggle one checklist item's checked flag and persist it (issue 156). */
   toggleChecklistItem(req: ChecklistStateToggleRequest): Promise<ChecklistStateResult>;
+  /**
+   * Load the Guided QA session (issue 198) to show for a structured issue:
+   * the latest in-progress pass resumed from disk, or a fresh pass when none
+   * exists yet or the latest is decided.
+   */
+  getQaSession(req: QaSessionGetRequest): Promise<QaSessionResult>;
+  /** Record one step's verdict/note, persisted immediately (issue 198). */
+  setQaStepVerdict(req: QaSessionSetStepVerdictRequest): Promise<QaSessionResult>;
+  /** Start a fresh pass (re-QA) on a decided session (issue 198). */
+  startNewQaPass(req: QaSessionStartNewPassRequest): Promise<QaSessionResult>;
   /**
    * Start (or, with an empty `workbenchDir`, stop) the Planning view's live
    * doc watch over the project's planning roots (issue 83).
