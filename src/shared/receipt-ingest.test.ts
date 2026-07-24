@@ -107,3 +107,30 @@ describe('contentFingerprint', () => {
     expect(contentFingerprint(RECEIPT)).not.toBe(contentFingerprint(RECEIPT + ' '));
   });
 });
+
+describe('toReceiptRunLogRecord — usage frontmatter (issue 210)', () => {
+  it('populates the record usage from a Receipt that carries usage_* keys', () => {
+    const receipt = `---
+issue: 56
+slug: receipt-capture-edge
+outcome: completed
+finished: 2026-07-03T10:00:00Z
+usage_input_tokens: 100
+usage_output_tokens: 20
+usage_duration_ms: 5000
+usage_cost_usd: 0.12
+usage_tier: sonnet
+---
+
+## Completed issue 56 — receipt-capture-edge
+
+**What changed** — x.`;
+    const rec = toReceiptRunLogRecord(receipt, '56-receipt-capture-edge.md', '2026-07-23T00:00:00Z');
+    expect(rec.usage).toMatchObject({ inputTokens: 100, outputTokens: 20, durationMs: 5000, costUsd: 0.12, tier: 'sonnet' });
+  });
+
+  it('leaves usage null for a Receipt with no usage_* keys (the pre-hook shape)', () => {
+    const rec = toReceiptRunLogRecord(RECEIPT, '56-receipt-capture-edge-watch-debounce-dedupe.md', '2026-07-23T00:00:00Z');
+    expect(rec.usage).toBeNull();
+  });
+});

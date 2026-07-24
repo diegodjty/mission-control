@@ -112,3 +112,55 @@
   color: var(--fg-mute);
   text-align: center;
 }
+
+/* Per-receipt usage strip (issue 210) — tokens · duration · cost · model,
+   stamped by the AFK usage hook and read off the record's `usage`. Sits above
+   the rendered Receipt in the detail pane; absent when a Receipt carries no
+   telemetry (a drain run without the hook), so it never shows empty. */
+.receipts__usage {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.receipts__usage-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 11px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.receipts__usage-label {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-mute);
+}
+
+.receipts__usage-value {
+  font-size: 13px;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+
+.receipts__usage-value--cost {
+  color: var(--fg-teal, var(--fg));
+}
+
+.receipts__usage-tier {
+  align-self: center;
+  margin-left: auto;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-mute);
+}

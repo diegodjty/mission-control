@@ -3,7 +3,8 @@ import './Receipts.css';
 import { Badge, RichViewer, type BadgeTone } from './components';
 import type { RunLogRecord } from '../../shared/ipc-contract';
 import { receiptMarkdown } from '../../shared/receipt-markdown';
-import { formatCostUsd } from '../../shared/run-telemetry';
+import { formatCostUsd, formatTokens, type RunUsage } from '../../shared/run-telemetry';
+import { formatElapsed } from '../../shared/headless-feed';
 
 interface ReceiptsViewProps {
   /** The Project's Run log — every finished Run captured so far. */
@@ -42,6 +43,38 @@ function outcomeTone(outcome: RunLogRecord['outcome']): BadgeTone {
 /** Titles usually start with "NN — "; drop that since the row shows the id. */
 function stripId(title: string): string {
   return title.replace(/^\d+\s*[—-]\s*/, '');
+}
+
+/**
+ * The per-receipt usage strip (issue 210) — tokens · duration · cost · model,
+ * read straight off the record's `usage` (stamped by the AFK usage hook for CLI
+ * drains, or by main's in-app bridge). Renders only the stats that are present,
+ * and nothing at all when a Receipt carries no telemetry — so it never shows an
+ * empty shell on a drain run without the hook.
+ */
+function UsageStrip({ usage }: { usage: RunUsage }): JSX.Element | null {
+  const totalTokens =
+    usage.inputTokens !== null || usage.outputTokens !== null
+      ? (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0)
+      : null;
+  const stats: { label: string; value: string; cost?: boolean }[] = [];
+  if (totalTokens !== null) stats.push({ label: 'tokens', value: formatTokens(totalTokens) });
+  if (usage.durationMs !== null) stats.push({ label: 'duration', value: formatElapsed(usage.durationMs) });
+  if (usage.costUsd !== null) stats.push({ label: 'cost', value: formatCostUsd(usage.costUsd), cost: true });
+  if (stats.length === 0 && usage.tier === null) return null;
+  return (
+    <div className="receipts__usage">
+      {stats.map((s) => (
+        <div key={s.label} className="receipts__usage-stat">
+          <span className="receipts__usage-label">{s.label}</span>
+          <span className={`receipts__usage-value${s.cost ? ' receipts__usage-value--cost' : ''}`}>
+            {s.value}
+          </span>
+        </div>
+      ))}
+      {usage.tier !== null && <span className="receipts__usage-tier">{usage.tier}</span>}
+    </div>
+  );
 }
 
 /**
@@ -102,7 +135,10 @@ export function ReceiptsView({ records }: ReceiptsViewProps): JSX.Element {
         {selected === null ? (
           <p className="receipts__empty">Select a Run to read its Receipt.</p>
         ) : (
-          <RichViewer text={receiptMarkdown(selected)} />
+          <>
+            {selected.usage !== null && <UsageStrip usage={selected.usage} />}
+            <RichViewer text={receiptMarkdown(selected)} />
+          </>
         )}
       </div>
     </div>

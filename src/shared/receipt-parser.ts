@@ -27,6 +27,8 @@
  * this only turns text into structure.
  */
 import { parseCompletionBlock, type RunOutcome } from './completion-parser';
+import type { RunUsage } from './run-telemetry';
+import { parseTier } from './worker-model';
 
 /** Whether the record's `outcome` was declared in frontmatter or inferred. */
 export type OutcomeSource = 'declared' | 'inferred';
@@ -61,6 +63,16 @@ export interface ReceiptRecord {
   docDrift: string | null;
   /** The free-form report body for non-completed shapes (see completion-parser). */
   detail: string | null;
+  /**
+   * Run telemetry declared in the Receipt frontmatter (issue 210) — tokens,
+   * duration, cost, and the model tier, stamped by the AFK usage hook that runs
+   * at the drain (sub)agent's exit. `null` when no `usage_*` keys are present
+   * (a Receipt from a drain run without the hook, or a legacy Receipt). This is
+   * the ONLY channel for CLI-drain telemetry: MC never spawned the Run, so the
+   * in-app headless bridge (issue 143) never fires for it — the producer-side
+   * hook computes the numbers from the transcript and writes them here.
+   */
+  usage: RunUsage | null;
 }
 
 // A Receipt's frontmatter fence: `---` on the first line, then the raw block,
@@ -108,6 +120,53 @@ function declaredIssueId(frontmatter: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+/** Read a numeric frontmatter value; null when absent or non-finite. */
+function frontmatterNumber(frontmatter: string, key: string): number | null {
+  const raw = frontmatterValue(frontmatter, key);
+  if (raw === null) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+// The `usage_*` frontmatter keys the AFK usage hook writes (issue 210), mapped
+// to the RunUsage fields the Cost/Receipts tabs already consume. Kept
+// line-based like the other frontmatter reads so one malformed line can't take
+// down the rest (never-throw contract).
+const USAGE_KEYS: ReadonlyArray<[keyof RunUsage, string]> = [
+  ['durationMs', 'usage_duration_ms'],
+  ['inputTokens', 'usage_input_tokens'],
+  ['outputTokens', 'usage_output_tokens'],
+  ['cacheReadTokens', 'usage_cache_read'],
+  ['cacheCreationTokens', 'usage_cache_creation'],
+  ['costUsd', 'usage_cost_usd'],
+];
+
+/**
+ * The RunUsage declared in a Receipt's frontmatter, or `null` when no `usage_*`
+ * key is present at all (a hook-less or legacy Receipt). A partial set is
+ * honored — any absent numeric field stays `null`, exactly as a Pane Run's
+ * time-only telemetry does (run-telemetry.ts).
+ */
+function parseUsageFrontmatter(frontmatter: string): RunUsage | null {
+  const numbers = USAGE_KEYS.map(([field, key]) => [field, frontmatterNumber(frontmatter, key)] as const);
+  const tier = parseTier(frontmatterValue(frontmatter, 'usage_tier'));
+  const anyPresent = tier !== null || numbers.some(([, v]) => v !== null);
+  if (!anyPresent) return null;
+  const usage: RunUsage = {
+    durationMs: null,
+    inputTokens: null,
+    outputTokens: null,
+    cacheReadTokens: null,
+    cacheCreationTokens: null,
+    costUsd: null,
+    tier,
+  };
+  for (const [field, value] of numbers) {
+    (usage[field] as number | null) = value;
+  }
+  return usage;
+}
+
 /** Recover the slug from a parsed record's `NN — <slug>` descriptor, if any. */
 function slugFromDescriptor(issue: string | null): string | null {
   if (!issue) return null;
@@ -146,7 +205,9 @@ export function parseReceipt(input: unknown): ReceiptRecord {
 
   if (outcome === null) {
     // Fence present but no valid outcome declared — infer from the body, while
-    // keeping any readable declared identity fields (they are still facts).
+    // keeping any readable declared identity fields (they are still facts). A
+    // usage block, if the hook wrote one, is still a declared fact even when
+    // the outcome line is missing/broken.
     const fallback = inferredRecord(split.body);
     const mergedId = issueId ?? fallback.issueId;
     const mergedSlug = slug ?? fallback.slug;
@@ -156,6 +217,7 @@ export function parseReceipt(input: unknown): ReceiptRecord {
       slug: mergedSlug,
       finished,
       issue: descriptor(mergedId, mergedSlug) ?? fallback.issue,
+      usage: parseUsageFrontmatter(split.frontmatter),
     };
   }
 
@@ -178,10 +240,16 @@ export function parseReceipt(input: unknown): ReceiptRecord {
     bookkeeping: block.bookkeeping,
     docDrift: block.docDrift,
     detail: block.detail,
+    usage: parseUsageFrontmatter(split.frontmatter),
   };
 }
 
-/** A record built entirely by the fallback block parser over the given body. */
+/**
+ * A record built entirely by the fallback block parser over the given body.
+ * A body-only parse has no frontmatter, so there is no declared usage to read —
+ * `usage` stays `null` (main's headless bridge may still patch it later for an
+ * in-app Run).
+ */
 function inferredRecord(body: string): ReceiptRecord {
   const block = parseCompletionBlock(body);
   const slug = slugFromDescriptor(block.issue);
@@ -198,5 +266,6 @@ function inferredRecord(body: string): ReceiptRecord {
     bookkeeping: block.bookkeeping,
     docDrift: block.docDrift,
     detail: block.detail,
+    usage: null,
   };
 }

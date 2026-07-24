@@ -114,9 +114,12 @@ export function toReceiptRunLogRecord(
     capturedAt,
     slug: stem,
     title: null,
-    // A Receipt never carries telemetry (producer-owned, ADR-0013) — main
-    // patches this in once the Run's process exits and reports usage
-    // (issue 143).
-    usage: null,
+    // Telemetry channel (issue 210, ADR-0013 amendment): a Receipt from a CLI
+    // drain now carries producer-computed usage in its frontmatter (the AFK
+    // usage hook writes it from the transcript, since MC never spawned the Run
+    // and the issue-143 in-app bridge can't fire for it). `null` when the hook
+    // didn't run — an in-app headless Run then still gets its usage patched in
+    // by main once its process exits (the bridge, unchanged).
+    usage: parsed.usage,
   };
 }

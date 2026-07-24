@@ -250,3 +250,85 @@ body`;
     expect(rec.outcomeSource).toBe('declared');
   });
 });
+
+describe('parseReceipt — usage frontmatter (issue 210)', () => {
+  const WITH_USAGE = `---
+issue: 210
+slug: receipt-usage-frontmatter
+outcome: completed
+finished: 2026-07-23T19:50:54Z
+usage_input_tokens: 812340
+usage_output_tokens: 41220
+usage_cache_read: 3200000
+usage_cache_creation: 190000
+usage_duration_ms: 734000
+usage_tier: opus
+usage_cost_usd: 5.87
+---
+
+${COMPLETED_BLOCK}`;
+
+  it('parses every usage_* key into the RunUsage shape', () => {
+    const rec = parseReceipt(WITH_USAGE);
+    expect(rec.usage).toEqual({
+      durationMs: 734000,
+      inputTokens: 812340,
+      outputTokens: 41220,
+      cacheReadTokens: 3200000,
+      cacheCreationTokens: 190000,
+      costUsd: 5.87,
+      tier: 'opus',
+    });
+  });
+
+  it('leaves usage null when no usage_* key is present (hook-less / legacy Receipt)', () => {
+    expect(parseReceipt(COMPLETED_RECEIPT).usage).toBeNull();
+  });
+
+  it('honors a partial usage block — absent numeric fields stay null', () => {
+    const partial = `---
+issue: 210
+outcome: completed
+usage_cost_usd: 0.42
+usage_tier: haiku
+---
+
+body`;
+    expect(parseReceipt(partial).usage).toEqual({
+      durationMs: null,
+      inputTokens: null,
+      outputTokens: null,
+      cacheReadTokens: null,
+      cacheCreationTokens: null,
+      costUsd: 0.42,
+      tier: 'haiku',
+    });
+  });
+
+  it('drops a non-numeric usage value rather than throwing, keeping the rest', () => {
+    const junk = `---
+issue: 210
+outcome: completed
+usage_cost_usd: not-a-number
+usage_input_tokens: 100
+---
+
+body`;
+    const usage = parseReceipt(junk).usage;
+    expect(usage?.costUsd).toBeNull();
+    expect(usage?.inputTokens).toBe(100);
+  });
+
+  it('ignores an unknown tier value (usage_tier stays null)', () => {
+    const rec = parseReceipt(`---
+issue: 210
+outcome: completed
+usage_input_tokens: 5
+usage_tier: gpt-5
+---
+
+body`);
+    expect(rec.usage?.tier).toBeNull();
+    expect(rec.usage?.inputTokens).toBe(5);
+  });
+});
